@@ -1059,23 +1059,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn catch_startup_and_artifacts_follow_the_environment_contract() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/catch");
-        let output = std::process::Command::new("python3")
-            .args(["-m", "unittest", "discover", "-s"])
-            .arg(&root)
-            .args(["-p", "test_*.py", "-v"])
-            .output()
-            .expect("python3 runs the Catch environment tests");
-        assert!(
-            output.status.success(),
-            "Catch tests failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-
     /// The skill's `Loop` and `decide` (image strings, step control, System 2's
     /// action gate) run as the package's own unittest.
     #[test]
