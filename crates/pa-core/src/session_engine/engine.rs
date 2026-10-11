@@ -177,8 +177,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let mut session_manager = config
         .session_manager
         .unwrap_or_else(|| SessionManager::in_memory(&cwd));
-    let owns_resume_settings =
-        session_manager.is_persisted() || config.conversation_log_path.is_none();
     let conversation_log = {
         let session = &session_manager;
         session
@@ -570,10 +568,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         if existing_messages.is_empty() {
             session.append_model_change(&model.provider, &model.id)?;
             session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
-        } else if owns_resume_settings && !has_thinking_entry {
+        } else if !has_thinking_entry {
             session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
         }
-        if existing_messages.is_empty() || (owns_resume_settings && !has_service_tier_entry) {
+        if existing_messages.is_empty() || !has_service_tier_entry {
             session.append_service_tier_change(Some(service_tier_preference))?;
         }
     }
