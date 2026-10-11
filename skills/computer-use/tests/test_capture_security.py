@@ -100,6 +100,22 @@ class WindowScopedCaptureTests(_CaptureTestCase):
         self.assertEqual(argv[:5], [str(self.tool), "-x", "-o", "-R", "10,20,400,300"])
         self.assertEqual(Path(argv[5]).parent, self.shots_dir)
 
+    def test_window_capture_with_zero_size_still_captures_by_id(self) -> None:
+        # the rounded live bounds of a minimized or hidden window can be
+        # zero; the window-id capture never uses size, so it must not be
+        # rejected as a bad argument
+        recorder = self.capture_run()
+        result = capture._screenshot_window((10, 20), (0, 0), window_id=4321)
+        argv = recorder.call_args[0][0]
+        self.assertEqual(argv[1:5], ["-x", "-o", "-l", "4321"])
+        self.assertEqual((result["width"], result["height"]), (400, 300))
+
+    def test_region_capture_with_zero_size_is_still_rejected(self) -> None:
+        with self.assertRaises(ComputerUseError) as caught:
+            capture._screenshot_window((10, 20), (0, 0))
+        self.assertEqual(caught.exception.code, "INVALID_ARGUMENT")
+        self.assertIn("positive values", str(caught.exception))
+
     def test_bad_window_id_is_invalid_argument(self) -> None:
         for bad in ("4321", 1.5, True):
             with self.subTest(bad=bad), self.assertRaises(ComputerUseError) as caught:

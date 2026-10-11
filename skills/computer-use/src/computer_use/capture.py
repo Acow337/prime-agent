@@ -297,14 +297,21 @@ def _screenshot_window(
     to the model. Returns {"path": str, "width": int, "height": int} — the
     PNG's own pixel dimensions, which on Retina captures are 2x the window's
     logical bounds. Raises ComputerUseError INVALID_ARGUMENT for a bad region
-    or window id, APP_NOT_RUNNING when screencapture reports that the target
+    (a region capture needs a positive size; a window-id capture never uses
+    the size, so the rounded-to-zero bounds of a minimized window are
+    accepted there) or window id, APP_NOT_RUNNING when screencapture reports
+    that the target
     window is gone, and TRANSPORT_ERROR for any other failure, including an
     unavailable or symlinked screenshot path, an unavailable screencapture
     binary, and an invalid or mismatched capture.
     """
     x, y = _pair(origin, "origin")
     width, height = _pair(size, "size")
-    if width < 1 or height < 1:
+    # the window-id capture is scoped by screencapture -l and never uses the
+    # size, so a zero size - the rounded live bounds of a minimized or hidden
+    # window - must not be rejected here; only a region capture needs a
+    # positive region to capture at all
+    if window_id is None and (width < 1 or height < 1):
         raise ComputerUseError(
             "INVALID_ARGUMENT", "size must be a (width, height) pair with positive values", {"size": size}
         )
