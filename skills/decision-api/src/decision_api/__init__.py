@@ -382,6 +382,9 @@ class Loop:
         if images:
             request["images"] = list(images)
         started = time.perf_counter()
+        # Open the parent's decision slot before the request: a reply that
+        # lands before the first poll would be consumed and dropped.
+        await rlm.host_request("decision_api.decision", {"name": name})
         await agent_message.send(
             json.dumps(request), receiver_role="child", receiver_name=name
         )

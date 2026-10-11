@@ -171,7 +171,9 @@ async fn decision_api_real_runtime_loop_routes_decisions_and_child_delivery_then
         return;
     };
     let events = Arc::new(Mutex::new(Vec::new()));
-    let replies = Arc::new(Mutex::new(std::collections::HashMap::<String, Value>::new()));
+    let replies = Arc::new(Mutex::new(
+        std::collections::HashMap::<String, Option<Value>>::new(),
+    ));
     let mut handlers = HostRequestHandlers::new();
     for (name, kind) in [
         ("rlm.run", FixtureRequest::Spawn),
@@ -203,14 +205,15 @@ async fn decision_api_real_runtime_loop_routes_decisions_and_child_delivery_then
                         if decision_state.get("goal").is_none() {
                             decision_state["goal"] = json!("follow fixture strategy");
                         }
-                        replies.lock().unwrap().insert(
-                            name.to_string(),
-                            json!({
+                        // The parent's route stores a reply only in an
+                        // existing slot (get_mut); the loop's poll creates it.
+                        if let Some(slot) = replies.lock().unwrap().get_mut(name) {
+                            *slot = Some(json!({
                                 "type":"decision_api.decision","seq":message["seq"],
                                 "model":"synthetic/child",
                                 "decision":{"choice":"left","confidence":0.9,"probabilities":{"left":0.9,"right":0.1}}
-                            }),
-                        );
+                            }));
+                        }
                         Ok(json!({"deliveryStatus":"sent"}))
                     }
                     FixtureRequest::Decision => {
@@ -219,11 +222,14 @@ async fn decision_api_real_runtime_loop_routes_decisions_and_child_delivery_then
                             replies.lock().unwrap().remove(&name);
                             return Ok(Value::Null);
                         }
+                        // The parent's poll handler: create the slot on
+                        // first poll, take (drain) the reply it holds.
                         Ok(replies
                             .lock()
                             .unwrap()
-                            .get(&name)
-                            .cloned()
+                            .entry(name)
+                            .or_default()
+                            .take()
                             .unwrap_or(Value::Null))
                     }
                     FixtureRequest::Delete => Ok(json!({"subagent":{

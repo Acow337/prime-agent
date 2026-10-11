@@ -175,7 +175,7 @@ class LoopTests(unittest.TestCase):
 
     def test_the_loop_spawns_one_child_and_awaits_its_replies(self):
         taken = []
-        replies = {}
+        slots = {}
         spawns = []
 
         async def stub_spawn(prompt, *, name, kind=None, model=None, thinking=None):
@@ -185,21 +185,25 @@ class LoopTests(unittest.TestCase):
         async def stub_send(text, *, receiver_role, receiver_name):
             message = json.loads(text)
             sent.append({"message": message, "role": receiver_role, "name": receiver_name})
-            # The child's answer routes back through the decision slot.
-            replies[receiver_name] = {
-                "type": "decision_api.decision",
-                "seq": message["seq"],
-                "model": "fixture/model",
-                "decision": {"choice": "left", "confidence": 0.9},
-            }
+            # The parent's route stores a reply only in an existing slot.
+            if receiver_name in slots:
+                slots[receiver_name] = {
+                    "type": "decision_api.decision",
+                    "seq": message["seq"],
+                    "model": "fixture/model",
+                    "decision": {"choice": "left", "confidence": 0.9},
+                }
 
         async def stub_host_request(kind, payload):
             host_calls.append((kind, payload))
             if kind == "decision_api.decision":
                 if payload.get("close"):
-                    replies.pop(payload["name"], None)
+                    slots.pop(payload["name"], None)
                     return None
-                return replies.get(payload["name"])
+                # The poll creates the slot, then drains the reply it holds.
+                reply = slots.setdefault(payload["name"], None)
+                slots[payload["name"]] = None
+                return reply
 
         def observe():
             observe.n += 1
