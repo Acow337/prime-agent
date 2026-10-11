@@ -2212,42 +2212,83 @@ mod shutdown_admission_tests {
             "the accept-exit flag did not publish synchronously"
         );
 
-        // Fence readiness WITNESS: the fence notifies once its timers
-        // and boot passes are joined and its gate acquire is next, so
-        // the pending assertion below runs against a fence that is
-        // PROVABLY at the gate (a fence missing the gate wait still
-        // notifies - and completes - so the probe catches the
-        // regression regardless of scheduling).
+        // The fence's stop-gate step runs FIRST: with the admitted
+        // stop holding the gate across its persist, the fence must WAIT
+        // for that persist - it may not abort the timer registry's
+        // tasks (which would cancel the mid-await tombstone write) nor
+        // reach any later step while the persist is in flight. The
+        // fence-at-gate witness must NOT fire while the descriptor is
+        // held (RED with a gate-last fence order: the registry abort
+        // frees the gate early and the witness fires).
         let at_gate = supervisor.fence_at_gate.notified();
-        let fenced = {
+        tokio::pin!(at_gate);
+        // The RAW fence future, pinned and driven by MANUAL polls (no
+        // spawn: a JoinHandle poll only waits for completion, it never
+        // runs the fence itself). The first poll executes the fence's
+        // first step NOW.
+        let mut fence = {
             let supervisor = Arc::clone(&supervisor);
             let mut no_boot_tasks = Vec::new();
-            tokio::spawn(async move {
+            std::pin::pin!(async move {
                 supervisor.lease_loss_fence(&mut no_boot_tasks).await;
             })
         };
-        tokio::time::timeout(std::time::Duration::from_secs(5), at_gate)
-            .await
-            .expect("the lease-loss fence never reached its stop-gate step");
-        tokio::task::yield_now().await;
-        // With the gate held by the admitted stop, the fence CANNOT
-        // complete (its final step acquires the same gate, which the
-        // descriptor hold keeps occupied until the persist ends).
+        let mut fence_cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(
-            !fenced.is_finished(),
+            matches!(
+                std::future::Future::poll(fence.as_mut(), &mut fence_cx),
+                std::task::Poll::Pending
+            ),
             "the lease-loss fence completed while a gated stop persist was still in flight"
         );
-        // Releasing the descriptor lets the persist finish and the gate
-        // drop; the fence then completes.
+        // The witness, polled right after: a gate-FIRST fence parked
+        // before its gate step, so the witness stays Pending; the bad
+        // gate-LAST order (empty registry, no aborts/joins) reaches its
+        // notify on that same first poll and the witness returns Ready -
+        // the deterministic RED. No clock, no scheduling assumption.
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(
+                std::future::Future::poll(at_gate.as_mut(), &mut cx),
+                std::task::Poll::Pending
+            ),
+            "the fence passed its stop-gate step while an admitted persist was in flight"
+        );
+        // Releasing the descriptor lets the admitted persist FINISH ITS
+        // TOMBSTONE; the gate drops, the fence (re-polled by the await
+        // below with the real task waker) acquires it, aborts the
+        // parked timers, joins, notifies the witness, and completes.
         drop(descriptor);
+        // The fence was parked with a NOOP waker, so only THIS task can
+        // re-drive it: the select polls the raw fence with the real
+        // task waker - it acquires the freed gate, aborts the parked
+        // timers, joins, notifies the witness, and completes.
+        tokio::select! {
+            () = &mut fence => {}
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                panic!("the lease-loss fence never completed")
+            }
+        }
+        // The completed fence notified the witness on its way: the
+        // pinned witness must now resolve on a single poll.
+        let mut witness_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(
+                std::future::Future::poll(at_gate.as_mut(), &mut witness_cx),
+                std::task::Poll::Ready(())
+            ),
+            "the fence completed without notifying its stop-gate witness"
+        );
         tokio::time::timeout(std::time::Duration::from_secs(5), admitted_stop)
             .await
             .expect("the admitted stop never finished")
             .expect("the admitted stop panicked");
-        tokio::time::timeout(std::time::Duration::from_secs(5), fenced)
-            .await
-            .expect("the lease-loss fence never completed")
-            .expect("the fence panicked");
+        // The admitted persist was NOT cancelled by the fence: its
+        // durable tombstone landed.
+        assert!(
+            resident.descriptor.lock().await.stop_requested_at.is_some(),
+            "the admitted stop's tombstone never landed"
+        );
 
         // A stop transition after the flip refuses at its final gate.
         let refused = supervisor.stop_worker(&resident).await;

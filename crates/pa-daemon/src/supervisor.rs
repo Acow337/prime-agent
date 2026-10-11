@@ -391,6 +391,15 @@ impl Supervisor {
     /// gate (the flags are already up).
     #[cfg(unix)]
     async fn lease_loss_fence(&self, boot_tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
+        // The stop gate runs FIRST: a stop transition that already
+        // passed its final recheck holds this gate across its durable
+        // tombstone persist - aborting its timer task before the gate
+        // would CANCEL the mid-await persist and leave the tombstone
+        // unwritten (an admitted stop's durable intent must land before
+        // the lease releases). Waiting for the gate lets the in-flight
+        // persist complete; every stop attempt that starts after the
+        // flags went up is refused at the gate's recheck.
+        let admission = self.stop_admission.lock().await;
         let timers: Vec<_> = self
             .owner_cleanup_timers
             .lock()
@@ -411,7 +420,7 @@ impl Supervisor {
         }
         #[cfg(all(test, unix))]
         self.fence_at_gate.notify_waiters();
-        drop(self.stop_admission.lock().await);
+        drop(admission);
     }
 
     /// Bind the client socket, adopt or relaunch persisted workers, serve.
