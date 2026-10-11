@@ -25,6 +25,8 @@ use serde_json::Value;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// The error body's bounded excerpt.
 const ERROR_BODY_CHARS: usize = 500;
+/// One reply body's byte bound (decision envelopes are a few KB).
+const MAX_REPLY_BYTES: usize = 1024 * 1024;
 
 pub struct SystemOneProvider;
 
@@ -89,7 +91,7 @@ async fn serve_systemone(
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::CONTENT_TYPE,
-        "application/json".parse().unwrap(),
+        reqwest::header::HeaderValue::from_static("application/json"),
     );
     if let Some(api_key) = options.and_then(|options| options.api_key.as_deref()) {
         if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")) {
@@ -109,29 +111,59 @@ async fn serve_systemone(
         }
     }
     let url = format!("{}/systemone", model.base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .default_headers(headers)
         .build()
-        .expect("systemone client builds");
+    {
+        Ok(client) => client,
+        Err(error) => {
+            writer.end(Some(error_message(
+                model,
+                &format!("the systemone client could not be built: {error}"),
+            )));
+            return;
+        }
+    };
     let response = client.post(&url).json(&request).send().await;
     let message = match response {
         Ok(response) => {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            if status.is_success() {
-                envelope_message(model, body)
-            } else {
-                let detail: String = body.chars().take(ERROR_BODY_CHARS).collect();
-                error_message(
-                    model,
-                    &format!("systemone returned HTTP {status}: {detail}"),
-                )
+            match read_reply(response).await {
+                Ok(body) => {
+                    if status.is_success() {
+                        envelope_message(model, body)
+                    } else {
+                        let detail: String = body.chars().take(ERROR_BODY_CHARS).collect();
+                        error_message(
+                            model,
+                            &format!("systemone returned HTTP {status}: {detail}"),
+                        )
+                    }
+                }
+                Err(error) => error_message(model, &error),
             }
         }
         Err(error) => error_message(model, &format!("the systemone request failed: {error}")),
     };
     writer.end(Some(message));
+}
+
+/// The reply body, read chunk-wise and bounded by [`MAX_REPLY_BYTES`]; a
+/// read failure surfaces as an error instead of an empty success body.
+async fn read_reply(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("the systemone reply could not be read: {error}"))?
+    {
+        if body.len() + chunk.len() > MAX_REPLY_BYTES {
+            return Err(format!("systemone reply exceeded {MAX_REPLY_BYTES} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// The reply envelope as the final assistant message.
@@ -375,5 +407,23 @@ mod tests {
         let error = message.error_message.unwrap();
         assert!(error.contains("HTTP 404"), "{error}");
         assert!(error.contains("no such model"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_over_the_byte_cap_ends_the_stream_as_an_error() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut envelope = json!({
+            "model": "cloudflare/clef",
+            "answers": {"action": {"choice": "left", "confidence": 0.9}}
+        });
+        envelope["pad"] = Value::String("x".repeat(MAX_REPLY_BYTES + 1));
+        let base = serve(200, envelope, std::sync::Arc::clone(&seen)).await;
+        let model = fixture_model(&base);
+        let stream =
+            SystemOneProvider.stream(&model, &decision_context(&json!({"state": {}})), None);
+        let message = stream.result().await;
+        assert_eq!(message.stop_reason, StopReason::Error);
+        let error = message.error_message.unwrap();
+        assert!(error.contains("exceeded"), "{error}");
     }
 }
