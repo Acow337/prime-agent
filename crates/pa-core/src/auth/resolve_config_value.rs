@@ -125,6 +125,15 @@ fn hidden_spawn(_command: &str) -> Result<Option<std::process::Output>> {
 mod tests {
     use super::*;
 
+    /// Test-scoped environment: the var is removed on every exit path,
+    /// so process-wide env state never leaks into later tests.
+    struct ScopedEnvVar(&'static str);
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
     /// The stored-key comparison resolves before comparing: a `!command`
     /// or env-var name matches the value it served; the raw string never
     /// leaks into the comparison.
@@ -146,6 +155,7 @@ mod tests {
             !stored_api_key_matches_served("!echo sk-resolved", Some("!echo sk-resolved")),
             "the raw command string never matches the resolved served value"
         );
+        let _env = ScopedEnvVar("TEST_RESOLVE_KEY_SERVED");
         std::env::set_var("TEST_RESOLVE_KEY_SERVED", "sk-env");
         assert!(
             stored_api_key_matches_served("TEST_RESOLVE_KEY_SERVED", Some("sk-env")),

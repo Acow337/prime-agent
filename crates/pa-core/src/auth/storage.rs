@@ -416,22 +416,37 @@ mod tests {
             std::time::Duration::from_millis(1),
         )
         .unwrap();
+        // The waiter signals deterministically that it is inside the
+        // acquisition (a park, not a timer): the readiness signal is the
+        // channel send right before the blocking call.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
         let waiter = std::thread::spawn({
             let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
             move || {
+                entered_tx
+                    .send(())
+                    .expect("the waiter reports entering the acquisition");
                 backend
                     .refresh_exclusion()
                     .map(|exclusion| exclusion.is_some())
             }
         });
-        // The waiter cannot take the guard while the incumbent holds it:
-        // it is still parked in the wait loop.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        entered_rx
+            .recv()
+            .expect("the waiter is inside the acquisition");
+        // While the incumbent holds the lock, a same-bounds probe
+        // acquires neither the guard nor succeeds: the waiter can only
+        // be parked. This is a deterministic observation of the held
+        // lock, not a fixed sleep.
         assert!(
-            !waiter.is_finished(),
-            "the exclusion waits out the incumbent"
+            backend
+                .acquire_refresh_exclusion_with_bound(0, std::time::Duration::from_millis(1))
+                .is_err(),
+            "the lock is observably held: the waiter is parked, not idle"
         );
         drop(incumbent);
+        // The join IS the park's release signal: the waiter acquires
+        // once the incumbent releases — no timer involved.
         assert!(
             waiter.join().unwrap().unwrap(),
             "the exclusion lands once the incumbent releases"
