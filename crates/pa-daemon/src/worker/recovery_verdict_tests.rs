@@ -339,3 +339,28 @@ async fn shutdown_ack_has_already_settled_a_user_aborted_parked_queue() {
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
+
+/// The shutdown close still acknowledges when the final verdict cannot
+/// persist (a journal that cannot be written): the close must complete —
+/// the supervisor owns the recovery. (Restored from Kevin Thomas's original
+/// `shutdown_does_not_ack_when_its_final_verdict_cannot_persist`, with the
+/// assertion flipped to the ruled ACK-on-failed-write behavior.)
+#[tokio::test]
+async fn shutdown_still_acks_when_its_final_verdict_cannot_persist() {
+    let worker = created_worker_with_journal().await;
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    let bad_path = fixture_dir.join("blocked-journal");
+    std::fs::write(&bad_path, b"").unwrap();
+    let blocked_journal = WorkerRecoveryJournal::open(&bad_path).unwrap();
+    std::fs::remove_file(&bad_path).unwrap();
+    std::fs::create_dir(&bad_path).unwrap();
+    *worker.recovery.lock().unwrap() = Some(blocked_journal);
+    let reply = worker
+        .handle_shutdown(&json!({ "daemonShutdown": true }))
+        .await;
+    assert!(
+        reply.success,
+        "the lost verdict must not wedge the close; the boot owns the recovery"
+    );
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}

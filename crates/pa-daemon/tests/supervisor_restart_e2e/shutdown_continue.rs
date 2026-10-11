@@ -589,3 +589,181 @@ fn a_revived_user_parked_queue_stays_parked() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// A daemon-wide shutdown whose verdict write is lost with the supervisor
+/// must never archive the session: the shutdown persists the RESUMABLE stop
+/// tombstone, so the boot finishes the stop without the kill variant's
+/// archive cascade — the session stays on disk, unarchived and reopenable.
+#[test]
+fn a_lost_shutdown_verdict_never_archives_the_session() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+    let mut daemon = spawn_supervisor(&socket, &agent_dir);
+    wait_socket_ready(&socket);
+    let (mut client, _hello) = Client::connect(&socket);
+
+    let script_busy = dir.path().join("lost-verdict.json");
+    std::fs::write(
+        &script_busy,
+        json!({ "responses": [
+            {
+                "text": "busy-turn",
+                "toolCalls": [
+                    { "toolCallId": "call-1", "toolName": "bash", "args": {}, "result": "listed", "delayMs": 5_000 }
+                ]
+            },
+            { "text": "continued-turn", "delayMs": 10 },
+        ] })
+        .to_string(),
+    )
+    .expect("write script");
+    client.send_command(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": script_busy.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let session_file = created["data"]["sessionFile"]
+        .as_str()
+        .expect("session file")
+        .to_string();
+    client.send_command(
+        "p1",
+        &json!({ "type": "prompt", "activeSessionId": session, "message": "go" }),
+    );
+    assert_eq!(client.read_response("p1")["success"], true, "prompt failed");
+    // Mid-turn is durable evidence, never stream pacing: the journal's
+    // admission `busy: true` record proves the turn the shutdown will
+    // interrupt, whatever the runner's pacing does to the stream.
+    wait_for_busy_journal_evidence(&agent_dir, &socket, &session);
+
+    // SIGSTOP freezes the worker's command pump: the routed shutdown is
+    // never answered and no verdict is written.
+    let worker_pids = child_pids_of(daemon.child.id());
+    assert_eq!(
+        worker_pids.len(),
+        1,
+        "one session worker under the supervisor"
+    );
+    let stopped = std::process::Command::new("kill")
+        .arg("-STOP")
+        .arg(worker_pids[0].to_string())
+        .status()
+        .expect("SIGSTOP the worker");
+    assert!(stopped.success(), "SIGSTOP must reach the worker");
+
+    // The daemon-wide shutdown: its reply precedes the stop pass, which
+    // persists the stop tombstone before routing the shutdown into the
+    // frozen pump.
+    client.send_command("sd", &json!({ "type": "shutdown" }));
+    let shutdown = client.read_response("sd");
+    assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
+    let descriptor_path =
+        pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket).join(format!("{session}.json"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let tombstoned = std::fs::read_to_string(&descriptor_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+            .is_some_and(|descriptor| descriptor["stopRequestedAt"].is_string());
+        if tombstoned {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the shutdown never persisted its stop tombstone; log: {}",
+            std::fs::read_to_string(pa_daemon::paths::daemon_log_path(&socket, &agent_dir))
+                .unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The stop pass is now waiting out the frozen worker's 30s route
+    // window; kill -9 the supervisor inside it (an installer/launchd stop
+    // timeout), then the worker — its SIGKILL writes no verdict.
+    daemon.child.kill().expect("kill supervisor");
+    daemon.child.wait().expect("reap supervisor");
+    drop(client);
+    std::process::Command::new("kill")
+        .arg("-9")
+        .arg(worker_pids[0].to_string())
+        .status()
+        .expect("kill the frozen worker");
+
+    // The next boot adopts the stop tombstone and finishes the stop: the
+    // descriptor's removal is the adoption's observable end.
+    let mut daemon2 = spawn_supervisor(&socket, &agent_dir);
+    wait_socket_ready(&socket);
+    let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if !descriptor_path.exists() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the tombstoned stop never finished; log: {}",
+            std::fs::read_to_string(&log_path).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // THE REGRESSION: the lost verdict must not archive the session.
+    assert_ne!(
+        session_state(Path::new(&session_file)),
+        "archived",
+        "a lost shutdown verdict archived the session; log: {}",
+        std::fs::read_to_string(&log_path).unwrap_or_default()
+    );
+
+    // The kept session is resumable: a client can reopen it.
+    let (mut client2, _hello) = Client::connect(&socket);
+    client2.send_command(
+        "c2",
+        &json!({
+            "type": "create",
+            "sessionPath": session_file,
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": script_busy.to_string_lossy(),
+            },
+        }),
+    );
+    let reopened = client2.read_response("c2");
+    assert_eq!(
+        reopened["success"], true,
+        "the kept session must reopen: {reopened}"
+    );
+
+    client2.send_command("sd2", &json!({ "type": "shutdown" }));
+    assert_eq!(
+        client2.read_response("sd2")["success"],
+        true,
+        "shutdown failed"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon2.child.try_wait().expect("try wait").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "restarted supervisor never exited"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
