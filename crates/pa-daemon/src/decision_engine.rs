@@ -171,12 +171,6 @@ impl DecisionEngine {
         })
     }
 
-    /// The child's resolved model label (the transcript rows).
-    fn model_label(&self) -> String {
-        pa_core::session_engine::decision_api::decision_model_selector(&self.cwd, &self.agent_dir)
-            .unwrap_or_default()
-    }
-
     /// The transcript row pair for an answer: the assistant update and the
     /// final message.
     fn answer_rows(provider: &str, model: &str, text: &str) -> (EngineEvent, EngineEvent) {
@@ -318,17 +312,21 @@ impl SessionEngine for DecisionEngine {
         if let Some(body) = body.as_object_mut() {
             body.remove("seq");
         }
-        let model_label = self.model_label();
-        let (provider, model) = model_label.split_once('/').map_or_else(
-            || ("decision".to_string(), "system-1".to_string()),
-            |(provider, model)| (provider.to_string(), model.to_string()),
-        );
         match self.serve(body) {
             Ok(envelope) => {
+                let model_label = envelope.get("model").cloned().unwrap_or_default();
+                let (provider, model) = model_label
+                    .as_str()
+                    .unwrap_or_default()
+                    .split_once('/')
+                    .map_or_else(
+                        || ("decision".to_string(), "system-1".to_string()),
+                        |(provider, model)| (provider.to_string(), model.to_string()),
+                    );
                 let reply = json!({
                     "type": "decision_api.decision",
                     "seq": seq,
-                    "model": envelope.get("model").cloned().unwrap_or(json!(model_label)),
+                    "model": model_label,
                     "decision": envelope["answers"]["action"].clone(),
                 });
                 if let Err(error) = self.send_reply(&reply) {
