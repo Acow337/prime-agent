@@ -424,17 +424,60 @@ impl LockDir {
     /// surfaces `WouldBlock` while a live or not-yet-stale lock holds it.
     /// Restore a directory this judge parked aside but never observed
     /// stale. The restore never overwrites an occupant: on Unix a rename
-    /// onto an existing empty directory replaces it, so the path must be
-    /// absent before the restore. The path's current occupant is itself
-    /// short-lived (a live lock): retry while it releases; if
+    /// onto an existing empty directory replaces it, so the move must be
+    /// conditional on the path being absent. The path's current occupant
+    /// is itself short-lived (a live lock): retry while it releases; if
     /// restoration stays impossible, the parked directory stays put as
     /// residue — a live lock is never deleted and never displaced onto.
     fn restore_or_park(aside: &Path, path: &Path) {
         for _ in 0..25 {
-            if !path.exists() && fs::rename(aside, path).is_ok() {
+            if Self::restore_once_if_absent(aside, path) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// One atomic-or-refused restore attempt: the parked directory moves
+    /// to `path` only when `path` is absent — never replacing a rival
+    /// that re-locked the canonical path between a check and the move.
+    /// On Linux the move is `renameat2` with `RENAME_NOREPLACE` (no
+    /// check-then-rename window at all). Elsewhere the best available
+    /// approximation is the two-step check-then-rename; POSIX rename
+    /// only replaces EMPTY directories, so an owned occupant (a directory
+    /// holding its `owner` file) still refuses the overwrite natively.
+    fn restore_once_if_absent(aside: &Path, path: &Path) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(aside_name) = std::ffi::CString::new(aside.as_os_str().as_encoded_bytes())
+            else {
+                return false;
+            };
+            let Ok(path_name) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+                return false;
+            };
+            // Raw syscall: the wrapper is absent from older glibc.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    aside_name.as_ptr(),
+                    libc::AT_FDCWD,
+                    path_name.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            if rc == 0 {
+                return true;
+            }
+            // EEXIST: the path holds an occupant — the retry loop
+            // waits it out. ENOENT: the parked directory vanished —
+            // nothing to restore either way.
+            false
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            !path.exists() && fs::rename(aside, path).is_ok()
         }
     }
 
@@ -632,6 +675,46 @@ mod tests {
 
     fn lock_of(file: &Path) -> PathBuf {
         LockDir::path_for(file)
+    }
+
+    /// The one-shot restore refuses an occupied path atomically: even a
+    /// freshly created EMPTY lock directory (the exact shape POSIX rename
+    /// would replace in the check-to-rename window) survives the restore
+    /// attempt untouched — the no-replace move cannot clobber it.
+    #[test]
+    fn a_one_shot_restore_refuses_an_empty_occupant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_of(&dir.path().join("auth.json"));
+        let aside = path.with_extension("stale-parked");
+        // The parked directory this judge must restore.
+        std::fs::create_dir(&aside).unwrap();
+        std::fs::write(aside.join("owner"), "999999 tok").unwrap();
+        // The rival's lock: a bare EMPTY directory at the canonical
+        // path, the exact occupant shape the TOCTOU window could
+        // replace.
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            !LockDir::restore_once_if_absent(&aside, &path),
+            "the restore refuses while the rival holds the path"
+        );
+        assert!(
+            path.read_dir().unwrap().next().is_none(),
+            "the rival's empty lock directory is untouched"
+        );
+        assert!(
+            aside.join("owner").exists(),
+            "the parked directory stays parked"
+        );
+        // The rival releases: the restore lands.
+        std::fs::remove_dir(&path).unwrap();
+        assert!(
+            LockDir::restore_once_if_absent(&aside, &path),
+            "the restore lands once the path frees"
+        );
+        assert!(
+            fs::read_to_string(path.join("owner")).is_ok_and(|owner| owner == "999999 tok"),
+            "the parked directory now owns the canonical path"
+        );
     }
 
     /// The restore never overwrites an occupant: a Unix rename onto an
