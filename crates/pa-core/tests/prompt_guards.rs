@@ -76,6 +76,26 @@ fn static_layers_contain_no_dynamic_content() {
     }
 }
 
+/// The Decision API is settings-gated: only its bundled skill documents it, so
+/// the always-on static layers must not mention it.
+#[test]
+fn static_layers_leave_the_decision_api_to_its_gated_skill() {
+    for (name, text) in [
+        ("core", CORE_LAYER),
+        ("usage", USAGE_LAYER),
+        ("opinionated", OPINIONATED_LAYER),
+        ("model-prompts", MODEL_PROMPTS_TOML),
+    ] {
+        for marker in ["kind=\"decision\"", "decisionApi", "Decision API"] {
+            assert!(
+                !text.contains(marker),
+                "static layer {name} contains {marker:?}: the Decision API is settings-gated \
+                 and is documented only by its gated decision-api skill"
+            );
+        }
+    }
+}
+
 #[test]
 fn cached_prefix_is_stable_across_sessions() {
     let mut options = BuildSystemPromptOptions {
