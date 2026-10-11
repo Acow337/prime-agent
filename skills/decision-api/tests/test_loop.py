@@ -291,27 +291,36 @@ class LoopTests(unittest.TestCase):
         decision_api.agent_message.send = stub_send
 
         async def run():
+            def on_step(record, observation):
+                if record["step"] == 0:
+                    loop.set_goal("first goal")
+                    loop.set_goal("follow the target")
+
             loop = decision_api.Loop(
                 observe,
                 taken.append,
                 {"left": "go left"},
                 objective="fixture objective",
-                on_step=lambda record, observation: (
-                    loop.set_goal("follow the target") if record["step"] == 0 else None
-                ),
+                on_step=on_step,
                 decide_timeout=5.0,
             )
             await loop.run()
             self.assertEqual(taken, ["left", "left"])
             self.assertEqual(loop.goal, "follow the target")
             self.assertEqual(loop.goal_updates[-1]["goal"], "follow the target")
-            # The goal message is tagged and routed to the child.
+            # The goal messages are tagged, routed in call order, and two
+            # set_goal calls in one step carry strictly increasing seqs.
             self.assertEqual(
                 [entry["type"] for entry in goals],
-                ["decision_api.goal"],
+                ["decision_api.goal", "decision_api.goal"],
                 goals,
             )
-            self.assertEqual(goals[0]["goal"], "follow the target")
+            self.assertEqual(
+                [entry["goal"] for entry in goals],
+                ["first goal", "follow the target"],
+                goals,
+            )
+            self.assertLess(goals[0]["seq"], goals[1]["seq"], goals)
             # set_goal of an empty goal is a contract error.
             with self.assertRaises(TypeError):
                 loop.set_goal("")

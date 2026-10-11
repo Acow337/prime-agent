@@ -179,6 +179,7 @@ class Loop:
         self.step = 0
         self._loop_id = uuid.uuid4().hex
         self._goal: str | None = None
+        self._goal_seq = 0
         self._child_name: str | None = None
         self._child_model: str | None = None
         self._child_ready = asyncio.Event()
@@ -200,7 +201,8 @@ class Loop:
         self._goal = goal
         self.goal_updates.append({"step": self.step, "goal": goal})
         if self._child_name is not None:
-            message = json.dumps({"type": "decision_api.goal", "seq": self.step, "goal": goal})
+            self._goal_seq += 1
+            message = json.dumps({"type": "decision_api.goal", "seq": self._goal_seq, "goal": goal})
             asyncio.get_running_loop().create_task(
                 agent_message.send(message, receiver_role="child", receiver_name=self._child_name)
             )
