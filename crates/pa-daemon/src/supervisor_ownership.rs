@@ -1086,6 +1086,35 @@ impl ShutdownAdmission {
         released
     }
 
+    /// Release the window FOR A SPAWN, outlasting the admission's own
+    /// lease: a transient removal failure (guard contention, an fs
+    /// hiccup) is retried with backoff until the record's lease must
+    /// have expired - a spawn never proceeds behind a live record (the
+    /// successor's boot refuses one), and a GOOD update is never rolled
+    /// back over a cleanup glitch. Only a persistent failure beyond the
+    /// lease surfaces, where the failure arm's rollback is the honest
+    /// last resort.
+    ///
+    /// # Errors
+    /// Returns the release error when the record could not be removed
+    /// within the lease window.
+    pub fn try_release_for_spawn(&mut self) -> Result<()> {
+        let deadline = std::time::Instant::now()
+            + Duration::from_millis(SHUTDOWN_ADMISSION_LEASE_MS)
+            + Duration::from_secs(1);
+        loop {
+            match self.try_release() {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
     /// The best-effort release for the drop path (`try_release`'s errors
     /// cannot propagate out of a drop): the final attempt is TERMINAL -
     /// a failed cleanup still latches `stopped` and detaches the renewal

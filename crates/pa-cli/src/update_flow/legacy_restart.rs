@@ -402,13 +402,28 @@ async fn boot_roster(
     // hello must come from the child THIS migration spawned, never from a
     // different daemon that won the socket - the pin replaces the legacy
     // pid assertion with the same identity check the main flow uses.
-    let successor = wait_for_hello(socket, budget.boot_ms, &spawned)
-        .await
-        .context("replacement daemon did not start")?;
-    let (replacement, _events) = pa_tui::daemon_client::DaemonClient::connect(socket).await?;
+    // Every failure past the spawn RETIRES the owned child (the handle
+    // the capture took): a failed migration must never leave the
+    // replacement daemon running on the socket.
+    let Some(successor) = wait_for_hello(socket, budget.boot_ms, &spawned).await else {
+        let _ = spawned.retire();
+        return Err(anyhow::anyhow!("replacement daemon did not start"));
+    };
+    let (replacement, _events) = match pa_tui::daemon_client::DaemonClient::connect(socket).await {
+        Ok(connected) => connected,
+        Err(error) => {
+            let _ = spawned.retire();
+            return Err(error);
+        }
+    };
     let replacement_hello = replacement.hello().clone();
     replacement.close();
-    validate_successor(&replacement_hello, spawned_pid, crate::config::version())?;
+    if let Err(error) =
+        validate_successor(&replacement_hello, spawned_pid, crate::config::version())
+    {
+        let _ = spawned.retire();
+        return Err(error);
+    }
     {
         let mut value = status.lock().await;
         value["phase"] = json!("restoring");

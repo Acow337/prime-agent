@@ -580,9 +580,13 @@ async fn drive(
     // the record live on disk, and a successor spawned behind it refuses
     // its own boot ("Daemon shutdown is in progress") - a dead child, a
     // hello timeout, and a rollback that misreads its own leftover lease
-    // as a concurrent stop. The phase failure lands in the rollback arm
-    // instead of spawning a doomed child.
-    admission.try_release().map_err(PhaseFailure::after_stop)?;
+    // as a concurrent stop. Transient failures are retried outlasting
+    // the admission's own lease, so a GOOD (already-activated) update is
+    // never rolled back over a cleanup glitch; only a persistent failure
+    // lands in the rollback arm.
+    admission
+        .try_release_for_spawn()
+        .map_err(PhaseFailure::after_stop)?;
     // `Booting`: spawn the successor from the candidate release dir, roster
     // via env (spec §6), hello within `T_boot`.
     writer
@@ -822,9 +826,10 @@ async fn finish_failure(
         return Ok(());
     }
     // The release must SUCCEED before the rollback child spawns (the
-    // happy path's own rule): a failed removal leaves the record live,
-    // and a child spawned behind it refuses its own boot.
-    if let Err(error) = rollback_admission.try_release() {
+    // happy path's own rule, lease-outlasting retry included): a failed
+    // removal leaves the record live, and a child spawned behind it
+    // refuses its own boot.
+    if let Err(error) = rollback_admission.try_release_for_spawn() {
         fail_hard(format!(
             "The rollback could not close the stop window ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
         ))
