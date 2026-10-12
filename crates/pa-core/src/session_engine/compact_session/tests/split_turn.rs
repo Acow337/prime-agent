@@ -84,10 +84,12 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
                   options: Option<&pa_ai::types::StreamOptions>,
                   _call: u64,
                   _model: &pa_types::ai::Model| {
-                assert_eq!(
-                    options.and_then(|o| o.session_id.as_deref()),
-                    Some(expected_session_id.as_str())
-                );
+                let actual = options.and_then(|o| o.session_id.as_deref());
+                if actual != Some(expected_session_id.as_str()) {
+                    return Err(format!(
+                        "expected conversation {expected_session_id}, received {actual:?}"
+                    ));
+                }
                 let text = match &context.messages[0] {
                     pa_types::ai::Message::User(user) => user.content.text(),
                     _ => panic!("expected a user request"),

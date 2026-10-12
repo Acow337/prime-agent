@@ -48,6 +48,7 @@ async fn capture(
         api_key: Some("synthetic-only".into()),
         session_id: Some(id.into()),
         cache_retention: Some(CacheRetention::None),
+        timeout_ms: Some(5_000),
         headers,
         ..Default::default()
     });
@@ -59,7 +60,10 @@ async fn capture(
     let _ = pa_ai::complete_simple(&model, &context, Some(options))
         .await
         .unwrap();
-    server.await.unwrap()
+    tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -112,4 +116,10 @@ async fn opencode_session_preserves_case_insensitive_explicit_overrides() {
         );
         assert!(headers.contains(&("user-agent".into(), "custom-client".into())));
     }
+}
+
+#[tokio::test]
+async fn unrelated_gateway_does_not_receive_opencode_identity() {
+    let headers = capture("openai-completions", "custom-gateway", "conversation", None).await;
+    assert!(headers.iter().all(|(name, _)| name != "x-opencode-session"));
 }
