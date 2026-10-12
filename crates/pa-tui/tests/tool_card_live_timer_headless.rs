@@ -162,6 +162,29 @@ impl MockSupervisor {
                                 "event": { "type": "turn_end" },
                             }),
                         );
+                        if straggler {
+                            // The resurrection probe: a late end frame for
+                            // the settled straggler, after the turn. The
+                            // sweep's aborted stamp must keep it landing
+                            // on nothing (the frozen timing is final).
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            write_json(
+                                &mut event_writer,
+                                &json!({
+                                    "type": "session_event",
+                                    "activeSessionId": "s1",
+                                    "event": {
+                                        "type": "tool_execution_end",
+                                        "toolCallId": "call_1",
+                                        "toolName": "bash",
+                                        "result": {
+                                            "content": [{ "type": "text", "text": "late frame resurrection" }],
+                                            "isError": false,
+                                        },
+                                    },
+                                }),
+                            );
+                        }
                     });
                 }
                 _ => {
@@ -372,9 +395,11 @@ fn a_running_tool_card_ticks_and_settles_to_the_final_duration() {
 }
 
 /// The straggler: a tool call whose end frame never lands still gets its
-/// timer frozen at the turn's settle — the turn_end sweep stamps the card,
-/// so the frozen `Took` row renders and no later paint ticks `Elapsed`
-/// (a start-without-end must not keep a live timer into the next run).
+/// timer frozen at the turn's settle — the turn_end sweep settles the card
+/// the way the failed-frame sweep does (a terminal error result, the
+/// settle instant, the aborted stamp): the frozen `Took` row renders, the
+/// panel header is terminal (no running spinner), no later paint ticks
+/// `Elapsed`, and the late end frame lands on nothing.
 #[test]
 fn a_straggler_tool_card_freezes_at_the_turn_settle() {
     std::env::remove_var("TMUX");
@@ -396,6 +421,10 @@ fn a_straggler_tool_card_freezes_at_the_turn_settle() {
                 needle: "Took ".to_string(),
                 timeout_ms: 5000,
             },
+            // The timing window for the late end frame (a no-op by design,
+            // so it has no observable readiness to wait on): the plan
+            // holds while the frame is drained and painted.
+            HeadlessStep::WaitMs(800),
             HeadlessStep::WaitIdle { timeout_ms: 5000 },
         ],
         width: 100,
@@ -410,14 +439,20 @@ fn a_straggler_tool_card_freezes_at_the_turn_settle() {
         .iter()
         .position(|frame| frame.contains("Took "))
         .expect("the straggler's timer froze at the turn settle");
-    let straggler_ticks = outcome.frames[settle..]
-        .iter()
-        .filter(|frame| frame.contains("Elapsed "))
-        .count();
-    assert_eq!(
-        straggler_ticks,
-        0,
-        "the frozen straggler never ticks again:\n{}",
-        outcome.frames[settle..].join("\n===\n")
+    let rendered = outcome.frames[settle..].join("\n===\n");
+    assert!(
+        !rendered.contains("Elapsed "),
+        "the frozen straggler never ticks again:
+{rendered}"
+    );
+    assert!(
+        !rendered.contains("running"),
+        "the settled straggler carries a terminal header, not a running spinner:
+{rendered}"
+    );
+    assert!(
+        !rendered.contains("resurrection"),
+        "the late end frame lands on the aborted straggler:
+{rendered}"
     );
 }

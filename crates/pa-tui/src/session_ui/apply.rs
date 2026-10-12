@@ -922,10 +922,13 @@ impl SessionUi {
         false
     }
 
-    /// The turn's settle freezes every still-running tool card: a
-    /// straggler's start frame never got its end, so its live timer would
-    /// tick into the next run's paints — stamp the settle instant, and the
-    /// card renders the frozen `Took` row every settled card shows.
+    /// The turn's settle settles every still-running tool card the same
+    /// way the failed-frame sweep does: a straggler's start frame never
+    /// got its end, so its live timer would tick into the next run's
+    /// paints and its header would keep spinning — a terminal error
+    /// result (no spinner, a cacheable settled card), the settle
+    /// instant, and `aborted` (a late end frame lands on nothing, the
+    /// same guard the failed frame's sweep leaves behind).
     fn settle_straggler_cards(view: &mut AgentView) {
         let live: Vec<usize> = view
             .chat
@@ -941,7 +944,17 @@ impl SessionUi {
         for index in live {
             view.prepare_entry_mutation(index);
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+                card.result = Some(ToolResultView {
+                    content: vec![serde_json::json!({
+                        "type": "text",
+                        "text": "the turn ended before this call returned",
+                    })],
+                    details: serde_json::Value::Null,
+                    is_error: true,
+                });
+                card.result_partial = false;
                 card.ended_at = Some(std::time::Instant::now());
+                card.aborted = true;
             }
             view.mark_entry_stale(index);
         }
