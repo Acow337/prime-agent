@@ -348,6 +348,42 @@ class LiveSecureRefTests(AppTestCase):
         self.assertEqual(env.ax_calls, [])
 
 
+    async def test_set_value_writes_when_the_live_element_is_verifiably_plain(self) -> None:
+        # the snapshot's secure marker can be the forced fail-closed marker
+        # from a truncated observe; a live-verified plain field (the actual
+        # write target) still accepts the write, like type_text's live focus
+        env = self.make_env()
+        app = await env.get_app()
+        await app.set_value(4, "plain")
+        self.assertEqual([(call[0], call[2]) for call in env.ax_calls], [("set_value", "plain")])
+
+    async def test_select_text_selects_when_the_live_element_is_verifiably_plain(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.select_text(4, "hunter")
+        self.assertEqual([call[0] for call in env.ax_calls], ["select_text_range"])
+
+    async def test_set_value_fails_closed_when_the_live_check_is_unreadable(self) -> None:
+        env = self.make_env()
+        env.live_secure_ref = None
+        app = await env.get_app()
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.set_value(1, "value")
+        self.assertEqual(caught.exception.code, "ACTION_UNSUPPORTED")
+        self.assertIn("could not verify", caught.exception.message)
+        self.assertEqual(env.ax_calls, [])
+
+    async def test_select_text_fails_closed_when_the_live_check_is_unreadable(self) -> None:
+        env = self.make_env()
+        env.live_secure_ref = None
+        app = await env.get_app()
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.select_text(1, "que")
+        self.assertEqual(caught.exception.code, "ACTION_UNSUPPORTED")
+        self.assertIn("could not verify", caught.exception.message)
+        self.assertEqual(env.ax_calls, [])
+
+
 class StalePidGuardTests(AppTestCase):
     async def test_guard_rejects_vanished_pid(self) -> None:
         from computer_use.apps import RunningApp

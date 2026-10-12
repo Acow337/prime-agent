@@ -69,7 +69,10 @@ dialog, a sidebar collapse) when a target is not shown. Use the text fields to
 identify the element and the `element_index` to target it. Secure fields
 (`AXTextField` with subrole `AXSecureTextField`) refuse typing and
 `set_value` with `ACTION_UNSUPPORTED` and a hand-off message; ask the user to
-enter credentials themselves.
+enter credentials themselves. The refusal follows the live verification of the
+target at action time: a field whose live role/subrole reads as secure refuses
+the write, and a field whose live read verifies plain accepts it — even when a
+truncated snapshot's fail-closed marker brands it `AXSecureTextField`.
 
 ## Error codes
 

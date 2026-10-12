@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -473,6 +474,7 @@ class AppEnvironment:
         self.secure_focus: bool | None = False  # live focused_is_secure verdict; None = the live read failed (fails closed)
         self.live_secure_ref: bool = False  # live per-element secure verdict used by set_value/select_text
         self.fingerprint_values: list[Any] | None = None  # queued window_fingerprint reads; None = unreadable
+        self.fingerprint_delays: list[float] | None = None  # optional per-read wall delay, modeling a slow app
         self.fingerprint_reads = 0
         self.pasteboard_holds_payload = True  # _clipboard_unchanged verdict for paste
         self.pasted_text: str | None = None  # the last written paste payload
@@ -533,6 +535,12 @@ class AppEnvironment:
         baseline reads before the press serve the pre-existing value, so a
         consumption verdict requires an attributable transition."""
         self.fingerprint_reads += 1
+        if self.fingerprint_delays is not None:
+            index = self.fingerprint_reads - 1
+            if index < len(self.fingerprint_delays):
+                delay = self.fingerprint_delays[index]
+                if delay:
+                    time.sleep(delay)
         if self.fingerprint_values is not None:
             return self.fingerprint_values[(self.fingerprint_reads - 1) % len(self.fingerprint_values)]
         if self.pasted_text is None:

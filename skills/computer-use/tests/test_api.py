@@ -852,6 +852,7 @@ class AppElementActionTests(AppTestCase):
         from computer_use import errors
 
         env = self.make_env()
+        env.live_secure_ref = True  # the live element verifiably is a secure field
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
             await app.set_value(4, "secret")
@@ -899,6 +900,7 @@ class AppElementActionTests(AppTestCase):
         from computer_use import errors
 
         env = self.make_env()
+        env.live_secure_ref = True  # the live element verifiably is a secure field
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
             await app.select_text(4, "secret")
@@ -957,6 +959,44 @@ class SettleTests(AppTestCase):
             elapsed = time.monotonic() - started
         self.assertLess(elapsed, 1.0)
         self.assertGreaterEqual(env.fingerprint_reads, 3)
+
+    async def test_slow_first_fingerprint_still_gets_a_comparison_read(self) -> None:
+        # the first read's timeout reserves one poll interval, so a slow
+        # first read within it leaves budget for a real comparison in the
+        # normal loop - and agreement settles right there
+        env = self.make_env()
+        app = await env.get_app()
+        import computer_use
+
+        env.fingerprint_values = [("Main", 1), ("Main", 1)]
+        env.fingerprint_delays = [0.15, 0.0]
+        with mock.patch.object(computer_use, "_SETTLE_MAX_SECONDS", 0.2), mock.patch.object(
+            computer_use, "_SETTLE_POLL_SECONDS", 0.01
+        ):
+            started = time.monotonic()
+            app._settle()
+            elapsed = time.monotonic() - started
+        self.assertEqual(env.fingerprint_reads, 2)
+        self.assertLessEqual(elapsed, 0.2 + 0.01 + 0.05)
+
+    async def test_slow_first_fingerprint_disagreement_keeps_polling_to_the_cap(self) -> None:
+        # a still-changing window after a slow first read gets the normal
+        # churn routing: keep comparing while budget remains, give up at
+        # the cap - never a discarded sample
+        env = self.make_env()
+        app = await env.get_app()
+        import computer_use
+
+        env.fingerprint_values = [("Main", 1), ("Main", 2)]
+        env.fingerprint_delays = [0.15, 0.0]
+        with mock.patch.object(computer_use, "_SETTLE_MAX_SECONDS", 0.2), mock.patch.object(
+            computer_use, "_SETTLE_POLL_SECONDS", 0.01
+        ):
+            started = time.monotonic()
+            app._settle()
+            elapsed = time.monotonic() - started
+        self.assertGreaterEqual(env.fingerprint_reads, 3)  # compared, disagreed, kept polling
+        self.assertLessEqual(elapsed, 0.2 + 0.01 + 0.05)
 
     async def test_unreadable_fingerprint_settles_immediately(self) -> None:
         env = self.make_env()

@@ -668,19 +668,24 @@ class App:
 
         def dispatch() -> None:
             element, ref = self._element(element_index)
+            # the live verdict on the ref that is about to be written wins,
+            # like type_text's live focus: the snapshot marker can be the
+            # fail-closed subrole _describe forces when a read fails or the
+            # observe budget is spent, which would brand ordinary controls
+            # in a truncated tree as password fields
             live_secure = ax._live_is_secure(ref)
-            if ax._is_secure_field(element) or live_secure:
-                raise ComputerUseError(
-                    "ACTION_UNSUPPORTED",
-                    f"element {element_index}: {_SECURE_HANDOFF}",
-                    {"element_index": element_index, "secure": True},
-                )
             if live_secure is None:
                 raise ComputerUseError(
                     "ACTION_UNSUPPORTED",
                     f"element {element_index}: could not verify that it is not a secure field; "
                     "ask the user to enter the value themselves",
                     {"element_index": element_index},
+                )
+            if live_secure:
+                raise ComputerUseError(
+                    "ACTION_UNSUPPORTED",
+                    f"element {element_index}: {_SECURE_HANDOFF}",
+                    {"element_index": element_index, "secure": True},
                 )
             if not ax._is_settable(ref, "AXValue"):
                 raise ComputerUseError(
@@ -717,19 +722,23 @@ class App:
 
         def dispatch() -> None:
             element, ref = self._element(element_index)
+            # the live verdict on the ref that is about to be selected wins,
+            # like type_text's live focus: the snapshot marker can be the
+            # fail-closed subrole _describe forces when a read fails or the
+            # observe budget is spent
             live_secure = ax._live_is_secure(ref)
-            if ax._is_secure_field(element) or live_secure:
-                raise ComputerUseError(
-                    "ACTION_UNSUPPORTED",
-                    f"element {element_index}: {_SECURE_HANDOFF}",
-                    {"element_index": element_index, "secure": True},
-                )
             if live_secure is None:
                 raise ComputerUseError(
                     "ACTION_UNSUPPORTED",
                     f"element {element_index}: could not verify that it is not a secure field; "
                     "ask the user to enter the value themselves",
                     {"element_index": element_index},
+                )
+            if live_secure:
+                raise ComputerUseError(
+                    "ACTION_UNSUPPORTED",
+                    f"element {element_index}: {_SECURE_HANDOFF}",
+                    {"element_index": element_index, "secure": True},
                 )
             value = ax._current_value(ref)
             if not isinstance(value, str):
@@ -1035,10 +1044,14 @@ class App:
         Reads the focused window's live fingerprint until two consecutive
         reads agree (or the read fails): a responsive app's tree has stopped
         changing by then, and a churning app is given up on at the cap
-        instead of stalling the action.
+        instead of stalling the action. The first read's timeout reserves one
+        poll interval, so after any first read that succeeds within it the
+        loop always has budget for at least one real comparison; a first
+        read that fails - including one slower than the reserved timeout -
+        ends the settle the same way as any other failed read.
         """
         deadline = time.monotonic() + _SETTLE_MAX_SECONDS
-        previous = ax._window_fingerprint(self._pid, timeout_seconds=_SETTLE_MAX_SECONDS)
+        previous = ax._window_fingerprint(self._pid, timeout_seconds=_SETTLE_MAX_SECONDS - _SETTLE_POLL_SECONDS)
         if previous is None:
             return
         while time.monotonic() < deadline:
