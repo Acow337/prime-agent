@@ -272,9 +272,11 @@ class FileModesTests(_CaptureTestCase):
 
     def test_chmod_failures_never_break_the_capture(self) -> None:
         self.capture_run()
-        with mock.patch.object(capture.os, "chmod", side_effect=PermissionError("nope")):
-            result = capture._screenshot_window((0, 0), (5, 5))
-        self.assertTrue(result["path"].endswith(".png"))
+        for failure in (PermissionError("nope"), NotImplementedError("follow_symlinks unsupported with dir_fd")):
+            with self.subTest(failure=type(failure).__name__):
+                with mock.patch.object(capture.os, "chmod", side_effect=failure):
+                    result = capture._screenshot_window((0, 0), (5, 5))
+                self.assertTrue(result["path"].endswith(".png"))
 
 
 class SymlinkGuardTests(_CaptureTestCase):

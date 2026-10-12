@@ -102,7 +102,9 @@ def _open_capture_dir() -> int:
             ) from error
         try:
             os.chmod(path, 0o700)
-        except OSError:
+        except (OSError, NotImplementedError):
+            # best-effort like the post-write chmod: a mode change failure
+            # never kills the capture
             pass
         try:
             return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
@@ -357,7 +359,10 @@ def _screenshot_window(
             )
         try:
             os.chmod(path.name, 0o600, dir_fd=dir_fd, follow_symlinks=False)
-        except OSError:
+        except (OSError, NotImplementedError):
+            # best-effort: a mode change failure (or a platform build that
+            # cannot combine dir_fd with follow_symlinks) never kills the
+            # capture; the private-directory sweep already limits exposure
             pass
         png_width, png_height = _png_dimensions(dir_fd, path.name)
         if window_id is None and (png_width > width * 2 or png_height > height * 2):
