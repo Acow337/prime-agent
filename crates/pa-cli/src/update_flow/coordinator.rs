@@ -113,6 +113,14 @@ struct RacedStopBaseline {
     roots: std::sync::Mutex<Vec<u64>>,
 }
 
+/// The drive admission's registry token, recorded at its acquire (the
+/// same out-param pattern as the baseline): the rollback's re-acquire
+/// uses it to RECOGNIZE the coordinator's own leftover record - a
+/// failed release of ours, which it reclaims instead of refusing as a
+/// concurrent stop.
+#[derive(Default)]
+struct LeftoverAdmissionToken(std::sync::Mutex<Option<String>>);
+
 /// Whether a concurrent stop raced the update's release-to-spawn window,
 /// judged from the generation tracks the acquisitions observed. The
 /// root-reach tracks: the rollback observes more than drive on any
@@ -194,6 +202,7 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         crate::daemon_discovery::shutdown_reach_keys(&options.socket_path, &state_root);
     let reach_key_refs: Vec<&std::path::Path> =
         reach_keys.iter().map(std::path::PathBuf::as_path).collect();
+    let leftover_token = Arc::new(LeftoverAdmissionToken::default());
     match drive(
         &writer,
         options,
@@ -201,6 +210,7 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         &socket_dir,
         &reach_key_refs,
         &baseline,
+        &leftover_token,
     )
     .await
     {
@@ -226,40 +236,63 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // take the window right after the user's stop finished and
             // spawn a daemon, undoing it. One guarded attempt; a busy
             // window aborts the rollback beside the concurrent stop.
-            let rollback_admission =
-                match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_once(
-                    pa_daemon::supervisor_ownership::ShutdownScope::Socket {
-                        socket: &options.socket_path,
-                        keys: reach_key_refs.clone(),
-                    },
-                ) {
-                    Ok(admission) => Some(admission),
-                    Err(error) => {
-                        // The rejected successor is retired FIRST, before
-                        // any fallible status write (the identity-pinned
-                        // crash kill, best-effort): a failed write must
-                        // not leave a timed-out detached child alive to
-                        // bind the socket after the concurrent shutdown
-                        // releases its window and restart the daemon
-                        // behind the verdict.
-                        if let Some(rejected) = &failure.rejected {
-                            let _ = rejected.retire();
-                        }
-                        let mut writer = writer.lock().await;
-                        // The rollback attempt is what failed: transition
-                        // through Rollback (the state the failure arm would
-                        // have written) - a direct Failed write from e.g.
-                        // Booting violates the status machine's
-                        // transition rules.
-                        let _ = writer.set_state(UpdateState::Rollback);
-                        writer.set_state(UpdateState::Failed)?;
-                        writer.set_message(Some(format!(
+            // The re-acquire RECOGNIZES this coordinator's own leftover
+            // record (a failed release): it reclaims the window over our
+            // own token instead of refusing it as a concurrent stop,
+            // while every genuinely foreign record still refuses at
+            // once.
+            let acquire_rollback = || {
+                let own_token = leftover_token
+                    .0
+                    .lock()
+                    .expect("the leftover-token lock")
+                    .clone();
+                match own_token {
+                    Some(own) => {
+                        pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_once_reclaiming_own(
+                            pa_daemon::supervisor_ownership::ShutdownScope::Socket {
+                                socket: &options.socket_path,
+                                keys: reach_key_refs.clone(),
+                            },
+                            &own,
+                        )
+                    }
+                    None => pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_once(
+                        pa_daemon::supervisor_ownership::ShutdownScope::Socket {
+                            socket: &options.socket_path,
+                            keys: reach_key_refs.clone(),
+                        },
+                    ),
+                }
+            };
+            let rollback_admission = match acquire_rollback() {
+                Ok(admission) => Some(admission),
+                Err(error) => {
+                    // The rejected successor is retired FIRST, before
+                    // any fallible status write (the identity-pinned
+                    // crash kill, best-effort): a failed write must
+                    // not leave a timed-out detached child alive to
+                    // bind the socket after the concurrent shutdown
+                    // releases its window and restart the daemon
+                    // behind the verdict.
+                    if let Some(rejected) = &failure.rejected {
+                        let _ = rejected.retire();
+                    }
+                    let mut writer = writer.lock().await;
+                    // The rollback attempt is what failed: transition
+                    // through Rollback (the state the failure arm would
+                    // have written) - a direct Failed write from e.g.
+                    // Booting violates the status machine's
+                    // transition rules.
+                    let _ = writer.set_state(UpdateState::Rollback);
+                    writer.set_state(UpdateState::Failed)?;
+                    writer.set_message(Some(format!(
                             "The rollback could not hold the stop window ({error}); the update failed ({}). Sessions persist on disk - prime-agent attach recovers them.",
                             failure.message.trim_end_matches('.')
                         )))?;
-                        None
-                    }
-                };
+                    None
+                }
+            };
             let Some(mut rollback_admission) = rollback_admission else {
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
@@ -354,6 +387,7 @@ async fn drive(
     socket_dir: &Path,
     reach_keys: &[&Path],
     baseline: &Arc<RacedStopBaseline>,
+    leftover_token: &Arc<LeftoverAdmissionToken>,
 ) -> std::result::Result<(), PhaseFailure> {
     let budget = &options.budget;
     // The stop window opens here (TS package-manager-cli.ts
@@ -375,6 +409,8 @@ async fn drive(
     );
     *baseline.roots.lock().expect("the raced-baseline lock") =
         admission.observed_root_generations();
+    *leftover_token.0.lock().expect("the leftover-token lock") =
+        Some(admission.token().to_string());
     // `Preparing`: connect the old supervisor. An unreachable daemon is a
     // daemon-less update: an empty prepare is trivially durable and the
     // successor boots without a roster (the workers are already gone).

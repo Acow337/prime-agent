@@ -812,6 +812,12 @@ struct AdmissionState {
     pid: u32,
     process_start_id: Option<String>,
     stopped: AtomicBool,
+    /// Cancels the RENEWAL only, without latching the retryable
+    /// release: a spawn-release's terminal failure stops the record
+    /// from being renewed (it self-heals through its lease) while the
+    /// removal stays retryable - dropping the `JoinHandle` alone would
+    /// leave a detached thread renewing the abandoned record forever.
+    renew_cancelled: AtomicBool,
     lost: AtomicBool,
     /// The acquisition's own scope file observed under the guard, before
     /// its own bump (a coordinator window's socket file; 0 for the CLI
@@ -860,18 +866,23 @@ impl ShutdownAdmission {
     /// [`ShutdownAdmission::acquire`] against an explicit registry
     /// directory (the seam the unit tests isolate on).
     fn acquire_in(registry_dir: &Path, scope: ShutdownScope<'_>) -> Result<Self> {
-        Self::acquire_in_impl(registry_dir, scope, false)
+        Self::acquire_in_impl(registry_dir, scope, false, None)
     }
 
     /// [`ShutdownAdmission::acquire_once`] against an explicit registry
     /// directory (the seam the unit tests isolate on).
     fn acquire_in_once(registry_dir: &Path, scope: ShutdownScope<'_>) -> Result<Self> {
-        Self::acquire_in_impl(registry_dir, scope, true)
+        Self::acquire_in_impl(registry_dir, scope, true, None)
     }
 
     /// The acquire loop; `once` runs exactly one guarded attempt (the
     /// rollback re-close), otherwise the unbounded TS retry.
-    fn acquire_in_impl(registry_dir: &Path, scope: ShutdownScope<'_>, once: bool) -> Result<Self> {
+    fn acquire_in_impl(
+        registry_dir: &Path,
+        scope: ShutdownScope<'_>,
+        once: bool,
+        own_token: Option<&str>,
+    ) -> Result<Self> {
         let registry_dir = registry_dir.to_path_buf();
         let paths = scope_paths_for(&registry_dir, scope);
         let state = Arc::new(AdmissionState {
@@ -880,6 +891,7 @@ impl ShutdownAdmission {
             pid: std::process::id(),
             process_start_id: crate::lease::get_process_start_id(std::process::id()),
             stopped: AtomicBool::new(false),
+            renew_cancelled: AtomicBool::new(false),
             lost: AtomicBool::new(false),
             observed_scope_generation: std::sync::atomic::AtomicU64::new(0),
             observed_root_generations: std::sync::Mutex::new(Vec::new()),
@@ -887,8 +899,13 @@ impl ShutdownAdmission {
         loop {
             let acquired = with_registry_guard(&registry_dir, || {
                 let path = shutdown_admission_path(&registry_dir);
-                if read_active_shutdown_admission(&registry_dir)?.is_some() {
-                    return Ok(None);
+                if let Some(current) = read_active_shutdown_admission(&registry_dir)? {
+                    // A reclaiming acquire takes the window back from its
+                    // OWN leftover record only; every other active record
+                    // (a genuine concurrent stop) still refuses.
+                    if own_token.is_none_or(|token| current.token != token) {
+                        return Ok(None);
+                    }
                 }
                 let now = crate::util::now_ms();
                 let record = ShutdownAdmissionRecord {
@@ -979,7 +996,9 @@ impl ShutdownAdmission {
             .spawn(move || {
                 loop {
                     std::thread::sleep(SHUTDOWN_ADMISSION_REFRESH_MS);
-                    if thread_state.stopped.load(Ordering::SeqCst) {
+                    if thread_state.stopped.load(Ordering::SeqCst)
+                        || thread_state.renew_cancelled.load(Ordering::SeqCst)
+                    {
                         break;
                     }
                     // A read failure is swallowed (TS's interval catch): only
@@ -1152,9 +1171,15 @@ impl ShutdownAdmission {
                 }
                 Err(error) => {
                     if std::time::Instant::now() >= deadline {
-                        // Terminal: stop renewing so the leftover
-                        // self-heals through its lease.
-                        self.state.stopped.store(true, Ordering::SeqCst);
+                        // Terminal: the renewal is CANCELLED (its own
+                        // flag, not the retry latch) so the leftover
+                        // self-heals through its unrenewed lease, and
+                        // the detached handle drop can no longer leave a
+                        // forever-renewing thread behind - while
+                        // `stopped` stays unlatched, so the drop path's
+                        // own release (and any later caller) reattempts
+                        // the removal when the filesystem recovers.
+                        self.state.renew_cancelled.store(true, Ordering::SeqCst);
                         drop(self.renewal.take());
                         return Err(error);
                     }
@@ -1176,6 +1201,37 @@ impl ShutdownAdmission {
             self.state.stopped.store(true, Ordering::SeqCst);
             drop(self.renewal.take());
         }
+    }
+
+    /// This admission's registry token: the coordinator's rollback uses
+    /// it to recognize its OWN leftover record (a failed release) and
+    /// reclaim the window instead of refusing it as a concurrent stop.
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.state.token
+    }
+
+    /// A SINGLE-ATTEMPT acquire that reclaims THIS coordinator's own
+    /// leftover record: an active record whose token matches `own_token`
+    /// is a failed release of ours (the holder is this very process), so
+    /// taking the window back overwrites our own record - never a queue
+    /// behind a genuine concurrent stop, which still refuses at once.
+    ///
+    /// # Errors
+    /// Returns an error when the registry record cannot be written or
+    /// another active stop window holds the record.
+    pub fn acquire_once_reclaiming_own(scope: ShutdownScope<'_>, own_token: &str) -> Result<Self> {
+        Self::acquire_in_once_reclaiming(&registry_dir()?, scope, own_token)
+    }
+
+    /// [`ShutdownAdmission::acquire_once_reclaiming_own`] against an
+    /// explicit registry directory (the seam the unit tests isolate on).
+    fn acquire_in_once_reclaiming(
+        registry_dir: &Path,
+        scope: ShutdownScope<'_>,
+        own_token: &str,
+    ) -> Result<Self> {
+        Self::acquire_in_impl(registry_dir, scope, true, Some(own_token))
     }
 
     /// The acquisition's own scope-file generation observed at its
@@ -1708,6 +1764,65 @@ mod tests {
             "the freed window acquires at once"
         );
     }
+    /// The rollback's re-acquire RECOGNIZES this coordinator's own
+    /// leftover record (a failed release left it live) and reclaims the
+    /// window over its own token - while every foreign view of the same
+    /// record still refuses it as a concurrent stop.
+    #[test]
+    fn the_rollback_reclaims_this_coordinators_own_leftover_record() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let socket = registry.path().join("daemon.sock");
+        let admission = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &socket,
+                keys: vec![],
+            },
+        )
+        .expect("acquire the window");
+        let own_token = admission.token().to_string();
+        // A failed release: the record stays live on disk (the handle
+        // is leaked without a release).
+        std::mem::forget(admission);
+        // A plain rollback view refuses the leftover as a stop window.
+        assert!(
+            ShutdownAdmission::acquire_in_once(
+                registry.path(),
+                ShutdownScope::Socket {
+                    socket: &socket,
+                    keys: vec![],
+                },
+            )
+            .is_err(),
+            "a plain acquire still refuses the live record"
+        );
+        // A wrong token never reclaims (a genuinely foreign stop).
+        assert!(
+            ShutdownAdmission::acquire_in_once_reclaiming(
+                registry.path(),
+                ShutdownScope::Socket {
+                    socket: &socket,
+                    keys: vec![],
+                },
+                "bogus-token",
+            )
+            .is_err(),
+            "a foreign token never reclaims the window"
+        );
+        // The RECLAIMING rollback takes the window back over its own
+        // leftover.
+        let mut reclaimed = ShutdownAdmission::acquire_in_once_reclaiming(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &socket,
+                keys: vec![],
+            },
+            &own_token,
+        )
+        .expect("the rollback reclaims its own leftover");
+        reclaimed.release();
+    }
+
     /// A spawn release never proceeds behind a TAKEN window: when a
     /// foreign live record holds the registry (our lease lapsed and a
     /// concurrent stop took it), `try_release_for_spawn` aborts beside
