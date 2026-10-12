@@ -59,6 +59,7 @@ pub(crate) mod piped_stdin;
 pub(crate) mod print_autonomous;
 pub(crate) mod print_boundary;
 pub(crate) mod print_goal;
+pub(crate) mod print_rlm;
 pub mod print_runtime;
 pub(crate) mod print_session_command;
 pub mod update_flow;
@@ -89,6 +90,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     // Telemetry reports the version `--version` prints: the beta channel
     // restamps only the packaged manifest, never the compiled-in version.
     pa_telemetry::set_version(crate::config::version());
+    pa_daemon::protocol::configure_app_version(crate::config::version())
+        .map_err(|error| error.to_string())?;
 
     let offline_mode = args.iter().any(|arg| arg == "--offline")
         || crate::config::is_truthy_env_flag(
