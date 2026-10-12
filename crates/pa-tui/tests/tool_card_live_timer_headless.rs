@@ -43,12 +43,13 @@ enum Scenario {
     /// freezes the card; then a late end frame and a late start (the
     /// retick probe) must both land on nothing.
     Straggler,
-    /// The python_repl straggler: same shape with the ipython shell, so
+    /// The `python_repl` straggler: same shape with the ipython shell, so
     /// the summary's duration slot freezes instead of vanishing.
     IpythonStraggler,
     /// The lost turn: turn one's call never ends and its `turn_end`
-    /// never lands; turn two runs to its own settle, which must leave
-    /// turn one's card alone (the settle is pending-scoped).
+    /// never lands; turn two's `turn_start` settles turn one's leftover
+    /// card (partial preserved, stale timer stopped) and runs to its
+    /// own settle.
     LostTurn,
 }
 
@@ -575,12 +576,13 @@ fn a_straggler_tool_card_freezes_at_the_turn_settle() {
 }
 
 /// The lost turn: turn one's call never ends and its `turn_end` never
-/// lands, so turn two runs to its own settle. The settle is scoped to the
-/// turn's own pending calls — a later turn's end must never stamp an
-/// earlier run's still-running card (replacing its streamed output with
-/// the settle error), the same scoping the failed-frame sweep keeps.
+/// lands. Turn two's `turn_start` is the definitive end of turn one: its
+/// leftover pending card settles there — the streamed partial output
+/// preserved, the card terminal, its stale timer and header stopped from
+/// ticking into turn two's paints — while the pending-scoped turn-end
+/// sweep never stamps a card the turn did not track.
 #[test]
-fn a_lost_turns_card_is_not_settled_by_a_later_turn() {
+fn a_lost_turns_card_settles_when_the_next_turn_starts() {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -614,7 +616,8 @@ fn a_lost_turns_card_is_not_settled_by_a_later_turn() {
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     // The barrier rendered: the assertions below are read only after turn
-    // two's settle demonstrably drained.
+    // two's settle demonstrably drained — both calls are terminal by then,
+    // so no card may tick or spin past it.
     let barrier = outcome
         .frames
         .iter()
@@ -623,11 +626,15 @@ fn a_lost_turns_card_is_not_settled_by_a_later_turn() {
     let settled = outcome.frames[barrier..].join("\n===\n");
     assert!(
         settled.contains("turn one partial output"),
-        "the lost turn's streamed output survives the later turn's settle:\n{settled}"
+        "the lost turn's streamed output survives the settle:\n{settled}"
     );
     assert!(
-        !settled.contains("turn ended before"),
-        "the later turn's settle never stamps the earlier run's card:\n{settled}"
+        !settled.contains("Elapsed "),
+        "the lost turn's stale timer never ticks past the new turn's settle:\n{settled}"
+    );
+    assert!(
+        !settled.contains("running"),
+        "the lost turn's header is terminal, not a running spinner:\n{settled}"
     );
     assert!(
         settled.contains("turn two output"),
@@ -635,7 +642,7 @@ fn a_lost_turns_card_is_not_settled_by_a_later_turn() {
     );
 }
 
-/// The python_repl straggler: the summary's duration slot ticks while the
+/// The `python_repl` straggler: the summary's duration slot ticks while the
 /// cell runs, and at the settle it FREEZES on the run's honest duration
 /// (the settle result carries `durationMs`) instead of vanishing — the
 /// bash panel keeps its static `Took` row from the same timestamps, and
@@ -701,16 +708,13 @@ fn a_python_repl_straggler_freezes_its_duration_slot() {
             frame
                 .lines()
                 .find(|line| line.contains("\u{2717} python"))
-                .map(|line| line.to_string())
+                .map(std::string::ToString::to_string)
         })
         .collect::<Vec<_>>();
     assert!(
         !with_duration.is_empty(),
-        "the settled cell's summary renders:
-{}",
-        settled.join("
-===
-")
+        "the settled cell's summary renders:\n{}",
+        settled.join("\n===")
     );
     let summary = with_duration[0].clone();
     let duration_part = summary
@@ -720,17 +724,9 @@ fn a_python_repl_straggler_freezes_its_duration_slot() {
         .trim()
         .to_string();
     assert!(
-        (duration_part.ends_with('s')
-            && duration_part
-                .trim_end_matches('s')
-                .parse::<f64>()
-                .is_ok())
+        (duration_part.ends_with('s') && duration_part.trim_end_matches('s').parse::<f64>().is_ok())
             || (duration_part.ends_with("ms")
-                && duration_part
-                    .trim_end_matches("ms")
-                    .parse::<f64>()
-                    .is_ok()),
-        "the summary's duration slot freezes on the run's duration, not vanishes:
-{summary}"
+                && duration_part.trim_end_matches("ms").parse::<f64>().is_ok()),
+        "the summary's duration slot freezes on the run's duration, not vanishes:\n{summary}"
     );
 }

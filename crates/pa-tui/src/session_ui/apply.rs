@@ -373,6 +373,14 @@ impl SessionUi {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
                 self.turn_error_shown = false;
+                // The calls the previous run left pending never end now:
+                // this turn starting is definitive — their turn is over
+                // and their late frames land on nothing — so their cards
+                // settle before the tracking drops, the same failed-frame
+                // settle bounded to the tracked ids (a card that only
+                // streamed keeps its output; a quiet one gets the settle
+                // error). Both stop ticking into this run's paints.
+                self.settle_straggler_cards(view);
                 // No card from a previous run settles on this one's failure.
                 self.pending_tools.clear();
                 self.aborted_tools.clear();
@@ -474,9 +482,9 @@ impl SessionUi {
                 view.retry = None;
                 // The turn settled: the held bash cards stream into the transcript.
                 Self::flush_pending_bash(view);
-                // The turn's settle freezes every still-running tool card:
-                // a straggler's start frame never got its end, and a live
-                // timer must not tick into the next run.
+                // The turn's own settle: the calls this run still holds
+                // pending never got their end, and a live timer must not
+                // tick into the next run.
                 self.settle_straggler_cards(view);
                 // Stragglers never leak into the next run.
                 self.pending_tools.clear();
@@ -925,19 +933,23 @@ impl SessionUi {
         false
     }
 
-    /// The turn's settle settles the calls the turn still holds pending —
-    /// a straggler's start frame never got its end, so its live timer
-    /// would tick into the next run's paints and its header would keep
-    /// spinning. Scoped to `pending_tools`, the failed-frame sweep's own
-    /// scope, so a later turn's end never stamps an earlier run's card;
-    /// the sweep runs before the set clears. The settle is the full
-    /// failed-frame shape (a terminal error result, the settle instant,
-    /// `aborted` — a late end frame lands on nothing) plus the run's
-    /// honest duration in `durationMs`: the bash panel's static `Took`
-    /// row and the ipython summary's duration slot both freeze on it.
+    /// The calls the run still holds pending — a straggler's start frame
+    /// never got its end, so its live timer would tick into the next
+    /// run's paints and its header would keep spinning. Settled at two
+    /// boundaries: the turn's own `turn_end` (this run's stragglers) and
+    /// the next `turn_start` (a lost turn's leftovers, whose turn is
+    /// definitively over the moment the new one starts). Scoped to
+    /// `pending_tools`, the failed-frame sweep's own scope, so a later
+    /// turn never stamps a card it never tracked; both sweeps run before
+    /// the set clears. The settle closes the card the failed-frame way —
+    /// terminal, the settle instant, `aborted` (a late end frame lands on
+    /// nothing) — with the run's honest duration in `durationMs`: the
+    /// bash panel's static `Took` row and the ipython summary's duration
+    /// slot both freeze on it. A card that streamed a partial keeps its
+    /// output; a quiet straggler gets the settle error.
     fn settle_straggler_cards(&self, view: &mut AgentView) {
         let now = std::time::Instant::now();
-        let live: Vec<(usize, u64)> = view
+        let live: Vec<usize> = view
             .chat
             .iter()
             .enumerate()
@@ -949,22 +961,40 @@ impl SessionUi {
                     return None;
                 }
                 let started = card.started_at?;
-                (card.ended_at.is_none())
-                    .then_some((index, now.duration_since(started).as_millis() as u64))
+                (card.ended_at.is_none()).then_some(index)
             })
             .collect();
-        for (index, duration_ms) in live {
+        for index in live {
             view.prepare_entry_mutation(index);
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-                card.result = Some(ToolResultView {
-                    content: vec![serde_json::json!({
-                        "type": "text",
-                        "text": "the turn ended before this call returned",
-                    })],
-                    details: serde_json::json!({ "durationMs": duration_ms }),
-                    is_error: true,
-                });
+                let duration_ms = card
+                    .started_at
+                    .map(|started| now.duration_since(started).as_millis() as u64)
+                    .unwrap_or_default();
+                if card.result.is_none() {
+                    // A quiet straggler: the settle's own terminal result.
+                    card.result = Some(ToolResultView {
+                        content: vec![serde_json::json!({
+                            "type": "text",
+                            "text": "the turn ended before this call returned",
+                        })],
+                        details: serde_json::Value::Null,
+                        is_error: true,
+                    });
+                }
+                // A streamed partial keeps its output; either way the card
+                // closes: terminal (non-partial), the freeze instant, and
+                // the aborted stamp that blocks late end frames.
                 card.result_partial = false;
+                if let Some(result) = card.result.as_mut() {
+                    if result.details.is_null() {
+                        result.details = serde_json::json!({ "durationMs": duration_ms });
+                    } else if let Some(object) = result.details.as_object_mut() {
+                        object
+                            .entry("durationMs")
+                            .or_insert(serde_json::json!(duration_ms));
+                    }
+                }
                 card.ended_at = Some(now);
                 card.aborted = true;
             }
