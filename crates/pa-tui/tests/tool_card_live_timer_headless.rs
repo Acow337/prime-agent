@@ -463,6 +463,16 @@ fn a_straggler_tool_card_freezes_at_the_turn_settle() {
         .iter()
         .position(|frame| frame.contains("Took "))
         .expect("the straggler's timer froze at the turn settle");
+    // A timed-out WaitRender only notes; assert the barrier rendered,
+    // so the negatives below are read only after the late frame
+    // demonstrably drained.
+    assert!(
+        outcome.frames[settle..]
+            .iter()
+            .any(|frame| frame.contains("late-probe-drained")),
+        "the drain barrier rendered:\n{}",
+        outcome.frames[settle..].join("\n===\n")
+    );
     let rendered = outcome.frames[settle..].join("\n===\n");
     assert!(
         !rendered.contains("Elapsed "),
