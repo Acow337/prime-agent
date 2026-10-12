@@ -75,13 +75,19 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
     // Each factory call records its request, so both wire calls are
     // captured regardless of issue order.
     let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = std::sync::Arc::default();
+    let expected_session_id = session.get_session_id().to_string();
     let make_step = |response: &'static str| {
         let seen = seen.clone();
+        let expected_session_id = expected_session_id.clone();
         pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
             move |context: &pa_types::ai::Context,
-                  _options: Option<&pa_ai::types::StreamOptions>,
+                  options: Option<&pa_ai::types::StreamOptions>,
                   _call: u64,
                   _model: &pa_types::ai::Model| {
+                assert_eq!(
+                    options.and_then(|o| o.session_id.as_deref()),
+                    Some(expected_session_id.as_str())
+                );
                 let text = match &context.messages[0] {
                     pa_types::ai::Message::User(user) => user.content.text(),
                     _ => panic!("expected a user request"),
