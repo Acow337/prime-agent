@@ -147,17 +147,17 @@ fn unnamed_streamed_tool_call_renders_code_once_named() {
     apply_streamed_tool_card(
         &mut view,
         "call-1",
-        "ipython",
+        "python_repl",
         &json!({ "code": "fibonacci(23)" }),
     );
     let card = card_of(&view).expect("the named frame creates the card");
-    assert_eq!(card.name, "ipython");
+    assert_eq!(card.name, "python_repl");
     assert!(card.args.get("code").is_some(), "args stream into the card");
     let rows = rendered_card_text(&view);
     assert!(
         rows.iter()
             .any(|row| row.contains("python") && row.contains("fibonacci(23)")),
-        "the ipython card renders the code preview: {rows:?}"
+        "the python_repl card renders the code preview: {rows:?}"
     );
     assert!(
         rows.iter()
@@ -1204,6 +1204,24 @@ fn retry_outcome_row_collapses_the_superseded_attempts() {
             .iter()
             .all(|entry| !is_superseded_attempt_row(entry)),
         "per-attempt rows must collapse: {entries:?}"
+    );
+}
+
+#[test]
+fn model_prompt_error_row_is_a_warning_status_line() {
+    let message = json!({
+        "role": "custom",
+        "customType": "model_prompt_error",
+        "content": "[model-prompt-error]\n\nPer-model system prompt additions were not applied:\n- /x/model-prompts.toml: bad TOML",
+        "display": true,
+    });
+    let entries = transcript_to_entries(&[message]);
+    assert!(
+        matches!(
+            entries.as_slice(),
+            [ChatEntry::Status { text, kind: StatusKind::Warning }] if text.contains("[model-prompt-error]")
+        ),
+        "entries: {entries:?}"
     );
 }
 
