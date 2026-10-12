@@ -45,7 +45,7 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
-            let item: Option<Vec<QueuedItem>> = {
+            let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
                     drop(core);
@@ -69,7 +69,7 @@ impl TurnRunner {
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
                     core.running_tool_calls.clear();
-                    Some(items)
+                    Some((Lane::Steering, items))
                 } else if core.follow_up.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::FollowUp);
                     core.running_admission_ids = items
@@ -80,13 +80,13 @@ impl TurnRunner {
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
                     core.running_tool_calls.clear();
-                    Some(items)
+                    Some((Lane::FollowUp, items))
                 } else {
                     core.busy = false;
                     None
                 }
             };
-            if let Some(items) = item {
+            if let Some((lane, items)) = item {
                 // No pickup checkpoint: admission recorded its busy evidence; the
                 // settle's `turn_end` verdict parks the session later. The item leaves
                 // the queue projection BEFORE its turn starts (a stale row would
@@ -109,7 +109,7 @@ impl TurnRunner {
                     let _ = self.emit_action_update(&snapshot);
                 }
                 self.push_roster_delta();
-                self.run_turn(engine, items).await;
+                self.run_turn(engine, lane, items).await;
             } else {
                 self.idle_notify.notify_waiters();
                 // Every park re-stamps the activity end: the idle-eviction
@@ -312,7 +312,8 @@ impl TurnRunner {
     pub(super) async fn run_turn(
         &self,
         engine: std::sync::Arc<dyn SessionEngine>,
-        items: Vec<QueuedItem>,
+        lane: Lane,
+        mut items: Vec<QueuedItem>,
     ) {
         let Some((first, batched)) = items.split_first() else {
             return;
@@ -388,8 +389,12 @@ impl TurnRunner {
             .iter()
             .filter_map(|item| item.admission_id.clone())
             .collect();
-        let items_done: Vec<oneshot::Sender<TurnSettle>> =
-            items.into_iter().filter_map(|item| item.done).collect();
+        // The done senders leave the items behind (done = None): an
+        // uncommitted batch returns to its lane below, whole.
+        let items_done: Vec<oneshot::Sender<TurnSettle>> = items
+            .iter_mut()
+            .filter_map(|item| item.done.take())
+            .collect();
         let turn_outcome = Arc::new(std::sync::Mutex::new(None::<TurnSettle>));
         let turn_outcome_slot = Arc::clone(&turn_outcome);
         // Whether the engine surfaced any `agent_end` this run (the
@@ -994,8 +999,11 @@ impl TurnRunner {
             }
             emitting_prefix_rows.set(false);
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
+            active_committed
         });
-        let _ = turn.await;
+        // A panicked turn cannot prove its input reached the transcript:
+        // it counts as uncommitted.
+        let committed = turn.await.unwrap_or(false);
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
@@ -1006,6 +1014,18 @@ impl TurnRunner {
             core.busy = false;
             core.active_action = None;
             core.running_admission_ids.clear();
+            // A shutdown never loses admitted input: a batch aborted before
+            // its first transcript row exists nowhere else, so it returns to
+            // the front of its lane, in order, for the settle snapshot.
+            if core.shutdown_requested && !committed {
+                let lane_items = match lane {
+                    Lane::Steering => &mut core.steering,
+                    Lane::FollowUp => &mut core.follow_up,
+                };
+                for item in items.into_iter().rev() {
+                    lane_items.push_front(item);
+                }
+            }
         }
         self.push_roster_delta();
         // The fallback `agent_end` for runs that ended without a model
