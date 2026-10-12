@@ -30,17 +30,9 @@ jobs:
       matrix:
         include:
           - pr: 3505
-            sha: b188597602864ac79140427d89f8b9feaa3c130c
-          - pr: 3424
-            sha: c017f53ee186c1b91b94b2df4fb5dc7c85a612c0
+            sha: 901345816b53ee62cf7461d412690ebdcb2ffa61
           - pr: 3431
-            sha: ed72ecde84adab3c336c720df2de6489e85f5411
-          - pr: 3409
-            sha: 3856a50e9431075185bf6b2d2ca346fd4fab9591
-          - pr: 3406
-            sha: 1dfabaf7aa18274c4b7979b15a046447874aa6f2
-          - pr: 3349
-            sha: 9e99829876943f12815216400c514d8f934664a0
+            sha: c519e596b444341ceda5e50f275db707064745b9
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -74,3 +66,12 @@ jobs:
         run: ./target/debug/prime-agent --prime-agent-bootstrap
       - name: Test the entire workspace
         run: cargo test --locked --workspace
+
+  validation-result:
+    name: exact reviewed heads complete
+    if: always()
+    needs: exact-head-tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every pinned-head job to pass
+        run: test "${{ needs.exact-head-tests.result }}" = success
