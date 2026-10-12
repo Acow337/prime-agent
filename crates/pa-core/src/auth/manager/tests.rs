@@ -1627,6 +1627,221 @@ fn a_failed_fetch_still_serves_a_landed_api_key_replacement() {
     );
 }
 
+/// The cross-process exclusion's wait bound: a backend that reports the
+/// bound exhausted while staging the incumbent's completed write — the
+/// peer grant lands as the waiter gives up — models an incumbent that
+/// completes inside the bound's last attempt.
+struct RefreshTimeoutBackend {
+    inner: crate::auth::InMemoryAuthStorageBackend,
+    /// The peer write that lands as the bound exhausts: `Some` replaces
+    /// the whole document (a fresh grant, or a logout's empty document),
+    /// `None` leaves the store untouched.
+    peer_write: std::sync::Mutex<Option<String>>,
+}
+
+impl AuthStorageBackend for RefreshTimeoutBackend {
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        self.inner.with_lock(update)
+    }
+
+    fn refresh_exclusion(&self) -> Result<Option<crate::auth::storage::RefreshExclusion>, String> {
+        if let Some(content) = self.peer_write.lock().unwrap().take() {
+            self.inner
+                .with_lock(&mut |current| {
+                    let _ = current;
+                    Ok(((), Some(content.clone())))
+                })
+                .ok();
+        }
+        Err("another process is still refreshing the credential".to_string())
+    }
+}
+
+fn storage_over_timed_out_backend(
+    oauth: Arc<dyn OAuthIntegration>,
+    provider: &str,
+    credential: &AuthCredential,
+    peer_write: Option<AuthStorageData>,
+) -> (AuthStorage, Arc<RefreshTimeoutBackend>) {
+    let backend = Arc::new(RefreshTimeoutBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        peer_write: std::sync::Mutex::new(
+            peer_write.map(|data| serde_json::to_string_pretty(&data.0).unwrap_or_default()),
+        ),
+    });
+    let mut data = AuthStorageData::default();
+    data.insert(provider, credential);
+    let seed = serde_json::to_string_pretty(&data.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    (
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth),
+        backend,
+    )
+}
+
+/// A waiter whose exclusion bound exhausts as the incumbent's write
+/// lands must still serve that fresh grant: the timeout arm re-reads and
+/// adopts, never spending its own refresh token.
+#[test]
+fn a_timed_out_expiry_refresh_serves_the_landed_peer_grant() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: None,
+    });
+    let mut peer = AuthStorageData::default();
+    peer.insert(
+        "x-expiry-timeout",
+        &oauth_credential("peer-fresh-access", now_epoch_ms() + 3_600_000),
+    );
+    let (mut auth, _backend) = storage_over_timed_out_backend(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-expiry-timeout",
+        &expired_oauth("expired-access"),
+        Some(peer),
+    );
+    assert_eq!(
+        auth.get_api_key("x-expiry-timeout").as_deref(),
+        Some("peer-fresh-access"),
+        "the timed-out lookup serves the peer's landed grant"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no exchange runs: the peer's grant spares the refresh token"
+    );
+}
+
+/// A timed-out wait with an unchanged store keeps the ordinary ladder:
+/// the lookup reports no key and never spends the refresh token.
+#[test]
+fn a_timed_out_expiry_refresh_without_a_peer_keeps_the_ladder() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: None,
+    });
+    let (mut auth, _backend) = storage_over_timed_out_backend(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-expiry-timeout-plain",
+        &expired_oauth("expired-access"),
+        None,
+    );
+    assert_eq!(
+        auth.get_api_key("x-expiry-timeout-plain"),
+        None,
+        "the timed-out lookup keeps the stored credential for a later retry"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no exchange runs without the cross-process exclusion"
+    );
+}
+
+/// The forced path's timeout arm adopts the incumbent's landed grant the
+/// same way its acquired arm does: the recovery rebinds to the peer's
+/// fresh credential without a second exchange.
+#[test]
+fn a_timed_out_force_refresh_adopts_the_landed_peer_grant() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let mut peer = AuthStorageData::default();
+    peer.insert(
+        "x-forced-timeout",
+        &oauth_credential("peer-forced-access", now_epoch_ms() + 3_600_000),
+    );
+    let (mut auth, _backend) = storage_over_timed_out_backend(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-forced-timeout",
+        &oauth_credential("stale-forced-access", now_epoch_ms() - 1_000),
+        Some(peer),
+    );
+    let outcome = auth.force_refresh_oauth("x-forced-timeout");
+    assert!(
+        matches!(&outcome, Ok(AuthCredential::Oauth { access, .. }) if access == "peer-forced-access"),
+        "the timed-out force refresh adopts the peer's landed grant"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the adopted grant never spends this attempt's refresh token"
+    );
+}
+
+/// A timed-out forced wait over an unchanged store reports the lock
+/// truth: `NotExchanged` keeps the ordinary retry ladder.
+#[test]
+fn a_timed_out_force_refresh_without_a_peer_keeps_the_ladder() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let (mut auth, _backend) = storage_over_timed_out_backend(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-forced-timeout-plain",
+        &oauth_credential("stale-forced-access", now_epoch_ms() - 1_000),
+        None,
+    );
+    let outcome = auth.force_refresh_oauth("x-forced-timeout-plain");
+    assert_eq!(
+        outcome,
+        Err(ForcedRefreshFailure::NotExchanged(
+            "another process is still refreshing the credential".to_string()
+        )),
+        "the timed-out force refresh keeps the ordinary ladder"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no exchange runs without the cross-process exclusion"
+    );
+}
+
+/// A concurrent logout that lands while the wait bound exhausts is the
+/// re-login guidance, exactly as the acquired arm's removed-grant check:
+/// the exchange must never spend a token the store no longer wants.
+#[test]
+fn a_timed_out_force_refresh_surfaces_a_landed_logout() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let (mut auth, _backend) = storage_over_timed_out_backend(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-forced-timeout-logout",
+        &oauth_credential("stale-forced-access", now_epoch_ms() - 1_000),
+        Some(AuthStorageData::default()),
+    );
+    let outcome = auth.force_refresh_oauth("x-forced-timeout-logout");
+    assert_eq!(
+        outcome,
+        Err(ForcedRefreshFailure::Rejected(
+            "the stored credential for x-forced-timeout-logout was removed".to_string()
+        )),
+        "a logout that lands at the bound surfaces the re-login guidance"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no exchange runs against a removed grant"
+    );
+}
+
 /// The forced-refresh single-flight guard must still be held while the
 /// refreshed credential persists: a waiter released between the fetch and
 /// the write re-spends the same single-use refresh token. The write

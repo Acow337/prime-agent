@@ -267,8 +267,20 @@ impl AuthStorage {
         // credential file waits here, and the re-check below then serves
         // its result without a second exchange. A live incumbent past the
         // wait bound keeps the exchange from running at all — the stored
-        // credential stands for a later retry.
+        // credential stands for a later retry. An incumbent that
+        // completed inside the bound's last attempt has already written
+        // its fresh grant: serve it rather than fail the lookup on it,
+        // exactly as the acquired arm's peer check below would.
         let Ok(_cross_process) = self.storage.refresh_exclusion() else {
+            let content = self.storage.read().unwrap_or_default();
+            if let Some(credential) = parse_storage_data(content.as_deref())
+                .ok()
+                .and_then(|data| data.credential(provider_id))
+                .filter(|credential| Some(credential) != Some(&loaded))
+            {
+                self.reload();
+                return Some(credential);
+            }
             self.reload();
             return None;
         };
@@ -392,11 +404,23 @@ impl AuthStorage {
         // same shared credential file waits here, and this attempt's peer
         // checks then serve its result without a second exchange. A live
         // incumbent past the wait bound keeps the exchange from running
-        // at all — the ordinary ladder stands.
-        let _cross_process = self
-            .storage
-            .refresh_exclusion()
-            .map_err(ForcedRefreshFailure::NotExchanged)?;
+        // at all — the ordinary ladder stands. An incumbent that
+        // completed inside the bound's last attempt has already written
+        // its fresh grant: adopt it exactly as the acquired arm's peer
+        // check would, never spending this attempt's refresh token.
+        let _cross_process = match self.storage.refresh_exclusion() {
+            Ok(cross_process) => cross_process,
+            Err(reason) => {
+                self.reload();
+                return match self.data.credential(provider_id) {
+                    Some(peer) if Some(&peer) != loaded.as_ref() => Ok(peer),
+                    Some(_) => Err(ForcedRefreshFailure::NotExchanged(reason)),
+                    None => Err(ForcedRefreshFailure::Rejected(format!(
+                        "the stored credential for {provider_id} was removed"
+                    ))),
+                };
+            }
+        };
         // An unreadable store cannot verify the peer state: the exchange
         // would spend a token this attempt may not own.
         let Ok(content) = self.storage.read() else {
