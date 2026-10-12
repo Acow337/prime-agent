@@ -471,6 +471,10 @@ impl SessionUi {
                 view.retry = None;
                 // The turn settled: the held bash cards stream into the transcript.
                 Self::flush_pending_bash(view);
+                // The turn's settle freezes every still-running tool card:
+                // a straggler's start frame never got its end, and a live
+                // timer must not tick into the next run.
+                Self::settle_straggler_cards(view);
                 // Stragglers never leak into the next run.
                 self.pending_tools.clear();
                 self.aborted_tools.clear();
@@ -916,6 +920,31 @@ impl SessionUi {
             }
         }
         false
+    }
+
+    /// The turn's settle freezes every still-running tool card: a
+    /// straggler's start frame never got its end, so its live timer would
+    /// tick into the next run's paints — stamp the settle instant, and the
+    /// card renders the frozen `Took` row every settled card shows.
+    fn settle_straggler_cards(view: &mut AgentView) {
+        let live: Vec<usize> = view
+            .chat
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let ChatEntry::Tool(card) = entry else {
+                    return None;
+                };
+                (card.started_at.is_some() && card.ended_at.is_none()).then_some(index)
+            })
+            .collect();
+        for index in live {
+            view.prepare_entry_mutation(index);
+            if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+                card.ended_at = Some(std::time::Instant::now());
+            }
+            view.mark_entry_stale(index);
+        }
     }
 
     /// `tui live tool timer`: a tool call started executing, so its running

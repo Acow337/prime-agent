@@ -28,12 +28,16 @@ use serde_json::{json, Value};
 /// `tool_execution_end`, and `turn_end`.
 struct MockSupervisor {
     listener: UnixListener,
+    /// Drop the tool_execution_end frame: the turn settles with a
+    /// still-running card (the straggler scenario).
+    straggler: bool,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
+    fn bind(socket: &std::path::Path, straggler: bool) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            straggler,
         }
     }
 
@@ -112,7 +116,10 @@ impl MockSupervisor {
                     // turn. The events queue on the socket behind the
                     // attach response, so the client consumes them in
                     // order (the same shape as the quiet-tick stream
-                    // mock) — no readiness sleep to race.
+                    // mock) — no readiness sleep to race. The STRAGGLER
+                    // switch drops the end frame: the turn settles with a
+                    // still-running card, the straggler scenario.
+                    let straggler = self.straggler;
                     let mut event_writer = writer.try_clone().expect("clone event socket");
                     std::thread::spawn(move || {
                         write_json(
@@ -129,22 +136,24 @@ impl MockSupervisor {
                             }),
                         );
                         std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
-                        write_json(
-                            &mut event_writer,
-                            &json!({
-                                "type": "session_event",
-                                "activeSessionId": "s1",
-                                "event": {
-                                    "type": "tool_execution_end",
-                                    "toolCallId": "call_1",
-                                    "toolName": "bash",
-                                    "result": {
-                                        "content": [{ "type": "text", "text": "ok" }],
-                                        "isError": false,
+                        if !straggler {
+                            write_json(
+                                &mut event_writer,
+                                &json!({
+                                    "type": "session_event",
+                                    "activeSessionId": "s1",
+                                    "event": {
+                                        "type": "tool_execution_end",
+                                        "toolCallId": "call_1",
+                                        "toolName": "bash",
+                                        "result": {
+                                            "content": [{ "type": "text", "text": "ok" }],
+                                            "isError": false,
+                                        },
                                     },
-                                },
-                            }),
-                        );
+                                }),
+                            );
+                        }
                         write_json(
                             &mut event_writer,
                             &json!({
@@ -284,7 +293,7 @@ fn a_running_tool_card_ticks_and_settles_to_the_final_duration() {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
+    let supervisor = MockSupervisor::bind(&socket, false);
     let handle = std::thread::spawn(move || supervisor.serve());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -358,6 +367,57 @@ fn a_running_tool_card_ticks_and_settles_to_the_final_duration() {
         settled_tickers,
         0,
         "the settled card never ticks again:\n{}",
+        outcome.frames[settle..].join("\n===\n")
+    );
+}
+
+/// The straggler: a tool call whose end frame never lands still gets its
+/// timer frozen at the turn's settle — the turn_end sweep stamps the card,
+/// so the frozen `Took` row renders and no later paint ticks `Elapsed`
+/// (a start-without-end must not keep a live timer into the next run).
+#[test]
+fn a_straggler_tool_card_freezes_at_the_turn_settle() {
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor::bind(&socket, true);
+    let handle = std::thread::spawn(move || supervisor.serve());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps: vec![
+            HeadlessStep::WaitRender {
+                needle: "Elapsed ".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "Took ".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitIdle { timeout_ms: 5000 },
+        ],
+        width: 100,
+        height: 40,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    let settle = outcome
+        .frames
+        .iter()
+        .position(|frame| frame.contains("Took "))
+        .expect("the straggler's timer froze at the turn settle");
+    let straggler_ticks = outcome.frames[settle..]
+        .iter()
+        .filter(|frame| frame.contains("Elapsed "))
+        .count();
+    assert_eq!(
+        straggler_ticks,
+        0,
+        "the frozen straggler never ticks again:\n{}",
         outcome.frames[settle..].join("\n===\n")
     );
 }
