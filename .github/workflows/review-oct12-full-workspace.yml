@@ -29,12 +29,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pr: 3424
-            sha: e709526ea4aa8307ec1e43bcebd0045f77e21cf2
-          - pr: 3409
-            sha: 2dcb364fcae79a75a3df3e75dbda9221f9be9772
-            source: 3856a50e9431075185bf6b2d2ca346fd4fab9591
-            base: e41c9c4c6ccabf700f1dfdc1653e7ef9c5e96312
+          - pr: 3505
+            sha: ff776720f3a924d40352dcc06d18430b0085902d
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
