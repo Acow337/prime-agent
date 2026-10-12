@@ -4,6 +4,7 @@ use crate::engine::{
     CompactionOutcome, CompactionRequest, PromptRequest, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest,
 };
+use std::path::Path;
 
 /// Holds the blocking engine thread before it can emit the first durable user
 /// row. The test's async task releases it only after shutdown has closed input.
@@ -88,11 +89,11 @@ impl SessionEngine for BeforeUserRowEngine {
 
 fn worker_with_journal() -> Arc<Worker> {
     let dir = std::env::temp_dir().join(format!("pa-worker-verdict-{}", uuid::Uuid::new_v4()));
-    worker_with_journal_in(dir)
+    worker_with_journal_in(&dir)
 }
 
-fn worker_with_journal_in(dir: PathBuf) -> Arc<Worker> {
-    std::fs::create_dir_all(&dir).unwrap();
+fn worker_with_journal_in(dir: &Path) -> Arc<Worker> {
+    std::fs::create_dir_all(dir).unwrap();
     let config = WorkerConfig {
         socket_path: dir.join("worker.sock"),
         supervisor_socket_path: PathBuf::new(),
@@ -458,7 +459,7 @@ async fn shutdown_still_acks_when_its_final_verdict_cannot_persist() {
 async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
     let fixture = tempfile::tempdir().unwrap();
     let fixture_dir = fixture.path();
-    let worker = worker_with_journal_in(fixture_dir.to_path_buf());
+    let worker = worker_with_journal_in(fixture_dir);
     // Worker::new starts its ordinary runner. Let it park before installing
     // the test-owned gate runner, so only the latter can pick this batch.
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
