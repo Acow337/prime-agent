@@ -120,7 +120,12 @@ impl SocketLease {
             crate::paths::ensure_dir(parent)?;
         }
         let lock = acquire_cleanup_lock(path).await?;
-        let (lock_path, lock_dir) = lock.into_parts();
+        // The lease's lock is fresh from the acquire (nothing released
+        // it), but the released-state surface is explicit: a `None`
+        // here would mean a released guard reached the lease.
+        let Some((lock_path, lock_dir)) = lock.into_parts() else {
+            anyhow::bail!("the acquired cleanup lock carried no pinned handle");
+        };
         // The handle pins the inode this supervisor acquired: if the path
         // check or metadata read fails, ownership is unprovable, so leave
         // the artifact to expire instead of risking removal of a racing
@@ -758,12 +763,8 @@ fn release_lock_dir_identity(
         );
         #[cfg(target_os = "linux")]
         let owner_result = {
-            let result = pa_core::platform::setup_private_dir(
-                &placeholder,
-                0o700,
-                Some(&owner_record),
-                None,
-            );
+            let result =
+                pa_core::platform::setup_private_dir(&placeholder, Some(&owner_record), None);
             match result {
                 Ok(setup) => Ok(setup),
                 Err(error) => {

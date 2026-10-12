@@ -582,22 +582,22 @@ impl LockDir {
     /// manages ownership and release itself (supervisor-lifetime leases
     /// with inode-guarded cleanup). Unix only.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the handle is no longer pinned - unreachable in practice,
-    /// because nothing takes it before this transfer (`release` only
-    /// runs from `Drop`).
+    /// Returns `None` when the handle is no longer pinned (an explicit
+    /// `release()` ran first): a released guard never panics the
+    /// transfer.
     #[must_use]
     #[cfg(unix)]
-    pub fn into_parts(self) -> (PathBuf, fs::File) {
+    pub fn into_parts(self) -> Option<(PathBuf, fs::File)> {
         let mut this = std::mem::ManuallyDrop::new(self);
         let path = std::mem::take(&mut this.path);
         // SAFETY: `this` sits in a ManuallyDrop, so no Drop ever runs on
         // it; the handle is read out exactly once and is not
-        // double-dropped. The handle is always present here: nothing
-        // takes it before the transfer (`release` only runs from Drop).
+        // double-dropped. An explicit `release()` may have taken it;
+        // that is a released guard, never a panic.
         let dir = unsafe { std::ptr::read(&raw const this.dir) };
-        (path, dir.expect("into_parts transfers the pinned handle"))
+        dir.map(|dir| (path, dir))
     }
 
     /// Acquire exclusively: create `{file}.lock` as an empty directory and
@@ -771,7 +771,7 @@ impl LockDir {
 
     #[cfg(target_os = "linux")]
     fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
-        let candidate = Self::claim_candidate_name(path)?;
+        let mut candidate = Self::claim_candidate_name(path)?;
         // The candidate's setup runs through the no-follow pinned handle:
         // a swapped symlink or file fails the type check, a swapped
         // non-empty directory fails the emptiness check. Fail closed on
@@ -790,20 +790,29 @@ impl LockDir {
         // scope by the PR's own earlier accepted-risk scoping, which
         // this residual strictly subclasses (they can replace the
         // public lock path outright).
-        let dir = match setup_private_dir(&candidate, 0o700, owner, None) {
-            Ok((dir, _identity)) => dir,
-            Err(error) => {
-                // An ordinary I/O failure (a pin errno, a write failure
-                // through the pinned handle) happens to THIS call's own
-                // creation - remove it so failed acquisitions do not
-                // accumulate stale reclaim never touches. A fresh-name
-                // swap refusal PRESERVES the entry untouched (a blind
-                // remove could traverse a symlink into a victim) and
-                // propagates for the caller's regeneration.
-                if !is_fresh_name_swap(&error) {
-                    let _ = remove_candidate_dir(&candidate);
+        let dir = loop {
+            let setup = setup_private_dir(&candidate, owner, None);
+            match setup {
+                Ok((dir, _identity)) => break dir,
+                Err(error) if is_fresh_name_swap(&error) => {
+                    // A swapped entry at the fresh private name (ELOOP
+                    // from the no-follow refusal, the emptiness or the
+                    // write-handle mismatch sentinel): PRESERVE it
+                    // untouched (a blind remove could traverse a symlink
+                    // into a victim) and REGENERATE a fresh candidate -
+                    // the swap is the same already-collision class as a
+                    // taken name, never a fatal acquisition failure.
+                    candidate = Self::claim_candidate_name(path)?;
                 }
-                return Err(error);
+                Err(error) => {
+                    // An ordinary I/O failure (a pin errno, a write
+                    // failure through the pinned handle) happens to
+                    // THIS call's own creation - remove it so failed
+                    // acquisitions do not accumulate stale reclaim
+                    // never touches.
+                    let _ = remove_candidate_dir(&candidate);
+                    return Err(error);
+                }
             }
         };
         let (sec, nanos) = probe_mtime();
@@ -1329,28 +1338,24 @@ impl LockDir {
                 // no pathname chmod or write remains; the helper's
                 // returned identity is the positive witness a possible
                 // residue mark_released_at requires.
-                let placeholder_identity = match setup_private_dir(
-                    &placeholder,
-                    0o700,
-                    Some(&process_owner_record()),
-                    None,
-                ) {
-                    Ok((_handle, identity)) => Some(identity),
-                    Err(error) => {
-                        // An ordinary setup failure (a pin errno, a note
-                        // write or close through the pinned handle)
-                        // happens to THIS pass's own created placeholder:
-                        // remove it through the pinned, fd-relative
-                        // helper so a failed release does not leak a
-                        // live-owned `.b...` residue beside the lock. A
-                        // fresh-name swap refusal PRESERVES the
-                        // substituted entry untouched.
-                        if !is_fresh_name_swap(&error) {
-                            let _ = remove_candidate_dir(&placeholder);
+                let placeholder_identity =
+                    match setup_private_dir(&placeholder, Some(&process_owner_record()), None) {
+                        Ok((_handle, identity)) => Some(identity),
+                        Err(error) => {
+                            // An ordinary setup failure (a pin errno, a note
+                            // write or close through the pinned handle)
+                            // happens to THIS pass's own created placeholder:
+                            // remove it through the pinned, fd-relative
+                            // helper so a failed release does not leak a
+                            // live-owned `.b...` residue beside the lock. A
+                            // fresh-name swap refusal PRESERVES the
+                            // substituted entry untouched.
+                            if !is_fresh_name_swap(&error) {
+                                let _ = remove_candidate_dir(&placeholder);
+                            }
+                            return InodeRelease::Failed;
                         }
-                        return InodeRelease::Failed;
-                    }
-                };
+                    };
                 match rename_noreplace::exchange(&location, &placeholder) {
                     Ok(()) => {
                         if identity_at(&placeholder) == Some(*pinned) {

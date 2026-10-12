@@ -84,7 +84,6 @@ pub(super) fn create_private_dir_guarded(path: &Path) -> io::Result<()> {
 /// a fresh name on.
 pub fn setup_private_dir(
     path: &Path,
-    mode: u32,
     owner: Option<&str>,
     claimed_at: Option<&str>,
 ) -> io::Result<(fs::File, (u64, u64))> {
@@ -169,8 +168,9 @@ pub fn setup_private_dir(
     // failure class) must not fail the whole acquisition for a repair
     // the creation already performed. The only entry the repair could
     // differ on is the accepted-risk pre-created swap, whose mode this
-    // mount never allows anyone to fix anyway.
-    let _ = unsafe { libc::fchmod(dir.as_raw_fd(), mode) };
+    // mount never allows anyone to fix anyway. The mode is FIXED at
+    // 0700 (the guarded mkdir's own mode - the parameter was ceremony).
+    let _ = unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) };
     if let Some(owner) = owner {
         write_owner_through(&dir, format!("{owner}\n").as_bytes())?;
     }

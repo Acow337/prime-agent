@@ -85,7 +85,9 @@ fn pinned_handle_matches_the_created_directory() {
     let file = dir.path().join("auth.json");
     std::fs::write(&file, "{}").unwrap();
     let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-    let (path, handle) = guard.into_parts();
+    let Some((path, handle)) = guard.into_parts() else {
+        panic!("the transfer dropped the pinned handle of a live guard")
+    };
     let metadata = std::fs::symlink_metadata(&path).unwrap();
     let pinned = handle.metadata().unwrap();
     assert_eq!(
@@ -102,7 +104,9 @@ fn pinned_handle_survives_a_path_swap() {
     let file = dir.path().join("auth.json");
     std::fs::write(&file, "{}").unwrap();
     let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-    let (path, handle) = guard.into_parts();
+    let Some((path, handle)) = guard.into_parts() else {
+        panic!("the transfer dropped the pinned handle of a live guard")
+    };
     let acquired = {
         let metadata = handle.metadata().unwrap();
         (metadata.dev(), metadata.ino())
@@ -130,7 +134,9 @@ fn into_parts_transfers_the_path_and_pinned_handle() {
     let file = dir.path().join("auth.json");
     std::fs::write(&file, "{}").unwrap();
     let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-    let (path, handle) = guard.into_parts();
+    let Some((path, handle)) = guard.into_parts() else {
+        panic!("the transfer dropped the pinned handle of a live guard")
+    };
     assert!(path.is_dir());
     let metadata = handle.metadata().unwrap();
     let at_path = std::fs::symlink_metadata(&path).unwrap();
@@ -882,6 +888,24 @@ impl Drop for ReleaseUnsupportedFault {
             .unwrap()
             .retain(|path| path != &self.0);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn into_parts_after_explicit_release_returns_none() {
+    // Red-first regression for the released-guard panic: an explicit
+    // `release()` takes the pinned handle, and `into_parts()` on the
+    // released guard must report the released state (None) instead of
+    // panicking.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.json");
+    std::fs::write(&file, "{}").unwrap();
+    let mut guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+    guard.release();
+    assert!(
+        guard.into_parts().is_none(),
+        "a released guard must transfer nothing"
+    );
 }
 
 #[cfg(target_os = "linux")]

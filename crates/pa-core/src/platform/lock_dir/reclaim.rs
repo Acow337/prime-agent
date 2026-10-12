@@ -376,31 +376,27 @@ impl LockDir {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let placeholder_identity = match setup_private_dir(
-                &placeholder,
-                0o700,
-                Some(&process_owner_record()),
-                Some(&note),
-            ) {
-                Ok((_handle, identity)) => Some(identity),
-                Err(error) if is_fresh_name_swap(&error) => {
-                    // A swapped entry at the fresh private name (ELOOP
-                    // from the no-follow refusal, the emptiness or the
-                    // write-handle mismatch sentinel): PRESERVE it
-                    // untouched (a blind remove could traverse a
-                    // symlink into a victim) and regenerate a fresh
-                    // private name.
-                    continue;
-                }
-                Err(error) => {
-                    // An ordinary setup failure (a pin errno, a note
-                    // write through the pinned handle) happens to THIS
-                    // dance's own creation - remove it so failed
-                    // claims do not accumulate inert dotnames.
-                    let _ = remove_candidate_dir(&placeholder);
-                    return Err(error);
-                }
-            };
+            let placeholder_identity =
+                match setup_private_dir(&placeholder, Some(&process_owner_record()), Some(&note)) {
+                    Ok((_handle, identity)) => Some(identity),
+                    Err(error) if is_fresh_name_swap(&error) => {
+                        // A swapped entry at the fresh private name (ELOOP
+                        // from the no-follow refusal, the emptiness or the
+                        // write-handle mismatch sentinel): PRESERVE it
+                        // untouched (a blind remove could traverse a
+                        // symlink into a victim) and regenerate a fresh
+                        // private name.
+                        continue;
+                    }
+                    Err(error) => {
+                        // An ordinary setup failure (a pin errno, a note
+                        // write through the pinned handle) happens to THIS
+                        // dance's own creation - remove it so failed
+                        // claims do not accumulate inert dotnames.
+                        let _ = remove_candidate_dir(&placeholder);
+                        return Err(error);
+                    }
+                };
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
                     // Test-only, path-scoped injection: simulate the live
