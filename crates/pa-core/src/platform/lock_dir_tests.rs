@@ -939,3 +939,44 @@ fn an_unowned_fallback_release_never_unlinks_a_reclaimed_successor() {
     drop(successor);
     drop(displaced);
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn a_create_path_fresh_name_swap_regenerates_a_candidate() {
+    // Red-first regression for the create arm's swap retry: a ONE-SHOT,
+    // path-scoped injection swaps a foreign (non-empty) directory onto
+    // the freshly claimed candidate right before the setup. The
+    // acquisition must PRESERVE the substituted entry (a blind remove
+    // could traverse a substituted victim) and REGENERATE a fresh
+    // candidate - the swap is the same collision class as a taken
+    // name, never a fatal acquisition error - and the acquisition
+    // SUCCEEDS. The reverted arm (returning the swap error) fails the
+    // acquire.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.json");
+    std::fs::write(&file, "{}").unwrap();
+    *super::CREATE_SETUP_SWAP.lock().unwrap() = Some(lock_of(&file));
+    let guard = LockDir::acquire(&file, MIN_STALE)
+        .expect("a fresh-name swap regenerates and the acquisition succeeds");
+    drop(guard);
+    // The genuinely substituted entry is preserved: the injection
+    // moved the own candidate aside and seated a DISTINCT directory
+    // (its own inode, carrying the foreign note) at the candidate
+    // name. Both dotdirs must remain - neither is ever removed
+    // through the swapped name - and the substituted one is intact.
+    let substituted: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".c"))
+        .collect();
+    assert_eq!(substituted.len(), 1, "the substituted entry stays");
+    assert!(
+        substituted[0].path().join("foreign").exists(),
+        "the substituted entry is intact"
+    );
+    let aside = dir.path().join(".swap-aside-injected");
+    assert!(
+        aside.is_dir(),
+        "the moved-aside own candidate also stays (inert, never removed through the swapped name)"
+    );
+}

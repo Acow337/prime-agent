@@ -168,8 +168,8 @@ pub fn setup_private_dir(
     // failure class) must not fail the whole acquisition for a repair
     // the creation already performed. The only entry the repair could
     // differ on is the accepted-risk pre-created swap, whose mode this
-    // mount never allows anyone to fix anyway. The mode is FIXED at
-    // 0700 (the guarded mkdir's own mode - the parameter was ceremony).
+    // mount never allows anyone to fix anyway. The repair target is
+    // ALWAYS 0700 - the guarded mkdir's own mode.
     let _ = unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) };
     if let Some(owner) = owner {
         write_owner_through(&dir, format!("{owner}\n").as_bytes())?;

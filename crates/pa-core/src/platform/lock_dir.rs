@@ -46,6 +46,28 @@ const MIN_STALE: Duration = Duration::from_secs(2);
 pub(crate) static RELEASE_UNSUPPORTED_FAULT: std::sync::Mutex<Vec<std::path::PathBuf>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test-only, path-scoped, ONE-SHOT fault injection for the create arm:
+/// on the next `setup_private_dir` call for an armed lock path, a plain
+/// directory is swapped onto the freshly claimed candidate name right
+/// before the setup runs, so the setup observes a substituted entry and
+/// reports the fresh-name swap sentinel (the create arm's regeneration
+/// path - the retry this regression pins).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static CREATE_SETUP_SWAP: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn create_setup_swap_take(path: &Path) -> bool {
+    let Ok(mut armed) = CREATE_SETUP_SWAP.lock() else {
+        return false;
+    };
+    matches!(armed.as_ref(), Some(armed_path) if armed_path == path)
+        .then(|| {
+            *armed = None;
+        })
+        .is_some()
+}
+
 /// The mtime bump proper-lockfile's precision probe writes: the next whole
 /// second plus 5ms, so a millisecond-precision filesystem records a time
 /// that is "not on the second".
@@ -791,6 +813,22 @@ impl LockDir {
         // this residual strictly subclasses (they can replace the
         // public lock path outright).
         let dir = loop {
+            // Test-only, ONE-SHOT path-scoped injection: a REAL swap -
+            // the freshly claimed candidate is moved aside and a
+            // DISTINCT directory (a different inode carrying a foreign
+            // note) takes its name - so the setup observes a genuinely
+            // substituted entry (not a seeded own creation) and reports
+            // the fresh-name swap sentinel; the arm's regeneration path
+            // runs.
+            #[cfg(all(test, target_os = "linux"))]
+            if create_setup_swap_take(path) {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                let aside = parent.join(".swap-aside-injected");
+                std::fs::rename(&candidate, &aside).expect("move the own candidate aside");
+                std::fs::create_dir(&candidate).expect("seat the distinct substituted directory");
+                std::fs::write(candidate.join("foreign"), "swapped")
+                    .expect("seed the substituted entry");
+            }
             let setup = setup_private_dir(&candidate, owner, None);
             match setup {
                 Ok((dir, _identity)) => break dir,
