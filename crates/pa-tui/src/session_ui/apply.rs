@@ -416,8 +416,11 @@ impl SessionUi {
                 args,
             } => {
                 // The failed frame's sweep owns the call: the run's late tool frames land
-                // on nothing.
-                if !self.aborted_tools.contains(&tool_call_id) {
+                // on nothing. A start outside a live turn is one of those late
+                // frames — it would allocate a fresh card whose timer then
+                // reticks the settled id on this run's paints, so it lands
+                // on nothing too.
+                if !self.aborted_tools.contains(&tool_call_id) && self.turn_active {
                     crate::snapshot::apply_tool_execution_start(
                         view,
                         &tool_call_id,
@@ -474,7 +477,7 @@ impl SessionUi {
                 // The turn's settle freezes every still-running tool card:
                 // a straggler's start frame never got its end, and a live
                 // timer must not tick into the next run.
-                Self::settle_straggler_cards(view);
+                self.settle_straggler_cards(view);
                 // Stragglers never leak into the next run.
                 self.pending_tools.clear();
                 self.aborted_tools.clear();
@@ -922,15 +925,19 @@ impl SessionUi {
         false
     }
 
-    /// The turn's settle settles every still-running tool card the same
-    /// way the failed-frame sweep does: a straggler's start frame never
-    /// got its end, so its live timer would tick into the next run's
-    /// paints and its header would keep spinning — a terminal error
-    /// result (no spinner, a cacheable settled card), the settle
-    /// instant, and `aborted` (a late end frame lands on nothing, the
-    /// same guard the failed frame's sweep leaves behind).
-    fn settle_straggler_cards(view: &mut AgentView) {
-        let live: Vec<usize> = view
+    /// The turn's settle settles the calls the turn still holds pending —
+    /// a straggler's start frame never got its end, so its live timer
+    /// would tick into the next run's paints and its header would keep
+    /// spinning. Scoped to `pending_tools`, the failed-frame sweep's own
+    /// scope, so a later turn's end never stamps an earlier run's card;
+    /// the sweep runs before the set clears. The settle is the full
+    /// failed-frame shape (a terminal error result, the settle instant,
+    /// `aborted` — a late end frame lands on nothing) plus the run's
+    /// honest duration in `durationMs`: the bash panel's static `Took`
+    /// row and the ipython summary's duration slot both freeze on it.
+    fn settle_straggler_cards(&self, view: &mut AgentView) {
+        let now = std::time::Instant::now();
+        let live: Vec<(usize, u64)> = view
             .chat
             .iter()
             .enumerate()
@@ -938,10 +945,15 @@ impl SessionUi {
                 let ChatEntry::Tool(card) = entry else {
                     return None;
                 };
-                (card.started_at.is_some() && card.ended_at.is_none()).then_some(index)
+                if !self.pending_tools.contains(&card.id) {
+                    return None;
+                }
+                let started = card.started_at?;
+                (card.ended_at.is_none())
+                    .then_some((index, now.duration_since(started).as_millis() as u64))
             })
             .collect();
-        for index in live {
+        for (index, duration_ms) in live {
             view.prepare_entry_mutation(index);
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
                 card.result = Some(ToolResultView {
@@ -949,11 +961,11 @@ impl SessionUi {
                         "type": "text",
                         "text": "the turn ended before this call returned",
                     })],
-                    details: serde_json::Value::Null,
+                    details: serde_json::json!({ "durationMs": duration_ms }),
                     is_error: true,
                 });
                 card.result_partial = false;
-                card.ended_at = Some(std::time::Instant::now());
+                card.ended_at = Some(now);
                 card.aborted = true;
             }
             view.mark_entry_stale(index);

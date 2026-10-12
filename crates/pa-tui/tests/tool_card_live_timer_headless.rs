@@ -28,16 +28,35 @@ use serde_json::{json, Value};
 /// `tool_execution_end`, and `turn_end`.
 struct MockSupervisor {
     listener: UnixListener,
-    /// Drop the `tool_execution_end` frame: the turn settles with a
-    /// still-running card (the straggler scenario).
-    straggler: bool,
+    /// The scripted frame sequence the mock daemon streams after the
+    /// attach (one scenario per test).
+    scenario: Scenario,
+}
+
+/// The attach-then-stream scenarios: which frames the mock writes decides
+/// which settle path the test drives.
+#[derive(Clone, Copy, PartialEq)]
+enum Scenario {
+    /// The quiet bash run: start, silent window, end, `turn_end`.
+    Quiet,
+    /// The bash straggler: the end frame is dropped, so the turn's settle
+    /// freezes the card; then a late end frame and a late start (the
+    /// retick probe) must both land on nothing.
+    Straggler,
+    /// The python_repl straggler: same shape with the ipython shell, so
+    /// the summary's duration slot freezes instead of vanishing.
+    IpythonStraggler,
+    /// The lost turn: turn one's call never ends and its `turn_end`
+    /// never lands; turn two runs to its own settle, which must leave
+    /// turn one's card alone (the settle is pending-scoped).
+    LostTurn,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path, straggler: bool) -> Self {
+    fn bind(socket: &std::path::Path, scenario: Scenario) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
-            straggler,
+            scenario,
         }
     }
 
@@ -109,113 +128,84 @@ impl MockSupervisor {
                 }
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
-                    // The quiet tool run happens from a side thread (the
-                    // reader loop keeps answering the client's post-attach
-                    // requests): start the call, stay silent while it
-                    // executes, then land the final result and end the
-                    // turn. The events queue on the socket behind the
-                    // attach response, so the client consumes them in
-                    // order (the same shape as the quiet-tick stream
-                    // mock) — no readiness sleep to race. The STRAGGLER
-                    // switch drops the end frame: the turn settles with a
-                    // still-running card, the straggler scenario.
-                    let straggler = self.straggler;
-                    let mut event_writer = writer.try_clone().expect("clone event socket");
+                    // The scripted stream happens from a side thread
+                    // (the reader loop keeps answering the client's
+                    // post-attach requests); the events queue on the
+                    // socket behind the attach response, so the client
+                    // consumes them in order (the same shape as the
+                    // quiet-tick stream mock) — no readiness sleep to
+                    // race.
+                    let scenario = self.scenario;
+                    let mut w = writer.try_clone().expect("clone event socket");
                     std::thread::spawn(move || {
-                        write_json(
-                            &mut event_writer,
-                            &json!({
-                                "type": "session_event",
-                                "activeSessionId": "s1",
-                                "event": {
-                                    "type": "tool_execution_start",
-                                    "toolCallId": "call_1",
-                                    "toolName": "bash",
-                                    "args": { "command": "sleep 1" },
-                                },
-                            }),
-                        );
-                        std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
-                        if !straggler {
-                            write_json(
-                                &mut event_writer,
-                                &json!({
-                                    "type": "session_event",
-                                    "activeSessionId": "s1",
-                                    "event": {
-                                        "type": "tool_execution_end",
+                        match scenario {
+                            Scenario::Quiet => {
+                                tool_start(&mut w, "bash", json!({ "command": "sleep 1" }));
+                                std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
+                                tool_end(&mut w, "bash", "ok");
+                                event(&mut w, json!({ "type": "turn_end" }));
+                            }
+                            Scenario::Straggler => {
+                                tool_start(&mut w, "bash", json!({ "command": "sleep 1" }));
+                                std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
+                                // The end frame is dropped: the turn
+                                // settles with a still-running card.
+                                event(&mut w, json!({ "type": "turn_end" }));
+                                // The probes, after the turn: a late end
+                                // (the resurrection probe — the aborted
+                                // stamp must keep it landing on nothing)
+                                // and a late start (the retick probe —
+                                // outside a live turn it must land on
+                                // nothing too, no fresh ticking card).
+                                std::thread::sleep(std::time::Duration::from_millis(250));
+                                tool_end(&mut w, "bash", "late frame resurrection");
+                                tool_start(&mut w, "bash", json!({ "command": "sleep 2" }));
+                                drain_barrier(&mut w);
+                            }
+                            Scenario::IpythonStraggler => {
+                                tool_start(
+                                    &mut w,
+                                    "python_repl",
+                                    json!({ "code": "print('x')" }),
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
+                                event(&mut w, json!({ "type": "turn_end" }));
+                                drain_barrier(&mut w);
+                            }
+                            Scenario::LostTurn => {
+                                // Turn one (the attach's streaming turn):
+                                // a start and a streamed partial, but the
+                                // end frame AND the turn's own `turn_end`
+                                // never land — the turn is lost.
+                                tool_start(&mut w, "bash", json!({ "command": "sleep 1" }));
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                event(
+                                    &mut w,
+                                    json!({
+                                        "type": "tool_execution_update",
                                         "toolCallId": "call_1",
-                                        "toolName": "bash",
-                                        "result": {
-                                            "content": [{ "type": "text", "text": "ok" }],
-                                            "isError": false,
+                                        "partialResult": {
+                                            "content": [{
+                                                "type": "text",
+                                                "text": "turn one partial output",
+                                            }],
                                         },
-                                    },
-                                }),
-                            );
-                        }
-                        write_json(
-                            &mut event_writer,
-                            &json!({
-                                "type": "session_event",
-                                "activeSessionId": "s1",
-                                "event": { "type": "turn_end" },
-                            }),
-                        );
-                        if straggler {
-                            // The resurrection probe: a late end frame for
-                            // the settled straggler, after the turn. The
-                            // sweep's aborted stamp must keep it landing
-                            // on nothing (the frozen timing is final).
-                            std::thread::sleep(std::time::Duration::from_millis(250));
-                            write_json(
-                                &mut event_writer,
-                                &json!({
-                                    "type": "session_event",
-                                    "activeSessionId": "s1",
-                                    "event": {
-                                        "type": "tool_execution_end",
-                                        "toolCallId": "call_1",
-                                        "toolName": "bash",
-                                        "result": {
-                                            "content": [{ "type": "text", "text": "late frame resurrection" }],
-                                            "isError": false,
-                                        },
-                                    },
-                                }),
-                            );
-                            // The drain barrier, immediately after the
-                            // late end on the same socket: its render is
-                            // the observable proof the client processed
-                            // the late frame first (socket order), so the
-                            // no-resurrection assertion cannot pass
-                            // vacuously when the plan finishes early.
-                            write_json(
-                                &mut event_writer,
-                                &json!({
-                                    "type": "session_event",
-                                    "activeSessionId": "s1",
-                                    "event": {
-                                        "type": "message_start",
-                                        "message": {
-                                            "role": "user",
-                                            "content": [{ "type": "text", "text": "late-probe-drained" }],
-                                        },
-                                    },
-                                }),
-                            );
+                                    }),
+                                );
+                                // Turn two runs to its own settle; the
+                                // pending-scoped sweep must leave turn
+                                // one's card alone.
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                event(&mut w, json!({ "type": "turn_start" }));
+                                tool_start(&mut w, "bash", json!({ "command": "sleep 2" }));
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                tool_end(&mut w, "bash", "turn two output");
+                                event(&mut w, json!({ "type": "turn_end" }));
+                                drain_barrier(&mut w);
+                            }
                         }
                     });
                 }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
                         }),
                     );
                 }
@@ -229,6 +219,64 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     line.push('\n');
     writer.write_all(line.as_bytes()).expect("write mock frame");
     writer.flush().expect("flush mock frame");
+}
+
+/// One session event frame on the mock socket.
+fn event(writer: &mut UnixStream, payload: Value) {
+    write_json(
+        writer,
+        &json!({
+            "type": "session_event",
+            "activeSessionId": "s1",
+            "event": payload,
+        }),
+    );
+}
+
+/// The `tool_execution_start` frame for the mock's single call id.
+fn tool_start(writer: &mut UnixStream, tool: &str, args: Value) {
+    event(
+        writer,
+        json!({
+            "type": "tool_execution_start",
+            "toolCallId": "call_1",
+            "toolName": tool,
+            "args": args,
+        }),
+    );
+}
+
+/// The `tool_execution_end` frame for the mock's single call id.
+fn tool_end(writer: &mut UnixStream, tool: &str, text: &str) {
+    event(
+        writer,
+        json!({
+            "type": "tool_execution_end",
+            "toolCallId": "call_1",
+            "toolName": tool,
+            "result": {
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            },
+        }),
+    );
+}
+
+/// The drain barrier: a visible user row whose render is the observable
+/// proof the frames written just before it on the same socket were
+/// processed first, so the tests' negative assertions cannot pass
+/// vacuously when the plan finishes early.
+fn drain_barrier(writer: &mut UnixStream) {
+    event(
+        writer,
+        json!({
+            "type": "message_start",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "late-probe-drained" }],
+            },
+        }),
+    );
 }
 
 /// The attach result: a streaming mid-turn snapshot whose prompt landed
@@ -336,7 +384,7 @@ fn a_running_tool_card_ticks_and_settles_to_the_final_duration() {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket, false);
+    let supervisor = MockSupervisor::bind(&socket, Scenario::Quiet);
     let handle = std::thread::spawn(move || supervisor.serve());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -425,7 +473,7 @@ fn a_straggler_tool_card_freezes_at_the_turn_settle() {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket, true);
+    let supervisor = MockSupervisor::bind(&socket, Scenario::Straggler);
     let handle = std::thread::spawn(move || supervisor.serve());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -488,5 +536,177 @@ fn a_straggler_tool_card_freezes_at_the_turn_settle() {
         !rendered.contains("resurrection"),
         "the late end frame lands on the aborted straggler:
 {rendered}"
+    );
+}
+
+/// The lost turn: turn one's call never ends and its `turn_end` never
+/// lands, so turn two runs to its own settle. The settle is scoped to the
+/// turn's own pending calls — a later turn's end must never stamp an
+/// earlier run's still-running card (replacing its streamed output with
+/// the settle error), the same scoping the failed-frame sweep keeps.
+#[test]
+fn a_lost_turns_card_is_not_settled_by_a_later_turn() {
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor::bind(&socket, Scenario::LostTurn);
+    let handle = std::thread::spawn(move || supervisor.serve());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps: vec![
+            HeadlessStep::WaitRender {
+                needle: "turn one partial output".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "Took ".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "late-probe-drained".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitIdle { timeout_ms: 5000 },
+        ],
+        width: 100,
+        height: 40,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    // The barrier rendered: the negatives below are read only after turn
+    // two's settle demonstrably drained.
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("late-probe-drained")),
+        "the drain barrier rendered:
+{}",
+        outcome.frames.join("
+===
+")
+    );
+    let rendered = outcome.frames.join("
+===
+");
+    assert!(
+        rendered.contains("turn one partial output"),
+        "the lost turn's streamed output survives the later turn's settle:
+{rendered}"
+    );
+    assert!(
+        !rendered.contains("turn ended before"),
+        "the later turn's settle never stamps the earlier run's card:
+{rendered}"
+    );
+    assert!(
+        rendered.contains("turn two output"),
+        "turn two's own call settles normally:
+{rendered}"
+    );
+}
+
+/// The python_repl straggler: the summary's duration slot ticks while the
+/// cell runs, and at the settle it FREEZES on the run's honest duration
+/// (the settle result carries `durationMs`) instead of vanishing — the
+/// bash panel keeps its static `Took` row from the same timestamps, and
+/// the ipython summary keeps its duration segment.
+#[test]
+fn a_python_repl_straggler_freezes_its_duration_slot() {
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor::bind(&socket, Scenario::IpythonStraggler);
+    let handle = std::thread::spawn(move || supervisor.serve());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps: vec![
+            HeadlessStep::WaitRender {
+                needle: "\u{2191} 1 lines".to_string(),
+                timeout_ms: 5000,
+            },
+            // The settle marker: the terminal error status replaces the
+            // working spinner.
+            HeadlessStep::WaitRender {
+                needle: "\u{2717}".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "late-probe-drained".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitIdle { timeout_ms: 5000 },
+        ],
+        width: 100,
+        height: 40,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    let settle = outcome
+        .frames
+        .iter()
+        .position(|frame| frame.contains("\u{2717}"))
+        .expect("the settled cell renders the error marker");
+    assert!(
+        outcome.frames[settle..]
+            .iter()
+            .any(|frame| frame.contains("late-probe-drained")),
+        "the drain barrier rendered:
+{}",
+        outcome.frames[settle..].join("
+===
+")
+    );
+    // The frozen duration: the summary's last segment on the settled
+    // frame parses as the run's duration (a `durationMs` number), the
+    // same shape the kernel's `durationMs` always rendered.
+    let settled = &outcome.frames[settle..];
+    let with_duration = settled
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .lines()
+                .find(|line| line.contains("\u{2717} python"))
+                .map(|line| line.to_string())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !with_duration.is_empty(),
+        "the settled cell's summary renders:
+{}",
+        settled.join("
+===
+")
+    );
+    let summary = with_duration[0].clone();
+    let duration_part = summary
+        .rsplit(" \u{00b7} ")
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert!(
+        (duration_part.ends_with('s')
+            && duration_part
+                .trim_end_matches('s')
+                .parse::<f64>()
+                .is_ok())
+            || (duration_part.ends_with("ms")
+                && duration_part
+                    .trim_end_matches("ms")
+                    .parse::<f64>()
+                    .is_ok()),
+        "the summary's duration slot freezes on the run's duration, not vanishes:
+{summary}"
     );
 }
