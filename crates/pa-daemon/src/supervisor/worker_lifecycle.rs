@@ -751,7 +751,7 @@ impl Supervisor {
 
     /// Delete one stopped worker's descriptor only after its process is provably gone (TS
     /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
-    /// it behind its lease. Returns whether the descriptor was deleted.
+    /// it behind its lease. Returns whether the descriptor was deleted or already absent.
     pub(super) async fn retire_worker_after_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -796,7 +796,15 @@ impl Supervisor {
                 ) {
                     let _ = std::fs::remove_file(&recovery_journal_path);
                 }
-                let _ = std::fs::remove_file(&resident.descriptor_path);
+                if let Err(error) = std::fs::remove_file(&resident.descriptor_path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        self.log_line(&format!(
+                            "failed to retire the descriptor of session worker {}: {error}; descriptor kept",
+                            resident.worker_id
+                        ));
+                        return false;
+                    }
+                }
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
@@ -1034,7 +1042,7 @@ mod tests {
         let resident =
             ResidentWorker::new("w-gone".to_string(), descriptor, descriptor_path.clone());
 
-        supervisor.retire_worker_after_stop(&resident).await;
+        assert!(supervisor.retire_worker_after_stop(&resident).await);
 
         assert!(
             !journal_path.exists(),
@@ -1043,5 +1051,52 @@ mod tests {
         assert!(!descriptor_path.exists());
         assert_eq!(std::fs::read(unowned_journal).unwrap(), retained);
         assert_eq!(std::fs::read(unknown_journal).unwrap(), retained);
+    }
+
+    #[tokio::test]
+    async fn retirement_reports_unlink_failure_and_keeps_pending_identity_for_retry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = supervisor_in(dir.path());
+        let descriptor_path = supervisor.descriptor_dir.join("w-retire.json");
+        // No recorded identity means this fixture never reaches a signal
+        // carrier. A directory forces an unlink error even when run as root.
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-retire",
+            "pid": 0,
+            "socketPath": dir.path().join("worker.sock"),
+            "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+            "supervisorSocketPath": supervisor.options.socket_path,
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-retire",
+            "createdAt": "2026-10-07T00:00:00Z",
+            "updatedAt": "2026-10-07T00:00:00Z",
+            "lifecycle": "stopping",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        std::fs::create_dir(&descriptor_path).expect("blocked descriptor path");
+        crate::descriptor::write_identity_pending(
+            &descriptor_path,
+            "moved-session",
+            "moved.jsonl",
+            "2026-10-07T00:00:01Z",
+        )
+        .expect("pending identity");
+        let resident =
+            ResidentWorker::new("w-retire".to_string(), descriptor, descriptor_path.clone());
+
+        assert!(!supervisor.retire_worker_after_stop(&resident).await);
+        assert!(descriptor_path.is_dir());
+        assert!(crate::descriptor::read_identity_pending(&descriptor_path).is_some());
+
+        std::fs::remove_dir(&descriptor_path).expect("unblock descriptor path");
+        persist_worker(&descriptor_path, &resident.descriptor.lock().await)
+            .expect("descriptor persisted for retry");
+        assert!(supervisor.retire_worker_after_stop(&resident).await);
+        assert!(!descriptor_path.exists());
+        assert!(crate::descriptor::read_identity_pending(&descriptor_path).is_none());
+        assert!(supervisor.retire_worker_after_stop(&resident).await);
     }
 }
