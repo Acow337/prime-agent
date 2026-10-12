@@ -1118,7 +1118,6 @@ mod tests {
                 recovery_journal_path: dir.path().join("recovery.jsonl"),
                 telemetry_disabled: Some(true),
                 script: Some(json!({ "responses": ["ack"] })),
-                decision_child: false,
             },
             None,
         );
@@ -1181,7 +1180,6 @@ mod tests {
                 recovery_journal_path: dir.path().join("recovery.jsonl"),
                 telemetry_disabled: Some(true),
                 script: Some(json!({ "responses": ["ack", "done"] })),
-                decision_child: false,
             },
             None,
         );
