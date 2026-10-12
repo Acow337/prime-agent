@@ -1271,13 +1271,17 @@ fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
     let expiry_arm = &section[positions[4]..];
     let mut at = 0;
     while let Some(found) = expiry_arm[at..].find("Fail") {
-        let before = expiry_arm[..found + 4].trim_end();
+        // `found` is relative to `at`: re-anchor it before every use, or a
+        // second occurrence would check the wrong text and walk `at`
+        // backward into an infinite loop.
+        let fail_at = at + found;
+        let before = expiry_arm[..fail_at + 4].trim_end();
         assert!(
             before.ends_with("Step-Fail"),
             "the expiry arm must not call the throwing Fail helper: {}",
-            &expiry_arm[found.saturating_sub(40)..(found + 40).min(expiry_arm.len())]
+            &expiry_arm[fail_at.saturating_sub(40)..(fail_at + 40).min(expiry_arm.len())]
         );
-        at = found + 4;
+        at = fail_at + 4;
     }
 }
 
