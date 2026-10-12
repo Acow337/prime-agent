@@ -470,15 +470,39 @@ impl LockDir {
             if rc == 0 {
                 return true;
             }
-            // EEXIST: the path holds an occupant — the retry loop
-            // waits it out. ENOENT: the parked directory vanished —
-            // nothing to restore either way.
+            // The raw syscall reports failures through errno — read it
+            // before any other call can overwrite the thread-local value.
+            let errno = unsafe { *libc::__errno_location() };
+            if errno == libc::ENOSYS || errno == libc::EINVAL || errno == libc::EOPNOTSUPP {
+                // The kernel or the filesystem lacks RENAME_NOREPLACE:
+                // fall back to the guarded two-step move. The tiny
+                // check-to-rename window it reopens beats a parked
+                // successor that never returns to the canonical path —
+                // permanent residue would hand a second exclusion to
+                // another process while the original holder still
+                // believes it owns the lock.
+                return Self::guarded_two_step_restore(aside, path);
+            }
+            // EEXIST/ENOTEMPTY: the path holds an occupant — the retry
+            // loop waits it out. Any other error (ENOENT for a vanished
+            // parked directory, I/O failures): nothing restored this
+            // attempt.
             false
         }
         #[cfg(not(target_os = "linux"))]
         {
-            !path.exists() && fs::rename(aside, path).is_ok()
+            Self::guarded_two_step_restore(aside, path)
         }
+    }
+
+    /// The best-effort restore where no conditional move exists: the
+    /// two-step check-then-rename. POSIX rename only replaces EMPTY
+    /// directories, so an owned occupant (a directory holding its
+    /// `owner` file) refuses the overwrite natively; only a bare
+    /// unowned directory is exposed to the window between the check and
+    /// the move.
+    fn guarded_two_step_restore(aside: &Path, path: &Path) -> bool {
+        !path.exists() && fs::rename(aside, path).is_ok()
     }
 
     fn judge_and_reclaim(path: &Path, stale_after: Duration) -> io::Result<()> {
