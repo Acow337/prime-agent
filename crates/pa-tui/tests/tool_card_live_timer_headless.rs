@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 /// `tool_execution_end`, and `turn_end`.
 struct MockSupervisor {
     listener: UnixListener,
-    /// Drop the tool_execution_end frame: the turn settles with a
+    /// Drop the `tool_execution_end` frame: the turn settles with a
     /// still-running card (the straggler scenario).
     straggler: bool,
 }
@@ -395,7 +395,7 @@ fn a_running_tool_card_ticks_and_settles_to_the_final_duration() {
 }
 
 /// The straggler: a tool call whose end frame never lands still gets its
-/// timer frozen at the turn's settle — the turn_end sweep settles the card
+/// timer frozen at the turn's settle — the `turn_end` sweep settles the card
 /// the way the failed-frame sweep does (a terminal error result, the
 /// settle instant, the aborted stamp): the frozen `Took` row renders, the
 /// panel header is terminal (no running spinner), no later paint ticks
