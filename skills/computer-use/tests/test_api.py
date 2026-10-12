@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import io
 import subprocess
+import sys
 import time
 import tempfile
 import types
@@ -244,6 +245,78 @@ class InjectValidationTests(unittest.TestCase):
     def test_type_text_empty_is_a_noop(self) -> None:
         with mock.patch.object(inject, "_require_mac", side_effect=AssertionError("must not post events")):
             self.assertIsNone(inject._type_text(123, ""))
+
+
+class ModuleImportTests(unittest.TestCase):
+    def test_capture_is_imported_with_the_module(self) -> None:
+        # the image-click path reads capture._live_window_bounds; the name
+        # must resolve even when no screenshot has ever been taken (the
+        # state machine only reaches that line after a capture, but the
+        # import must not rely on that side effect)
+        code = (
+            "import sys\n"
+            "sys.path.insert(0, 'src')\n"
+            "import computer_use\n"
+            "print('capture' in computer_use.__dict__)\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr[:300])
+        self.assertEqual(result.stdout.strip(), "True")
+
+
+class TypeTextEventTests(unittest.TestCase):
+    def typed_with_fake_quartz(self, text: str) -> list[tuple[str, Any]]:
+        """Run _type_text against a recording fake quartz and return every call."""
+        calls: list[tuple[str, Any]] = []
+
+        def create_keyboard_event(source: Any, keycode: int, is_down: bool) -> tuple[int, bool]:
+            event = (int(keycode), bool(is_down))
+            calls.append(("create", event))
+            return event
+
+        def set_unicode_string(event: Any, units: int, string: str) -> None:
+            calls.append(("string", (event[0], event[1], string)))
+
+        def post_to_pid(pid: int, event: Any) -> None:
+            calls.append(("post", event))
+
+        quartz = types.SimpleNamespace(
+            CGEventCreateKeyboardEvent=create_keyboard_event,
+            CGEventKeyboardSetUnicodeString=set_unicode_string,
+            CGEventPostToPid=post_to_pid,
+        )
+        fake_mac = types.SimpleNamespace(quartz=quartz)
+        with mock.patch.object(inject, "_require_mac", return_value=fake_mac):
+            inject._type_text(123, text)
+        return calls
+
+    def test_the_unicode_string_rides_key_down_only(self) -> None:
+        # an app that inserts per keyboard event would otherwise type every
+        # chunk twice
+        calls = self.typed_with_fake_quartz("ab")
+        strings = [call[1] for call in calls if call[0] == "string"]
+        self.assertEqual([item[2] for item in strings], ["ab"])
+        self.assertEqual((strings[0][0], strings[0][1]), (0, True))  # assigned on the down event
+
+    def test_every_newline_presses_the_return_keycode(self) -> None:
+        # a typed linefeed never fires the Return keycode, so composers that
+        # send on Return would never send
+        calls = self.typed_with_fake_quartz("a\nb")
+        creates = [call[1] for call in calls if call[0] == "create"]
+        self.assertEqual(
+            creates,
+            [(0, True), (0, False), (36, True), (36, False), (0, True), (0, False)],
+        )
+        strings = [call[1][2] for call in calls if call[0] == "string"]
+        self.assertEqual(strings, ["a", "b"])  # the linefeed never rides a unicode event
+
+    def test_crlf_normalizes_to_one_return(self) -> None:
+        calls = self.typed_with_fake_quartz("a\r\nb")
+        creates = [call[1] for call in calls if call[0] == "create"]
+        self.assertEqual(
+            creates,
+            [(0, True), (0, False), (36, True), (36, False), (0, True), (0, False)],
+        )
 
 
 class ScrollPointTests(unittest.TestCase):

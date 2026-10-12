@@ -1144,7 +1144,7 @@ class RestoreAfterSettleTests(AppTestCase):
         env = self.make_env()
         app = await env.get_app()
         # a busy app: the focused value never changes, so no consumption signal exists
-        env.paste_baselines = [(env.paste_focus_before, "unchanged value")]
+        env.paste_baselines = [(fakes.FakeAXRef(env.paste_ref_role, env.paste_ref_title), "unchanged value")]
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertIn(("write", ("text", "payload")), env.clipboard_calls)
@@ -1165,7 +1165,7 @@ class RestoreAfterSettleTests(AppTestCase):
         app = await env.get_app()
         # the focused field already carried the payload before the paste, and
         # a busy app's consumption is still pending: no attributable transition
-        env.paste_baselines = [(env.paste_focus_before, "payload")]
+        env.paste_baselines = [(fakes.FakeAXRef(env.paste_ref_role, env.paste_ref_title), "payload")]
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
@@ -1173,7 +1173,7 @@ class RestoreAfterSettleTests(AppTestCase):
     async def test_an_unreadable_baseline_read_proves_nothing_about_consumption(self) -> None:
         env = self.make_env()
         app = await env.get_app()
-        env.paste_baselines = [None, (env.paste_focus_before, "payload")]
+        env.paste_baselines = [None, (fakes.FakeAXRef(env.paste_ref_role, env.paste_ref_title), "payload")]
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
@@ -1182,7 +1182,7 @@ class RestoreAfterSettleTests(AppTestCase):
         env = self.make_env()
         app = await env.get_app()
         # the baseline read is unreadable, and the app stays busy afterwards
-        env.paste_baselines = [None, (env.paste_focus_before, "payload")]
+        env.paste_baselines = [None, (fakes.FakeAXRef(env.paste_ref_role, env.paste_ref_title), "payload")]
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
@@ -1194,6 +1194,34 @@ class RestoreAfterSettleTests(AppTestCase):
         # whose preexisting value already carries the payload - a false transition
         env.paste_focus_moved = True
         env.paste_value_after_move = "payload"
+        status = await app.paste("payload")
+        self.assertIn("could not be verified", status)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
+    async def test_a_sibling_sharing_every_attribute_proves_nothing(self) -> None:
+        # the moved focus lands on a DIFFERENT element that shares role,
+        # title, position, and size; its preexisting value already carries
+        # the payload. Attribute sets are descriptive, not identity, so the
+        # CF-level ref comparison alone decides and the paste stays
+        # unverified
+        env = self.make_env()
+        app = await env.get_app()
+        env.paste_focus_moved = True
+        env.paste_focus_moved_title = env.paste_ref_title  # every attribute equal
+        env.paste_focus_moved_position = env.paste_ref_position
+        env.paste_focus_moved_size = env.paste_ref_size
+        env.paste_value_after_move = "payload"
+        status = await app.paste("payload")
+        self.assertIn("could not be verified", status)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
+    async def test_an_unreadable_ref_comparison_never_verifies(self) -> None:
+        # the CF-level comparison cannot run: the verdict fails closed
+        # instead of guessing same or different
+        env = self.make_env()
+        app = await env.get_app()
+        env.ax_refs_equal = None  # explicit unset -> derives from moved; force unreadable
+        env.ax_refs_equal = None
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
@@ -1276,7 +1304,7 @@ class RestoreAfterSettleTests(AppTestCase):
     async def test_an_unverified_paste_that_keeps_a_copy_says_copy_not_payload(self) -> None:
         env = self.make_env()
         app = await env.get_app()
-        env.paste_baselines = [(env.paste_focus_before, "unchanged value")]
+        env.paste_baselines = [(fakes.FakeAXRef(env.paste_ref_role, env.paste_ref_title), "unchanged value")]
         real_settle = app._settle
 
         def copying_during_settle() -> None:

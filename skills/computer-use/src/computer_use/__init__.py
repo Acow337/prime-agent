@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import apps, ax, diff, errors
+from . import apps, ax, capture, diff, errors
 from ._compat import _backend, _require_mac
 from .errors import ComputerUseError
 
@@ -1023,17 +1023,19 @@ class App:
         if current is None:
             return False
         focused_after, after_head = current
-        # the SAME focused element must show the transition: a focus move
-        # lands the verdict on a different element whose preexisting value
-        # proves nothing about this paste
-        same_element = focused_after is focused_before or focused_after == focused_before
+        # the SAME focused element must show the transition: the CF-level
+        # ref comparison decides - separately fetched wrappers of one
+        # element are neither `is` nor `==` equal, while two different
+        # elements can share every attribute. An unreadable comparison
+        # fails closed, and attribute equality never authorizes a restore
+        if ax._refs_equal(focused_before, focused_after) is not True:
+            return False
         if len(text) > ax._FINGERPRINT_VALUE_CHARS:
             # a payload longer than the value-head cap can never be verified:
             # a prefix match proves nothing
             return False
         return (
-            same_element
-            and bool(after_head)
+            bool(after_head)
             and text in after_head
             and text not in before_head
         )

@@ -154,6 +154,22 @@ def _observe(pid: int) -> Observation:
     )
 
 
+def _refs_equal(before: Any, after: Any) -> bool | None:
+    """Report whether two accessibility refs point at the same element.
+
+    CFEqual is the CF-level comparison for AXUIElement refs, which separately
+    fetched wrappers of one element need; any invocation failure returns None
+    and callers fail closed on it. Attribute sets are descriptive, not
+    identity: two different elements can share role, title, position, and
+    size, so attribute equality never answers this question.
+    """
+    try:
+        app_services = _require_mac().app_services
+        return bool(app_services.CFEqual(before, after))
+    except Exception:
+        return None
+
+
 def _live_fingerprint(ref: Any) -> tuple[str | None, str | None]:
     """Read one live element's current (role, title) for freshness checking.
 

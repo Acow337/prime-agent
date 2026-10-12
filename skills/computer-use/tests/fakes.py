@@ -429,6 +429,27 @@ def _never_require_mac() -> Any:
     raise AssertionError("_require_mac must not run under the faked environment")
 
 
+class FakeAXRef:
+    """One separately fetched accessibility ref, like real AXUIElement wrappers.
+
+    Identity is per-instance (no __eq__: two fetches of the SAME element are
+    never ==-equal, exactly like the real wrappers), while role/title/position/
+    size ride along so semantic identity comparisons can read them.
+    """
+
+    def __init__(
+        self,
+        role: str | None,
+        title: str | None,
+        position: tuple[float, float] = (20.0, 90.0),
+        size: tuple[float, float] = (240.0, 24.0),
+    ) -> None:
+        self.role = role
+        self.title = title
+        self.position = position
+        self.size = size
+
+
 class FakeAttach:
     """Fake attach_image.run recording paths, optionally raising like a non-vision host."""
 
@@ -488,9 +509,15 @@ class AppEnvironment:
         self.live_geometry: Any = None  # an explicit live-geometry override
         self.live_window_bounds: Any = None  # an explicit live-bounds override
         self.live_bounds_unreadable = False  # the Quartz bounds probe fails
-        self.paste_focus_before: Any = object()  # the focused element before the paste
-        self.paste_focus_after: Any = object()  # the focused element after a focus move
+        self.paste_ref_role = "AXTextField"  # the focused paste ref's semantic identity
+        self.paste_ref_title = "Message"
+        self.paste_ref_position = (20.0, 90.0)
+        self.paste_ref_size = (240.0, 24.0)
+        self.paste_focus_moved_title = "Search"  # the different element a focus move lands on
+        self.paste_focus_moved_position = (20.0, 130.0)
+        self.paste_focus_moved_size = (240.0, 24.0)
         self.paste_focus_moved = False  # a queued cmd+v with the focus moving mid-paste
+        self.ax_refs_equal: Any = "derive"  # "derive" follows paste_focus_moved; True/False/None serve explicitly (None = the comparison failed)
         self.paste_value_after_move: str | None = "payload"  # the new focus's preexisting value
         self.clipboard_change_count: int | None = 3  # _clipboard_change_count reading
         self.window_id: int | None = 4321
@@ -524,6 +551,8 @@ class AppEnvironment:
     def _live_fingerprint(self, ref: Any) -> tuple[Any, Any]:
         if self.drift:
             return ("AXGhost", "changed since the snapshot")
+        if isinstance(ref, FakeAXRef):
+            return (ref.role, ref.title)
         return (ref.get("role") if isinstance(ref, dict) else None,
                 ref.get("title") if isinstance(ref, dict) else None)
 
@@ -564,10 +593,18 @@ class AppEnvironment:
             return self.live_window_bounds
         return self.window_rect
 
+    def _refs_equal(self, before: Any, after: Any) -> bool | None:
+        """Serve the CF-level ref comparison: explicit verdicts win; the derive default follows the focus."""
+        if self.ax_refs_equal != "derive":
+            return self.ax_refs_equal
+        return not self.paste_focus_moved
+
     def _live_geometry(self, ref: Any) -> Any:
         """Serve one element's live bounds: the snapshot's geometry, or the moved oracle."""
         if self.live_geometry is not None:
             return self.live_geometry
+        if isinstance(ref, FakeAXRef):
+            return (tuple(ref.position), tuple(ref.size))
         if not isinstance(ref, dict) or not ref.get("position") or not ref.get("size"):
             return None
         position, size = ref["position"], ref["size"]
@@ -590,9 +627,23 @@ class AppEnvironment:
             return None  # no paste in flight: the baseline stays unreadable
         if self._cmd_v_presses() > self.presses_at_write:
             if self.paste_focus_moved:
-                return (self.paste_focus_after, self.paste_value_after_move)
-            return (self.paste_focus_before, self.pasted_text[:200])
-        return (self.paste_focus_before, self.preexisting_value_head)
+                return (
+                    FakeAXRef(
+                        self.paste_ref_role,
+                        self.paste_focus_moved_title,
+                        self.paste_focus_moved_position,
+                        self.paste_focus_moved_size,
+                    ),
+                    self.paste_value_after_move,
+                )
+            return (
+                FakeAXRef(self.paste_ref_role, self.paste_ref_title, self.paste_ref_position, self.paste_ref_size),
+                self.pasted_text[:200],
+            )
+        return (
+            FakeAXRef(self.paste_ref_role, self.paste_ref_title, self.paste_ref_position, self.paste_ref_size),
+            self.preexisting_value_head,
+        )
 
     def _running_apps(self) -> list[Any]:
         if self.running_error is not None:
@@ -644,6 +695,7 @@ class AppEnvironment:
         patch(ax, "_live_fingerprint", self._live_fingerprint)
         patch(ax, "_focused_is_secure", lambda pid: self.secure_focus)
         patch(ax, "_live_is_secure", lambda ref: self.live_secure_ref)
+        patch(ax, "_refs_equal", self._refs_equal)
         patch(ax, "_window_fingerprint", self._window_fingerprint)
         patch(ax, "_paste_baseline", self._paste_baseline)
         patch(ax, "_live_geometry", self._live_geometry)

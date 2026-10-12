@@ -8,6 +8,8 @@ converts window-relative coordinates to screen coordinates before calling.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ._compat import _require_mac
 from .errors import ComputerUseError
 from .keymap import KEYCODES, _parse_chord
@@ -15,6 +17,7 @@ from .keymap import KEYCODES, _parse_chord
 _ERROR_LIMIT = 200
 _PIXELS_PER_PAGE = 800
 _UTF16_UNITS_PER_EVENT = 2
+_RETURN_KEYCODE = KEYCODES["Return"]  # kVK_Return: the keycode composers send on
 
 _MOUSE_BUTTONS = ("left", "right", "middle")
 _SCROLL_DIRECTIONS = ("up", "down", "left", "right")
@@ -183,9 +186,13 @@ def _type_text(pid: int, text: str) -> None:
     """Type text into the app process with the given pid.
 
     Each keyboard event carries at most two UTF-16 code units (the macOS limit),
-    and a surrogate pair never splits across events. An empty string is a no-op.
-    Raises ComputerUseError INVALID_ARGUMENT for non-string text, and
-    INJECTION_FAILED with the underlying CG error text when a CG call fails.
+    and a surrogate pair never splits across events; the string rides the
+    key-down only, like the system's own event stream. Every newline (CRLF and
+    CR normalize to one) presses the Return keycode instead of typing a
+    linefeed, so composers that send on Return behave as documented. An empty
+    string is a no-op. Raises ComputerUseError INVALID_ARGUMENT for non-string
+    text, and INJECTION_FAILED with the underlying CG error text when a CG call
+    fails.
     """
     if not isinstance(text, str):
         raise ComputerUseError(
@@ -193,27 +200,52 @@ def _type_text(pid: int, text: str) -> None:
         )
     if not text:
         return
-    chunks: list[tuple[int, str]] = []
+    # every newline presses Return, as the API documents: a typed linefeed
+    # character does not fire the Return keycode, so chat composers that send
+    # on Return would never send. CRLF and CR normalize to one press.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # ("return", None) marks one Return keypress; ("unicode", (units, chunk))
+    # carries at most two UTF-16 code units, and a surrogate pair never
+    # splits across events
+    segments: list[tuple[str, Any]] = []
     pending: list[str] = []
     pending_units = 0
-    for character in text:
-        units = 2 if ord(character) > 0xFFFF else 1
-        if pending_units + units > _UTF16_UNITS_PER_EVENT:
-            chunks.append((pending_units, "".join(pending)))
+
+    def flush() -> None:
+        nonlocal pending, pending_units
+        if pending:
+            segments.append(("unicode", (pending_units, "".join(pending))))
             pending = []
             pending_units = 0
+
+    for character in text:
+        if character == "\n":
+            flush()
+            segments.append(("return", None))
+            continue
+        units = 2 if ord(character) > 0xFFFF else 1
+        if pending_units + units > _UTF16_UNITS_PER_EVENT:
+            flush()
         pending.append(character)
         pending_units += units
-    if pending:
-        chunks.append((pending_units, "".join(pending)))
+    flush()
     try:
         quartz = _require_mac().quartz
-        for units, chunk in chunks:
+        for kind, payload in segments:
+            if kind == "return":
+                down = quartz.CGEventCreateKeyboardEvent(None, _RETURN_KEYCODE, True)
+                quartz.CGEventPostToPid(pid, down)
+                up = quartz.CGEventCreateKeyboardEvent(None, _RETURN_KEYCODE, False)
+                quartz.CGEventPostToPid(pid, up)
+                continue
+            units, chunk = payload
             down = quartz.CGEventCreateKeyboardEvent(None, 0, True)
+            # the string rides the key-down only, like the system's own event
+            # stream: an app that inserts per keyboard event would otherwise
+            # type every chunk twice
             quartz.CGEventKeyboardSetUnicodeString(down, units, chunk)
             quartz.CGEventPostToPid(pid, down)
             up = quartz.CGEventCreateKeyboardEvent(None, 0, False)
-            quartz.CGEventKeyboardSetUnicodeString(up, units, chunk)
             quartz.CGEventPostToPid(pid, up)
     except ComputerUseError:
         raise
