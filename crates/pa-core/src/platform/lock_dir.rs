@@ -913,10 +913,11 @@ impl LockDir {
     /// filesystem does not implement it (EINVAL: the flag is unknown
     /// here; ENOSYS: no renameat2 at all; EOPNOTSUPP: the filesystem
     /// rejects the flag - NFS, FUSE and similar mounts) - the mkdir
-    /// protocol is the compatible fallback. Module-private: every
-    /// classification site (the create fallback, the stale dance, the
-    /// inode release pass) lives in this module; the daemon's lease
-    /// release classifies through its exchange-based protocol instead.
+    /// protocol is the compatible fallback. Consumed by every
+    /// in-module classification site (the create fallback, the stale
+    /// dance, the inode release pass) AND by the daemon's
+    /// stale-socket claim (its no-rename floor) - hence the exported
+    /// surface.
     #[cfg(target_os = "linux")]
     #[must_use]
     pub fn rename_noreplace_unsupported(error: &io::Error) -> bool {
