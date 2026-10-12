@@ -1086,27 +1086,76 @@ impl ShutdownAdmission {
         released
     }
 
-    /// Release the window FOR A SPAWN, outlasting the admission's own
-    /// lease: a transient removal failure (guard contention, an fs
-    /// hiccup) is retried with backoff until the record's lease must
-    /// have expired - a spawn never proceeds behind a live record (the
-    /// successor's boot refuses one), and a GOOD update is never rolled
-    /// back over a cleanup glitch. Only a persistent failure beyond the
-    /// lease surfaces, where the failure arm's rollback is the honest
-    /// last resort.
+    /// Release the window FOR A SPAWN, with the free-window predicate
+    /// the successor's own boot uses: the spawn may proceed only when NO
+    /// ACTIVE admission record remains - ours removed (a transient
+    /// removal failure is retried with backoff until the record's own
+    /// lease must have expired, so a cleanup glitch never spawns a
+    /// boot-refusing child and never rolls back a good update), ours
+    /// expired and untaken (inert: no boot refuses an expired record;
+    /// removed best-effort for hygiene), never a FOREIGN LIVE record (a
+    /// concurrent stop that took the window aborts the spawn beside it -
+    /// the stops-win doctrine, the same race the rollback's
+    /// `acquire_once` adjudicates). Only a persistent failure beyond the
+    /// lease surfaces - terminally: the renewal is stopped so the
+    /// leftover self-heals instead of living forever, and the failure
+    /// arm's rollback is the honest last resort.
     ///
     /// # Errors
-    /// Returns the release error when the record could not be removed
-    /// within the lease window.
+    /// Returns the release error when the record could not be cleared
+    /// within the lease window, or the concurrent-stop error when
+    /// another window holds the record.
     pub fn try_release_for_spawn(&mut self) -> Result<()> {
         let deadline = std::time::Instant::now()
             + Duration::from_millis(SHUTDOWN_ADMISSION_LEASE_MS)
             + Duration::from_secs(1);
         loop {
-            match self.try_release() {
-                Ok(()) => return Ok(()),
+            let registry_dir = self.state.registry_dir.clone();
+            let token = self.state.token.clone();
+            // The guarded verdict: `true` = the window is free to spawn
+            // behind; `false` = a foreign LIVE window holds it.
+            let free = with_registry_guard(&registry_dir, || {
+                let path = shutdown_admission_path(&registry_dir);
+                match read_active_shutdown_admission(&registry_dir)? {
+                    None => {
+                        // Free: an expired leftover of ours is inert
+                        // (no boot refuses it) - remove it best-effort.
+                        if read_shutdown_admission(&path)?
+                            .is_some_and(|record| record.token == token)
+                        {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        Ok(true)
+                    }
+                    Some(record) if record.token == token => {
+                        // Ours and still live: remove it (a failure is
+                        // the retryable case).
+                        std::fs::remove_file(&path)
+                            .with_context(|| format!("remove {}", path.display()))?;
+                        Ok(true)
+                    }
+                    Some(_) => Ok(false),
+                }
+            });
+            match free {
+                Ok(true) => {
+                    self.state.stopped.store(true, Ordering::SeqCst);
+                    drop(self.renewal.take());
+                    return Ok(());
+                }
+                Ok(false) => {
+                    // A concurrent stop took the window: the spawn
+                    // aborts beside it, never behind it.
+                    return Err(anyhow!(
+                        "another stop window holds the record; the spawn aborts beside the concurrent stop"
+                    ));
+                }
                 Err(error) => {
                     if std::time::Instant::now() >= deadline {
+                        // Terminal: stop renewing so the leftover
+                        // self-heals through its lease.
+                        self.state.stopped.store(true, Ordering::SeqCst);
+                        drop(self.renewal.take());
                         return Err(error);
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -1659,6 +1708,35 @@ mod tests {
             "the freed window acquires at once"
         );
     }
+    /// A spawn release never proceeds behind a TAKEN window: when a
+    /// foreign live record holds the registry (our lease lapsed and a
+    /// concurrent stop took it), `try_release_for_spawn` aborts beside
+    /// the stop instead of returning Ok - the successor's boot would
+    /// refuse behind it.
+    #[test]
+    fn a_spawn_release_never_proceeds_behind_a_taken_window() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let default_socket = registry.path().join("default.sock");
+        let mut admission = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: vec![&default_socket],
+            },
+        )
+        .expect("acquire the window");
+        // A foreign taker replaces the record (the lease-lapse race).
+        let path = shutdown_admission_path(registry.path());
+        let mut foreign = active_admission(5_000);
+        foreign["token"] = Value::String("foreign-stop".to_string());
+        write_raw(&path, &foreign);
+        let refused = admission.try_release_for_spawn();
+        let message = refused.expect_err("the spawn release aborts beside the concurrent stop");
+        assert!(
+            message.to_string().contains("concurrent stop"),
+            "the refusal names the concurrent stop: {message}"
+        );
+    }
+
     /// A failed record removal must not latch the release: the record
     /// still lives on disk, and a later retry (the drop path's own
     /// `try_release`, or the caller's) reattempts the removal instead of
