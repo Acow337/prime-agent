@@ -243,10 +243,7 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                         // releases its window and restart the daemon
                         // behind the verdict.
                         if let Some(rejected) = &failure.rejected {
-                            let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
-                                u32::try_from(rejected.pid).unwrap_or(0),
-                                rejected.process_start_id.as_deref(),
-                            );
+                            let _ = rejected.retire();
                         }
                         let mut writer = writer.lock().await;
                         // The rollback attempt is what failed: transition
@@ -283,10 +280,7 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                 // user's completed shutdown, it could boot after the stop
                 // and restart the daemon behind the Failed verdict.
                 if let Some(rejected) = &failure.rejected {
-                    let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
-                        u32::try_from(rejected.pid).unwrap_or(0),
-                        rejected.process_start_id.as_deref(),
-                    );
+                    let _ = rejected.retire();
                 }
                 {
                     let mut status = writer.lock().await;
@@ -582,7 +576,13 @@ async fn drive(
     admission
         .assert_or_renew()
         .map_err(PhaseFailure::after_stop)?;
-    admission.release();
+    // The release must SUCCEED before the spawn: a failed removal leaves
+    // the record live on disk, and a successor spawned behind it refuses
+    // its own boot ("Daemon shutdown is in progress") - a dead child, a
+    // hello timeout, and a rollback that misreads its own leftover lease
+    // as a concurrent stop. The phase failure lands in the rollback arm
+    // instead of spawning a doomed child.
+    admission.try_release().map_err(PhaseFailure::after_stop)?;
     // `Booting`: spawn the successor from the candidate release dir, roster
     // via env (spec §6), hello within `T_boot`.
     writer
@@ -775,10 +775,11 @@ async fn finish_failure(
     // aborts right here, never spawning the rollback against a
     // possibly-live owner.
     if let Some(rejected) = &failure.rejected {
-        let confirmed_dead = crate::daemon_discovery::kill::force_kill_identity_crash(
-            u32::try_from(rejected.pid).unwrap_or(0),
-            rejected.process_start_id.as_deref(),
-        );
+        // The retirement kill goes through the owned child handle (the
+        // spawn pin's other half): process-precise regardless of whether
+        // the start id was captured - the held child stays unreaped, so
+        // its pid cannot have been recycled under the kill.
+        let confirmed_dead = rejected.retire();
         if !confirmed_dead {
             fail_hard(format!(
                 "The successor this update spawned could not be stopped; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
@@ -820,7 +821,16 @@ async fn finish_failure(
         .await;
         return Ok(());
     }
-    rollback_admission.release();
+    // The release must SUCCEED before the rollback child spawns (the
+    // happy path's own rule): a failed removal leaves the record live,
+    // and a child spawned behind it refuses its own boot.
+    if let Err(error) = rollback_admission.try_release() {
+        fail_hard(format!(
+            "The rollback could not close the stop window ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+        ))
+        .await;
+        return Ok(());
+    }
     let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     // The rollback spawn is pinned exactly like the main flow's: the
     // adopted hello must come from the rollback child this coordinator
@@ -831,7 +841,7 @@ async fn finish_failure(
         roster_path,
         &spawn_cwd,
     ) {
-        Ok(pid) => capture_spawned_successor(pid),
+        Ok(child) => capture_spawned_successor(child),
         Err(error) => {
             writer.lock().await.set_state(UpdateState::Failed)?;
             writer.lock().await.set_message(Some(format!(
@@ -855,10 +865,7 @@ async fn finish_failure(
     // terminal Failed state is already recorded, and an unconfirmed death
     // leaves the same honest status as before).
     let retire_rollback_child = |spawned: &super::successor::SpawnedSuccessor| {
-        let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
-            u32::try_from(spawned.pid).unwrap_or(0),
-            spawned.process_start_id.as_deref(),
-        );
+        let _ = spawned.retire();
     };
     if let Some(hello) =
         wait_for_hello(&options.socket_path, options.budget.boot_ms, &spawned).await

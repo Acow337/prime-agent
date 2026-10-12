@@ -49,17 +49,62 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
 /// process table right after the spawn - the same pid-reuse identity the
 /// successor's own hello reports as `supervisorProcessStartId`, so a
 /// hello can be bound to the one process this update spawned. A `None`
-/// start id is the honest fallback: the platform exposes no identity, or
-/// the child exited before the capture could read it - the pin then
-/// matches the pid alone, and a Linux pid cannot recycle within a boot
-/// budget (the kernel allocates pids sequentially and must lap the whole
-/// pid space to reuse one), while a dead child never greets at all.
+/// start id pins NOTHING: the validator then refuses to adopt any
+/// same-pid hello (an uncaptured pin proves nothing about the pid's
+/// current owner), and retirement goes through the owned child handle
+/// instead - while the handle is held the child stays unreaped, so its
+/// pid cannot be recycled and the kill targets THIS child exactly, no
+/// start-id pin needed.
 #[derive(Clone)]
 pub struct SpawnedSuccessor {
     /// The spawned child's pid.
     pub pid: u64,
     /// The spawned child's process start id, when captured.
     pub process_start_id: Option<String>,
+    /// The owned child handle (shared by the coordinator's clones of
+    /// this pin): the retirement kill goes through it, and the
+    /// process-precise guarantee comes from the unreaped zombie rule -
+    /// a held child's pid is never recycled.
+    child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
+}
+
+impl SpawnedSuccessor {
+    /// Retire the spawned child: the kill goes through the OWNED handle
+    /// when it is held (process-precise: the child stays unreaped while
+    /// the handle lives, so a recycled pid can never be the target),
+    /// falling back to the start-id-pinned pid kill when it is not.
+    /// Returns `true` when the child is confirmed dead.
+    ///
+    /// # Panics
+    /// Panics when the spawned-child handle lock is poisoned (the
+    /// retirement that held it died mid-kill; the pin is unusable).
+    #[must_use]
+    pub fn retire(&self) -> bool {
+        let mut guard = self.child.lock().expect("the spawned-child handle lock");
+        let Some(child) = guard.as_mut() else {
+            return crate::daemon_discovery::kill::force_kill_identity_crash(
+                u32::try_from(self.pid).unwrap_or(0),
+                self.process_start_id.as_deref(),
+            );
+        };
+        let _ = child.kill();
+        // Death is confirmed by the reap: the handle keeps the child
+        // unreaped, so the kill that just fired targeted THIS child, and
+        // the wait can never observe a stranger.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return true,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(_) => return false,
+            }
+        }
+    }
 }
 
 /// Pin the freshly spawned successor to its process identity (call right
@@ -67,10 +112,12 @@ pub struct SpawnedSuccessor {
 /// process table while the child is still the process this coordinator
 /// created, so every hello later adopted is bound to that one child.
 #[must_use]
-pub fn capture_spawned_successor(pid: u64) -> SpawnedSuccessor {
+pub fn capture_spawned_successor(child: std::process::Child) -> SpawnedSuccessor {
+    let pid = u64::from(child.id());
     SpawnedSuccessor {
         pid,
-        process_start_id: pa_types::platform::process::process_start_id(pid as u32),
+        process_start_id: pa_types::platform::process::process_start_id(child.id()),
+        child: std::sync::Arc::new(std::sync::Mutex::new(Some(child))),
     }
 }
 
@@ -188,10 +235,15 @@ pub fn validate_replacement_daemon(
     // hello's must match it too - a claim on a recycled pid, or a hello
     // stripped of the start id, cannot pass as the child.
     if successor.pid != spawned.pid
-        || spawned
-            .process_start_id
-            .as_ref()
-            .is_some_and(|expected| successor.process_start_id.as_ref() != Some(expected))
+        || match spawned.process_start_id.as_ref() {
+            // A captured pin must match the hello's; an UNCAPTURED pin
+            // proves nothing about the pid's current owner, so a
+            // same-pid hello is not proven to be this update's child -
+            // a recycled pid's daemon must never be adopted as the
+            // successor.
+            Some(expected) => successor.process_start_id.as_ref() != Some(expected),
+            None => true,
+        }
     {
         bail!(
             "Replacement daemon on {} did not come from the update's spawn",
@@ -213,7 +265,7 @@ pub fn spawn_supervisor(
     socket_path: &Path,
     roster_path: Option<&Path>,
     cwd: &Path,
-) -> Result<u64> {
+) -> Result<std::process::Child> {
     let mut command = std::process::Command::new(exe);
     command
         .args(["--mode", "daemon", "--daemon-socket"])
@@ -240,7 +292,10 @@ pub fn spawn_supervisor(
     let child = command
         .spawn()
         .with_context(|| format!("spawn the successor supervisor from {}", exe.display()))?;
-    Ok(u64::from(child.id()))
+    // The Child handle travels with the spawn: the caller's retirement
+    // kill goes through it (process-precise, the unreaped-zombie pid
+    // rule), and the pid is read off it.
+    Ok(child)
 }
 
 /// Connect and complete the `daemon_hello` handshake, bounded by `budget_ms`
@@ -455,6 +510,7 @@ mod tests {
         SpawnedSuccessor {
             pid: 4242,
             process_start_id: Some("4242/7".to_string()),
+            child: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -568,6 +624,7 @@ mod tests {
             &SpawnedSuccessor {
                 pid: 5150,
                 process_start_id: Some("5150/3".to_string()),
+                child: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
         )
         .unwrap_err();
@@ -596,11 +653,13 @@ mod tests {
     }
 
     #[test]
-    fn an_uncaptured_start_id_pins_the_pid_alone() {
+    fn an_uncaptured_start_id_refuses_adoption() {
         // The child exited before the capture could read its start id (or
-        // the platform has none): the pin trusts the pid alone - the
-        // disclosed pid-recycling call.
-        let identity = validate_replacement_daemon(
+        // the platform has none): an uncaptured pin proves nothing about
+        // the pid's current owner, so a same-pid hello is NOT proven to
+        // be this update's child - a recycled pid's daemon must never be
+        // adopted as the successor (the disclosed pid-recycling call).
+        let refused = validate_replacement_daemon(
             Path::new("/tmp/prime.sock"),
             &successor_hello(),
             "9.9.9",
@@ -608,29 +667,82 @@ mod tests {
             &SpawnedSuccessor {
                 pid: 4242,
                 process_start_id: None,
+                child: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
-        )
-        .unwrap();
-        assert_eq!(identity.pid, 4242);
+        );
+        assert!(
+            refused.is_err(),
+            "an unpinned spawn refuses any same-pid hello, never adopts it"
+        );
     }
 
     #[cfg(any(unix, windows))]
     #[test]
     fn the_spawn_capture_pins_a_live_childs_start_id() {
-        // The coordinator's own pid is a live process: the capture pins
-        // pid plus start id - the exact identity the child's own hello
-        // reports (the same platform helper both read).
-        let spawned = capture_spawned_successor(u64::from(std::process::id()));
-        assert_eq!(spawned.pid, u64::from(std::process::id()));
+        // A REAL live child behind a PARENT-CONTROLLED barrier: the
+        // child announces itself on stdout and then blocks reading its
+        // stdin - a pipe this test holds the only write end of, so the
+        // child cannot exit until the parent releases it. Liveness at
+        // the capture is therefore guaranteed by the protocol itself,
+        // not by any lifetime. The capture pins the pid plus start id
+        // (the same platform helper the child's own hello reports), and
+        // the owned handle retires the child, leaving nothing behind.
+        let (program, args): (&str, std::vec::Vec<&str>) = if cfg!(unix) {
+            ("sh", std::vec!["-c", "echo ready && cat"])
+        } else {
+            ("cmd", std::vec!["/c", "echo ready & more"])
+        };
+        let mut child = std::process::Command::new(program)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn a live child");
+        // Handshake: the child's own write, read to completion.
+        let stdout = child.stdout.take().expect("the piped stdout");
+        let mut ready = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut ready)
+            .expect("read the child's ready announcement");
+        assert!(
+            ready.contains("ready"),
+            "the child announced itself: {ready:?}"
+        );
+        // The stdin hold IS the barrier: with the write end retained,
+        // the blocked child cannot exit before the capture, however the
+        // test thread is descheduled.
+        let stdin_hold = child.stdin.take().expect("the piped stdin");
+        let expected_pid = u64::from(child.id());
+        let spawned = capture_spawned_successor(child);
+        assert_eq!(spawned.pid, expected_pid);
         assert!(spawned.process_start_id.is_some());
+        // Release the child (EOF ends its blocked read), and retire it
+        // through the owned handle - death confirmed by the reap.
+        drop(stdin_hold);
+        assert!(
+            spawned.retire(),
+            "the owned handle retires the child after the release"
+        );
     }
 
     #[test]
     fn the_spawn_capture_of_an_exited_child_falls_back_to_the_pid() {
-        // A pid nothing owns (the dead-identity fixture's 4,000,000): the
-        // capture reads no start id and the pin trusts the pid alone.
-        let spawned = capture_spawned_successor(4_000_000);
-        assert_eq!(spawned.pid, 4_000_000);
+        // A child that already exited and was reaped: nothing owns the
+        // pid anymore, so the capture reads no start id - the honest
+        // unpinned fallback the validator refuses to adopt against and
+        // the retirement goes through the handle instead.
+        let (program, args): (&str, std::vec::Vec<&str>) = if cfg!(unix) {
+            ("true", std::vec::Vec::new())
+        } else {
+            ("cmd", std::vec!["/c", "exit", "0"])
+        };
+        let mut child = std::process::Command::new(program)
+            .args(&args)
+            .spawn()
+            .expect("spawn an immediately-exiting child");
+        let expected_pid = u64::from(child.id());
+        let _ = child.wait().expect("reap the child");
+        let spawned = capture_spawned_successor(child);
+        assert_eq!(spawned.pid, expected_pid);
         assert!(spawned.process_start_id.is_none());
     }
 }

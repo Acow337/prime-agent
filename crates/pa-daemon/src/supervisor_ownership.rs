@@ -1058,32 +1058,46 @@ impl ShutdownAdmission {
     /// window were closed - a successor spawned behind the stale record
     /// refuses its own boot ("Daemon shutdown is in progress").
     pub fn try_release(&mut self) -> Result<()> {
-        if self.state.stopped.swap(true, Ordering::SeqCst) {
+        if self.state.stopped.load(Ordering::SeqCst) {
             return Ok(());
         }
-        // The renewal thread sees `stopped` at its next tick; a joined
-        // detach would race the tick, and the guard-internal stopped check
-        // already keeps a late renew from rewriting (TS: "a stopped record
-        // must never be rewritten to disk"), so the thread is left to
-        // notice on its own.
-        drop(self.renewal.take());
         let registry_dir = &self.state.registry_dir;
         let token = &self.state.token;
-        with_registry_guard(registry_dir, || {
+        let released = with_registry_guard(registry_dir, || {
             let path = shutdown_admission_path(registry_dir);
             if read_shutdown_admission(&path)?.is_some_and(|current| &current.token == token) {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("remove {}", path.display()))?;
             }
             Ok(())
-        })
+        });
+        // The latch and the renewal-thread drop come only after the
+        // record is really gone: a failed removal keeps `stopped`
+        // false, so a later retry - the drop path's own `try_release`,
+        // or the caller's - reattempts the removal instead of returning
+        // Ok behind a still-live record the successor's boot would
+        // refuse. While the record lives, the renewal thread keeps
+        // renewing it (a live record is the truth; the guard-internal
+        // stopped check keeps a stopped record from being rewritten).
+        if released.is_ok() {
+            self.state.stopped.store(true, Ordering::SeqCst);
+            drop(self.renewal.take());
+        }
+        released
     }
 
     /// The best-effort release for the drop path (`try_release`'s errors
-    /// cannot propagate out of a drop): a failed cleanup leaves the record
-    /// to its own lease expiry (5 s) and the crash-oracle.
+    /// cannot propagate out of a drop): the final attempt is TERMINAL -
+    /// a failed cleanup still latches `stopped` and detaches the renewal
+    /// thread, so the abandoned record self-heals through its 5 s lease
+    /// instead of living forever behind a detached reaper in this
+    /// process (the transient guard contention the retryable form
+    /// tolerates can no longer strand a live record).
     pub fn release(&mut self) {
-        let _ = self.try_release();
+        if self.try_release().is_err() {
+            self.state.stopped.store(true, Ordering::SeqCst);
+            drop(self.renewal.take());
+        }
     }
 
     /// The acquisition's own scope-file generation observed at its
@@ -1616,6 +1630,46 @@ mod tests {
             "the freed window acquires at once"
         );
     }
+    /// A failed record removal must not latch the release: the record
+    /// still lives on disk, and a later retry (the drop path's own
+    /// `try_release`, or the caller's) reattempts the removal instead of
+    /// returning Ok behind a record the successor's boot would refuse.
+    #[test]
+    fn a_failed_removal_leaves_the_release_retryable() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let default_socket = registry.path().join("default.sock");
+        let mut admission = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: vec![&default_socket],
+            },
+        )
+        .expect("acquire the window");
+        // Sabotage the record: a DIRECTORY where the record file was,
+        // so the guarded read fails (the hardened reader's error path)
+        // and the cleanup cannot proceed.
+        let path = shutdown_admission_path(registry.path());
+        std::fs::remove_file(&path).expect("remove the live record");
+        std::fs::create_dir(&path).expect("sabotage the record with a directory");
+        assert!(
+            admission.try_release().is_err(),
+            "the cleanup must fail against the unreadable record"
+        );
+        // `stopped` stays unlatched behind the failure, so the retry
+        // after the sabotage clears REALLY runs the cleanup instead of
+        // returning Ok behind a latched release.
+        std::fs::remove_dir(&path).expect("clear the sabotage");
+        admission
+            .try_release()
+            .expect("the retry runs and succeeds");
+        assert!(
+            read_active_shutdown_admission(registry.path())
+                .expect("read the record")
+                .is_none(),
+            "the record is gone after the retry"
+        );
+    }
+
     /// A generation file that cannot be read or parsed fails the
     /// acquisition instead of fabricating a 0 baseline: a failed read
     /// hiding a completed stop window would let the raced check pass

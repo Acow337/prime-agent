@@ -391,17 +391,17 @@ async fn boot_roster(
         value["phase"] = json!("starting_daemon");
         persist(status_path, &value)?;
     }
-    let spawned_pid = spawn_supervisor(
+    let spawned = capture_spawned_successor(spawn_supervisor(
         &std::env::current_exe()?,
         socket,
         Some(roster_path),
         &std::env::current_dir()?,
-    )?;
+    )?);
+    let spawned_pid = spawned.pid;
     // The spawn pin (the coordinator's own hello contract): the adopted
     // hello must come from the child THIS migration spawned, never from a
     // different daemon that won the socket - the pin replaces the legacy
     // pid assertion with the same identity check the main flow uses.
-    let spawned = capture_spawned_successor(spawned_pid);
     let successor = wait_for_hello(socket, budget.boot_ms, &spawned)
         .await
         .context("replacement daemon did not start")?;

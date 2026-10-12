@@ -45,6 +45,16 @@ pub(crate) fn force_kill_identity_crash(pid: u32, start_id: Option<&str>) -> boo
             Some(_) => {}
             None => return false,
         }
+    } else {
+        // No start-id pin: the child's identity was never captured (it
+        // exited before the read, or the read failed), so whatever now
+        // owns the pid is unverified. The pinned kill exists precisely
+        // so a REUSED pid is never signaled; skipping the pin on a
+        // live process would invert that guarantee and SIGKILL a
+        // recycled pid's new owner outside any boot budget. The
+        // unconfirmed verdict makes the caller refuse to spawn against
+        // the process - the conservative doctrine, never a blind kill.
+        return false;
     }
     let _ = kill_pid(pid as i32, Signal::Kill);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -314,6 +324,19 @@ mod tests {
             socket_dir: dir.join("agent").join("sockets"),
             default_socket_path: dir.join("agent").join("sockets").join("daemon.sock"),
         }
+    }
+
+    #[test]
+    fn an_unpinned_identity_never_signals_a_live_process() {
+        // The test binary's own pid is a live process: an uncaptured
+        // start id is an UNCONFIRMED death, never a blind kill - the
+        // pin exists so a reused pid is never signaled, and skipping it
+        // on a live process would SIGKILL a recycled pid's new owner.
+        let pid = std::process::id();
+        assert!(
+            !force_kill_identity_crash(pid, None),
+            "an unpinned identity is an unconfirmed death, never a signal"
+        );
     }
 
     #[test]
