@@ -140,13 +140,23 @@ impl MockSupervisor {
                     std::thread::spawn(move || {
                         match scenario {
                             Scenario::Quiet => {
-                                tool_start(&mut w, "bash", json!({ "command": "sleep 1" }));
+                                tool_start(
+                                    &mut w,
+                                    "call_1",
+                                    "bash",
+                                    json!({ "command": "sleep 1" }),
+                                );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
-                                tool_end(&mut w, "bash", "ok");
+                                tool_end(&mut w, "call_1", "bash", "ok");
                                 event(&mut w, json!({ "type": "turn_end" }));
                             }
                             Scenario::Straggler => {
-                                tool_start(&mut w, "bash", json!({ "command": "sleep 1" }));
+                                tool_start(
+                                    &mut w,
+                                    "call_1",
+                                    "bash",
+                                    json!({ "command": "sleep 1" }),
+                                );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
                                 // The end frame is dropped: the turn
                                 // settles with a still-running card.
@@ -158,14 +168,20 @@ impl MockSupervisor {
                                 // outside a live turn it must land on
                                 // nothing too, no fresh ticking card).
                                 std::thread::sleep(std::time::Duration::from_millis(250));
-                                tool_end(&mut w, "bash", "late frame resurrection");
-                                tool_start(&mut w, "bash", json!({ "command": "sleep 2" }));
+                                tool_end(&mut w, "call_1", "bash", "late frame resurrection");
+                                tool_start(
+                                    &mut w,
+                                    "call_1",
+                                    "bash",
+                                    json!({ "command": "sleep 2" }),
+                                );
                                 drain_barrier(&mut w);
                             }
                             Scenario::IpythonStraggler => {
                                 tool_start(
                                     &mut w,
-                                    "python_repl",
+                                    "call_1",
+                                    "ipython",
                                     json!({ "code": "print('x')" }),
                                 );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
@@ -177,7 +193,12 @@ impl MockSupervisor {
                                 // a start and a streamed partial, but the
                                 // end frame AND the turn's own `turn_end`
                                 // never land — the turn is lost.
-                                tool_start(&mut w, "bash", json!({ "command": "sleep 1" }));
+                                tool_start(
+                                    &mut w,
+                                    "call_1",
+                                    "bash",
+                                    json!({ "command": "sleep 1" }),
+                                );
                                 std::thread::sleep(std::time::Duration::from_millis(300));
                                 event(
                                     &mut w,
@@ -192,20 +213,34 @@ impl MockSupervisor {
                                         },
                                     }),
                                 );
-                                // Turn two runs to its own settle; the
-                                // pending-scoped sweep must leave turn
-                                // one's card alone.
+                                // Turn two (its own call id) runs to its
+                                // own settle; the pending-scoped sweep
+                                // must leave turn one's card alone.
                                 std::thread::sleep(std::time::Duration::from_millis(300));
                                 event(&mut w, json!({ "type": "turn_start" }));
-                                tool_start(&mut w, "bash", json!({ "command": "sleep 2" }));
+                                tool_start(
+                                    &mut w,
+                                    "call_2",
+                                    "bash",
+                                    json!({ "command": "sleep 2" }),
+                                );
                                 std::thread::sleep(std::time::Duration::from_millis(300));
-                                tool_end(&mut w, "bash", "turn two output");
+                                tool_end(&mut w, "call_2", "bash", "turn two output");
                                 event(&mut w, json!({ "type": "turn_end" }));
                                 drain_barrier(&mut w);
                             }
                         }
                     });
                 }
+                _ => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": command_type,
+                            "success": true,
+                            "data": {},
                         }),
                     );
                 }
@@ -233,26 +268,26 @@ fn event(writer: &mut UnixStream, payload: Value) {
     );
 }
 
-/// The `tool_execution_start` frame for the mock's single call id.
-fn tool_start(writer: &mut UnixStream, tool: &str, args: Value) {
+/// The `tool_execution_start` frame for one call id.
+fn tool_start(writer: &mut UnixStream, call_id: &str, tool: &str, args: Value) {
     event(
         writer,
         json!({
             "type": "tool_execution_start",
-            "toolCallId": "call_1",
+            "toolCallId": call_id,
             "toolName": tool,
             "args": args,
         }),
     );
 }
 
-/// The `tool_execution_end` frame for the mock's single call id.
-fn tool_end(writer: &mut UnixStream, tool: &str, text: &str) {
+/// The `tool_execution_end` frame for one call id.
+fn tool_end(writer: &mut UnixStream, call_id: &str, tool: &str, text: &str) {
     event(
         writer,
         json!({
             "type": "tool_execution_end",
-            "toolCallId": "call_1",
+            "toolCallId": call_id,
             "toolName": tool,
             "result": {
                 "content": [{ "type": "text", "text": text }],
@@ -578,36 +613,25 @@ fn a_lost_turns_card_is_not_settled_by_a_later_turn() {
         .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
-    // The barrier rendered: the negatives below are read only after turn
+    // The barrier rendered: the assertions below are read only after turn
     // two's settle demonstrably drained.
+    let barrier = outcome
+        .frames
+        .iter()
+        .position(|frame| frame.contains("late-probe-drained"))
+        .expect("the drain barrier rendered");
+    let settled = outcome.frames[barrier..].join("\n===\n");
     assert!(
-        outcome
-            .frames
-            .iter()
-            .any(|frame| frame.contains("late-probe-drained")),
-        "the drain barrier rendered:
-{}",
-        outcome.frames.join("
-===
-")
-    );
-    let rendered = outcome.frames.join("
-===
-");
-    assert!(
-        rendered.contains("turn one partial output"),
-        "the lost turn's streamed output survives the later turn's settle:
-{rendered}"
+        settled.contains("turn one partial output"),
+        "the lost turn's streamed output survives the later turn's settle:\n{settled}"
     );
     assert!(
-        !rendered.contains("turn ended before"),
-        "the later turn's settle never stamps the earlier run's card:
-{rendered}"
+        !settled.contains("turn ended before"),
+        "the later turn's settle never stamps the earlier run's card:\n{settled}"
     );
     assert!(
-        rendered.contains("turn two output"),
-        "turn two's own call settles normally:
-{rendered}"
+        settled.contains("turn two output"),
+        "turn two's own call settles normally:\n{settled}"
     );
 }
 
