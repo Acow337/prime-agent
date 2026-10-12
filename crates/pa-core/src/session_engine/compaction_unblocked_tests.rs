@@ -735,9 +735,23 @@ async fn a_larger_output_budget_rejects_a_prepared_background_join() {
         panic!("the background summarize was started");
     };
     let summary = handle.await.unwrap().unwrap();
-    assert!(engine.joined_summary_usable(&summary, &run_model).await);
+    {
+        let persistence = engine.shared_persistence();
+        let session = persistence.lock().await;
+        let relieves = |max_output_tokens| {
+            super::compact_session::joined_summary_relieves(
+                &session,
+                &summary.attempt,
+                &summary.prepared,
+                run_model.context_window,
+                max_output_tokens,
+                &engine.compaction_settings(),
+            )
+        };
+        assert!(relieves(0));
+        assert!(!relieves(32_000));
+    }
     run_model.max_tokens = 32_000;
-    assert!(!engine.joined_summary_usable(&summary, &run_model).await);
     *engine.compaction_flight.lock().await =
         Some(super::BackgroundFlight::Ready(Box::new(summary)));
     let outcome = engine
