@@ -184,6 +184,26 @@ impl MockSupervisor {
                                     },
                                 }),
                             );
+                            // The drain barrier, immediately after the
+                            // late end on the same socket: its render is
+                            // the observable proof the client processed
+                            // the late frame first (socket order), so the
+                            // no-resurrection assertion cannot pass
+                            // vacuously when the plan finishes early.
+                            write_json(
+                                &mut event_writer,
+                                &json!({
+                                    "type": "session_event",
+                                    "activeSessionId": "s1",
+                                    "event": {
+                                        "type": "message_start",
+                                        "message": {
+                                            "role": "user",
+                                            "content": [{ "type": "text", "text": "late-probe-drained" }],
+                                        },
+                                    },
+                                }),
+                            );
                         }
                     });
                 }
@@ -421,10 +441,14 @@ fn a_straggler_tool_card_freezes_at_the_turn_settle() {
                 needle: "Took ".to_string(),
                 timeout_ms: 5000,
             },
-            // The timing window for the late end frame (a no-op by design,
-            // so it has no observable readiness to wait on): the plan
-            // holds while the frame is drained and painted.
-            HeadlessStep::WaitMs(800),
+            // The drain barrier: the late end frame is followed on the
+            // same socket by the marker render, so waiting for the marker
+            // proves the late frame was processed first — the
+            // no-resurrection assertion cannot pass vacuously.
+            HeadlessStep::WaitRender {
+                needle: "late-probe-drained".to_string(),
+                timeout_ms: 5000,
+            },
             HeadlessStep::WaitIdle { timeout_ms: 5000 },
         ],
         width: 100,
