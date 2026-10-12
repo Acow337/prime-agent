@@ -22,7 +22,7 @@ pub use lock_dir::{
 };
 
 pub use fs::fsync;
-pub use lock_dir::{lock_exclusive, try_lock_exclusive, LockDir};
+pub use lock_dir::{lock_exclusive, try_lock_exclusive, unlock_file, LockDir};
 pub use perms::{
     file_mode, is_executable, is_readable_writable, restrict_dir, restrict_file, set_private_mode,
 };
