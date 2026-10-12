@@ -595,3 +595,160 @@ async fn a_stale_ready_join_restarts_in_the_background_instead_of_going_due() {
     summarizer.registration.unregister();
     restart.registration.unregister();
 }
+
+/// The daemon races a foreground join against its abort signal. Cancelling
+/// that join drops its background task and never commits the prepared cut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_background_join_preserves_the_transcript_and_releases_the_flight() {
+    use std::future::Future as _;
+    use std::task::Poll;
+
+    let (engine, _tmp) = held_engine(true, 3).await;
+    let before = engine.entries().await;
+    let mut summarizer = held_summarizer(1, vec![follow_up("fresh after cancellation")]);
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    wait_for_held_summarizer(&mut summarizer).await;
+    let background = {
+        let slot = engine.compaction_flight.lock().await;
+        let Some(super::BackgroundFlight::Summarizing(handle)) = slot.as_ref() else {
+            panic!("the background summarize is running");
+        };
+        handle.abort_handle()
+    };
+    let controller = pa_agent::abort::AbortController::new();
+    let signal = controller.signal();
+    let mut joined = Box::pin(pa_agent::abort::race_with_abort(
+        engine.compact(None, &summarizer.model, None, Some(&signal)),
+        &signal,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(joined.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(
+        engine.compaction_flight.try_lock().is_err(),
+        "the join owns the flight"
+    );
+    controller.abort();
+    let error = joined.await.expect_err("the foreground join is cancelled");
+    assert!(pa_agent::abort::is_abort_error(&error));
+    // The faux provider's synchronous factory needs releasing even when its
+    // surrounding async task was aborted; real async transport drops at once.
+    release(&summarizer);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !background.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the cancelled background task terminates");
+    assert_eq!(engine.entries().await, before);
+    assert!(engine.compaction_flight.lock().await.is_none());
+    let outcome = engine
+        .compact(None, &summarizer.model, None, None)
+        .await
+        .unwrap();
+    let CompactOutcome::Ran(run) = outcome else {
+        panic!("fresh compaction runs")
+    };
+    assert_eq!(run.result.summary, "fresh after cancellation");
+    assert_eq!(summarizer.registration.call_count(), 2);
+    assert_eq!(compaction_rows(&engine).await, 1);
+    summarizer.registration.unregister();
+}
+
+/// Explicit instructions replace an in-flight background summary and reach
+/// the new summarizer request; the discarded flight cannot append a late cut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_instructions_replace_the_background_summary() {
+    let (engine, _tmp) = held_engine(true, 3).await;
+    let instructions = "Retain the deployment rollback procedure";
+    let replacement = pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |context, _, _, _| {
+        assert!(serde_json::to_string(context)
+            .unwrap()
+            .contains(instructions));
+        Ok(faux_reply("instruction-specific summary"))
+    }));
+    let mut summarizer = held_summarizer(1, vec![replacement]);
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    wait_for_held_summarizer(&mut summarizer).await;
+    let background = {
+        let slot = engine.compaction_flight.lock().await;
+        let Some(super::BackgroundFlight::Summarizing(handle)) = slot.as_ref() else {
+            panic!("the background summarize is running");
+        };
+        handle.abort_handle()
+    };
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        engine.compact(Some(instructions), &summarizer.model, None, None),
+    )
+    .await
+    .expect("instructions do not wait for the held background summary")
+    .unwrap();
+    release(&summarizer);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !background.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the replaced background task terminates");
+    let CompactOutcome::Ran(run) = outcome else {
+        panic!("replacement compaction runs")
+    };
+    assert_eq!(run.result.summary, "instruction-specific summary");
+    assert_eq!(run.entry.custom_instructions.as_deref(), Some(instructions));
+    assert_eq!(summarizer.registration.call_count(), 2);
+    assert_eq!(compaction_rows(&engine).await, 1);
+    assert!(engine.compaction_flight.lock().await.is_none());
+    summarizer.registration.unregister();
+}
+
+/// Increasing the next request's output budget can invalidate a prepared
+/// join even when the model's context window has not changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_larger_output_budget_rejects_a_prepared_background_join() {
+    let (engine, _tmp) = held_engine(false, 3).await;
+    let mut summarizer = held_summarizer(1, vec![follow_up("fresh for larger output budget")]);
+    let mut run_model = summarizer.model.clone();
+    run_model.context_window = 128_000;
+    run_model.max_tokens = 0;
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    wait_for_held_summarizer(&mut summarizer).await;
+    {
+        let persistence = engine.shared_persistence();
+        let mut session = persistence.lock().await;
+        session.append_message_retained(user_turn(&"x".repeat(340_000)));
+    }
+    release(&summarizer);
+    let Some(super::BackgroundFlight::Summarizing(handle)) =
+        engine.compaction_flight.lock().await.take()
+    else {
+        panic!("the background summarize was started");
+    };
+    let summary = handle.await.unwrap().unwrap();
+    assert!(engine.joined_summary_usable(&summary, &run_model).await);
+    run_model.max_tokens = 32_000;
+    assert!(!engine.joined_summary_usable(&summary, &run_model).await);
+    *engine.compaction_flight.lock().await =
+        Some(super::BackgroundFlight::Ready(Box::new(summary)));
+    let outcome = engine
+        .compact_for_run_model(None, &run_model, &summarizer.model, None, None)
+        .await
+        .unwrap();
+    let CompactOutcome::Ran(run) = outcome else {
+        panic!("fresh compaction runs")
+    };
+    assert_eq!(run.result.summary, "fresh for larger output budget");
+    assert_eq!(summarizer.registration.call_count(), 2);
+    assert_eq!(compaction_rows(&engine).await, 1);
+    summarizer.registration.unregister();
+}
