@@ -510,7 +510,7 @@ impl AgentSession {
                 reason: AUTO_REFINE_COMPACT_REASON.to_string(),
                 turns_since_last_review,
             },
-            default_refiner_call(api_key.clone()),
+            default_refiner_call(api_key.clone(), self.session_id().await),
         )
         .await?;
         if !review.should_refine {
@@ -586,7 +586,10 @@ impl AgentSession {
 
 /// The default model seam over pa-ai completion.
 #[must_use]
-pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::executor::RefinerFn {
+pub fn default_refiner_call(
+    api_key: Option<String>,
+    session_id: String,
+) -> crate::refinement::executor::RefinerFn {
     Box::new(move |model, system_prompt, prompt| {
         let api_key = api_key;
         Box::pin(async move {
@@ -602,6 +605,7 @@ pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::execu
             let stream_options =
                 pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
                     api_key,
+                    session_id: Some(session_id),
                     ..Default::default()
                 });
             Ok(pa_ai::complete_simple(&model, &context, Some(stream_options)).await?)

@@ -418,7 +418,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
     let provisioner = super::runtime_wiring::kernel_provisioner(
-        session_id,
+        session_id.clone(),
         handlers,
         python_skills,
         cwd.clone(),
@@ -613,6 +613,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         None => timing_stream_fn,
     };
     let agent = Agent::new(AgentOptions {
+        session_id: Some(session_id),
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
             model: Some(model),
