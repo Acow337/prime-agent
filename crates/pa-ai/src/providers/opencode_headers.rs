@@ -1,4 +1,4 @@
-//! OpenCode routing identity is conversation-scoped, independently of prompt caching.
+//! `OpenCode` routing identity is conversation-scoped, independently of prompt caching.
 
 pub(super) fn apply(headers: &mut Vec<(String, String)>, provider: &str, session_id: Option<&str>) {
     if !matches!(provider, "opencode" | "opencode-go") {
