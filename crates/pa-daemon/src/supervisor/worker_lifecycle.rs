@@ -1092,7 +1092,7 @@ mod tests {
         assert!(crate::descriptor::read_identity_pending(&descriptor_path).is_some());
 
         std::fs::remove_dir(&descriptor_path).expect("unblock descriptor path");
-        persist_worker(&descriptor_path, &resident.descriptor.lock().await)
+        persist_worker(&descriptor_path, &*resident.descriptor.lock().await)
             .expect("descriptor persisted for retry");
         assert!(supervisor.retire_worker_after_stop(&resident).await);
         assert!(!descriptor_path.exists());
