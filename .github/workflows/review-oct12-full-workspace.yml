@@ -29,22 +29,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pr: 3505
-            sha: 901345816b53ee62cf7461d412690ebdcb2ffa61
-          - pr: 3431
-            sha: c519e596b444341ceda5e50f275db707064745b9
+          - pr: 3424
+            sha: e709526ea4aa8307ec1e43bcebd0045f77e21cf2
+          - pr: 3409
+            sha: 2dcb364fcae79a75a3df3e75dbda9221f9be9772
+            source: 3856a50e9431075185bf6b2d2ca346fd4fab9591
+            base: e41c9c4c6ccabf700f1dfdc1653e7ef9c5e96312
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ matrix.sha }}
           persist-credentials: false
-      - name: Verify and record the original reviewed head
+          fetch-depth: 2
+      - name: Verify and record the reviewed revision
         env:
           EXPECTED_HEAD: ${{ matrix.sha }}
           REVIEWED_PR: ${{ matrix.pr }}
+          EXPECTED_SOURCE: ${{ matrix.source }}
+          EXPECTED_BASE: ${{ matrix.base }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           echo "PR $REVIEWED_PR: $EXPECTED_HEAD" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$EXPECTED_SOURCE" ]; then
+            test "$(git rev-parse HEAD^1)" = "$EXPECTED_BASE"
+            test "$(git rev-parse HEAD^2)" = "$EXPECTED_SOURCE"
+            echo "Integration revision: source $EXPECTED_SOURCE; base $EXPECTED_BASE" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
           components: rustfmt, clippy
