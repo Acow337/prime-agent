@@ -156,30 +156,55 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
     );
     assert_eq!(run.result.first_kept_entry_id, kept_id);
     // The usage is the sum of the two wire calls (faux estimates each
-    // call as ceil(chars/4) over the serialized prompt plus response).
+    // call as ceil(chars/4), with a shared conversation prompt cache).
     let est = |text: &str| (text.chars().count() as f64 / 4.0).ceil() as u64;
-    let usage_of = |request: &str, response: &str| {
-        let prompt = format!(
-            "system:{}\n\nuser:{request}",
-            super::super::compaction_utils::SUMMARIZATION_SYSTEM_PROMPT
+    let expected_for_order = |first: (&str, &str), second: (&str, &str)| {
+        let mut previous_prompt = String::new();
+        let mut usage_of = |request: &str, response: &str| {
+            let prompt = format!(
+                "system:{}\n\nuser:{request}",
+                super::super::compaction_utils::SUMMARIZATION_SYSTEM_PROMPT
+            );
+            let shared_chars = previous_prompt
+                .chars()
+                .zip(prompt.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let cache_read = est(&prompt.chars().take(shared_chars).collect::<String>());
+            let cache_write = est(&prompt.chars().skip(shared_chars).collect::<String>());
+            let input = est(&prompt) - cache_read;
+            previous_prompt = prompt;
+            let output = est(response);
+            pa_types::ai::Usage {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                total_tokens: input + output + cache_read + cache_write,
+                cost: pa_types::ai::UsageCost::default(),
+            }
+        };
+        let mut expected = usage_of(first.0, first.1);
+        super::super::compaction_exec::add_assistant_usage(
+            &mut expected,
+            &usage_of(second.0, second.1),
         );
-        let input = est(&prompt);
-        let output = est(response);
-        pa_types::ai::Usage {
-            input,
-            output,
-            cache_read: 0,
-            cache_write: 0,
-            total_tokens: input + output,
-            cost: pa_types::ai::UsageCost::default(),
-        }
+        expected
     };
-    let mut expected = usage_of(history_request, history_response);
-    super::super::compaction_exec::add_assistant_usage(
-        &mut expected,
-        &usage_of(prefix_request, prefix_response),
-    );
-    assert_eq!(run.result.usage, Some(expected));
+    // Both summary calls run concurrently, so either can populate the cache first.
+    let expected = [
+        expected_for_order(
+            (history_request, history_response),
+            (prefix_request, prefix_response),
+        ),
+        expected_for_order(
+            (prefix_request, prefix_response),
+            (history_request, history_response),
+        ),
+    ];
+    assert!(expected
+        .iter()
+        .any(|usage| run.result.usage.as_ref() == Some(usage)));
     assert_eq!(run.entry.usage, run.result.usage);
     assert_eq!(run.entry.summary, run.result.summary);
     let persisted = session
@@ -483,8 +508,8 @@ async fn split_turn_without_history_makes_only_the_prefix_call() {
             input,
             output,
             cache_read: 0,
-            cache_write: 0,
-            total_tokens: input + output,
+            cache_write: input,
+            total_tokens: input * 2 + output,
             cost: pa_types::ai::UsageCost::default(),
         })
     );
