@@ -563,15 +563,22 @@ impl LockDir {
                 // Stale by observation: reclaim by renaming the directory
                 // aside — the rename is the atomic decision. A successor
                 // lock another waiter installed between the observation
-                // and the rename is detected by identity (the mtime this
-                // judge observed) and restored untouched: only the lock
-                // that was stale at observation is ever deleted.
+                // and the rename is detected by identity and restored
+                // untouched: the mtime this judge observed AND the
+                // directory identity (dev+inode) both match — probe
+                // mtime can collide for locks created in the same
+                // wall-second, the inode cannot. Only the lock that was
+                // stale at observation is ever deleted.
                 let aside = path.with_extension(format!("stale-{}", uuid::Uuid::new_v4()));
                 match fs::rename(path, &aside) {
                     Ok(()) => {
-                        let renamed_is_observed = fs::symlink_metadata(&aside)
-                            .and_then(|meta| meta.modified())
-                            .is_ok_and(|renamed_modified| renamed_modified == modified);
+                        let renamed_is_observed =
+                            fs::symlink_metadata(&aside).is_ok_and(|renamed_meta| {
+                                renamed_meta
+                                    .modified()
+                                    .is_ok_and(|renamed_modified| renamed_modified == modified)
+                                    && lock_identity(&renamed_meta) == lock_identity(&metadata)
+                            });
                         if renamed_is_observed {
                             // The observed stale lock: delete and let the
                             // caller retry the create.
@@ -773,6 +780,69 @@ mod tests {
             fs::read_to_string(path.join("owner")).is_ok_and(|owner| owner == "999999 tok"),
             "the parked directory restores once the path is free"
         );
+    }
+
+    /// A successor whose probe mtime MATCHES the stale observation (a
+    /// same-second collision) still survives the judge: the directory
+    /// identity carries the discrimination the mtime cannot. In the real
+    /// race the observed incumbent's inode stays alive (another judge
+    /// renamed it aside), so the successor installed at the freed path
+    /// gets a fresh inode with an identical same-second probe stamp.
+    #[test]
+    fn a_same_mtime_successor_is_restored_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let lock_path = LockDir::path_for(&file);
+        // The stale incumbent the judge observes (dead owner). The guard
+        // binding is dropped unnamed: only the observed metadata matters
+        // here, and its directory is renamed aside manually below.
+        let _incumbent = LockDir::acquire_owned_retrying(
+            &file,
+            MIN_STALE,
+            1,
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap();
+        let incumbent_meta = fs::symlink_metadata(&lock_path).unwrap();
+        let incumbent_modified = incumbent_meta.modified().unwrap();
+        // Another judge's reclaim renames the incumbent aside: its inode
+        // stays alive (renamed, not deleted), so the successor created
+        // at the freed path CANNOT reuse it.
+        let incumbent_aside = lock_path.with_extension("stale-incumbent");
+        fs::rename(&lock_path, &incumbent_aside).unwrap();
+        // The successor: a live lock installed at the canonical path in
+        // the same wall-second — identical probe stamp, fresh inode.
+        let successor = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let successor_meta = fs::symlink_metadata(&lock_path).unwrap();
+        assert_eq!(
+            successor_meta.modified().unwrap(),
+            incumbent_modified,
+            "premise: the same-second probe stamps collide"
+        );
+        assert_ne!(
+            lock_identity(&successor_meta),
+            lock_identity(&incumbent_meta),
+            "the inode carries the discrimination the mtime cannot"
+        );
+        // The judge's own rename grabs the successor (the path holds it),
+        // and the post-rename check must refuse the deletion: the mtime
+        // matches the stale observation, the identity does not.
+        let renamed_aside = lock_path.with_extension("stale-test");
+        fs::rename(&lock_path, &renamed_aside).unwrap();
+        let renamed_meta = fs::symlink_metadata(&renamed_aside).unwrap();
+        let mtime_matches = renamed_meta.modified().unwrap() == incumbent_modified;
+        let identity_matches = lock_identity(&renamed_meta) == lock_identity(&incumbent_meta);
+        assert!(
+            mtime_matches && !identity_matches,
+            "the same-mtime different-identity pair is exactly the colliding case: restored, never deleted"
+        );
+        // Cleanup: restore the successor and release everything.
+        fs::rename(&renamed_aside, &lock_path).unwrap();
+        successor.release();
+        // The incumbent's directory now lives in the aside location.
+        std::fs::remove_dir_all(&incumbent_aside).unwrap();
+        let _ = std::fs::remove_file(&file);
     }
 
     /// A displaced guard never releases a successor's lock: a judge
