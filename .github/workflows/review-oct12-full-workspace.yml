@@ -1,0 +1,74 @@
+# Disposable review evidence only. Close this PR after validation; never merge.
+name: review exact heads full workspace
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths: [.github/workflows/review-oct12-full-workspace.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-oct12-full-workspace-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  exact-head-tests:
+    # Only this dedicated same-repository validation branch may run these jobs.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'verify/review-oct12-full-workspace' && !github.event.pull_request.draft
+    name: full workspace PR ${{ matrix.pr }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 3505
+            sha: b188597602864ac79140427d89f8b9feaa3c130c
+          - pr: 3424
+            sha: c017f53ee186c1b91b94b2df4fb5dc7c85a612c0
+          - pr: 3431
+            sha: ed72ecde84adab3c336c720df2de6489e85f5411
+          - pr: 3409
+            sha: 3856a50e9431075185bf6b2d2ca346fd4fab9591
+          - pr: 3406
+            sha: 1dfabaf7aa18274c4b7979b15a046447874aa6f2
+          - pr: 3349
+            sha: 9e99829876943f12815216400c514d8f934664a0
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - name: Verify and record the original reviewed head
+        env:
+          EXPECTED_HEAD: ${{ matrix.sha }}
+          REVIEWED_PR: ${{ matrix.pr }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          echo "PR $REVIEWED_PR: $EXPECTED_HEAD" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: test-shards
+          save-if: false
+      - name: Install uv
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Check workspace clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Build workspace binaries for integration tests
+        run: cargo build --locked --workspace --bins
+      - name: Bootstrap kernel environment before tests
+        run: ./target/debug/prime-agent --prime-agent-bootstrap
+      - name: Test the entire workspace
+        run: cargo test --locked --workspace
