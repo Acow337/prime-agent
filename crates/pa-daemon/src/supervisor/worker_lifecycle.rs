@@ -796,14 +796,15 @@ impl Supervisor {
                 ) {
                     let _ = std::fs::remove_file(&recovery_journal_path);
                 }
-                if let Err(error) = std::fs::remove_file(&resident.descriptor_path) {
-                    if error.kind() != std::io::ErrorKind::NotFound {
+                match std::fs::remove_file(&resident.descriptor_path) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                         self.log_line(&format!(
                             "failed to retire the descriptor of session worker {}: {error}; descriptor kept",
                             resident.worker_id
                         ));
                         return false;
                     }
+                    Ok(()) | Err(_) => {}
                 }
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
