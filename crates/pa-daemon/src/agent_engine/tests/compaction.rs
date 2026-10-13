@@ -2099,6 +2099,10 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
                     pa_ai::faux::FauxAssistantMessageOptions::default(),
                 ));
             }
+            issuance
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push("turn");
             let reply = turn_messages
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
