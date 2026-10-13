@@ -29,6 +29,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         created: false,
         attached_client_ids: Vec::new(),
         abort_requested: false,
+        turn_cancelled: false,
+        turn_completed: false,
         suppress_aborted_row: false,
         shutdown_requested: false,
         compacting: false,

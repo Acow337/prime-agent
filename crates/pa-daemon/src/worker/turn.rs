@@ -426,6 +426,9 @@ impl TurnRunner {
         let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
         let batch_len = items.len();
+        // The accepted prefix must survive an engine panic after persistence.
+        let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted_prefix_seen = Arc::clone(&accepted_prefix);
         let turn = tokio::task::spawn_blocking(move || {
             // The engine's own terminal `turn_end` frame keeps the
             // trailing `Done` fallback silent.
@@ -654,6 +657,7 @@ impl TurnRunner {
                     )
                 {
                     accepted_rows += 1;
+                    accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);
                     if accepted_rows == 1 {
                         if let Some(active) = core.active_action.as_mut() {
                             active.phase = "committing".to_string();
@@ -674,6 +678,9 @@ impl TurnRunner {
                 }
                 let done_result = match &event {
                     EngineEvent::Done(result) => {
+                        if result.is_ok() {
+                            core.turn_completed = true;
+                        }
                         // The turn boundary releases RLM child prompt
                         // tasks waiting on it.
                         engine.on_turn_done();
@@ -1019,9 +1026,10 @@ impl TurnRunner {
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
             accepted_rows
         });
-        // A panicked turn cannot prove its input reached the transcript:
-        // none of it counts as accepted.
-        let accepted_rows = turn.await.unwrap_or(0);
+        if let Err(error) = turn.await {
+            eprintln!("pa-daemon: turn engine task failed: {error}");
+        }
+        let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
@@ -1039,7 +1047,7 @@ impl TurnRunner {
             // transcript row never persisted exist nowhere else, so they
             // return to the front of their lane, in order, for the settle
             // snapshot.
-            if core.shutdown_requested {
+            if core.shutdown_requested && !core.turn_cancelled {
                 let lane_items = match lane {
                     Lane::Steering => &mut core.steering,
                     Lane::FollowUp => &mut core.follow_up,

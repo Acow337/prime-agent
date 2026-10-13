@@ -77,7 +77,10 @@ impl Worker {
             .await;
         let interrupted_turn = {
             let mut core = self.core.lock().unwrap();
-            let interrupted_turn = core.busy && !core.abort_requested;
+            let interrupted_turn = core.busy
+                && !core.abort_requested
+                && !core.turn_cancelled
+                && !core.turn_completed;
             // The shutdown gate closes FIRST: a racing execute_bash must see the
             // stop before the abort runs — a claim that slipped in after the
             // abort would register a controller nothing later cancels, and the
@@ -102,26 +105,33 @@ impl Worker {
         self.tree_navigation.abort();
         self.await_session_work_settled().await;
         if daemon_wide && interrupted_turn {
-            {
+            let continued = {
                 let mut core = self.core.lock().unwrap();
-                core.steering.push_front(QueuedItem {
-                    priority: QueuePriority::Human,
-                    preview: None,
-                    message: crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT.to_string(),
-                    custom_message: None,
-                    agent_message: None,
-                    queue_key: None,
-                    admission_id: None,
-                    images: Vec::new(),
-                    done: None,
-                    queue_visible: false,
-                    policy: TurnPolicy::Direct,
-                    forced_batch: false,
+                if core.turn_cancelled || core.turn_completed {
+                    false
+                } else {
+                    core.steering.push_front(QueuedItem {
+                        priority: QueuePriority::Human,
+                        preview: None,
+                        message: crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT.to_string(),
+                        custom_message: None,
+                        agent_message: None,
+                        queue_key: None,
+                        admission_id: None,
+                        images: Vec::new(),
+                        done: None,
+                        queue_visible: false,
+                        policy: TurnPolicy::Direct,
+                        forced_batch: false,
+                    });
+                    true
+                }
+            };
+            if continued {
+                self.checkpoint_queue(QueueCheckpoint::Admitted {
+                    operation: "prompt_accepted",
                 });
             }
-            self.checkpoint_queue(QueueCheckpoint::Admitted {
-                operation: "prompt_accepted",
-            });
         }
         // The children close before the exit (an unreachable child must not
         // block the worker's own exit); their resume entries and scheduled
@@ -247,6 +257,7 @@ impl Worker {
                 let busy = core.busy || core.compacting;
                 if busy {
                     core.abort_requested = true;
+                    core.turn_cancelled = true;
                 }
                 busy
             };

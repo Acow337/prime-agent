@@ -350,6 +350,7 @@ impl Worker {
         {
             let mut core = self.core.lock().unwrap();
             core.abort_requested = true;
+            core.turn_cancelled = true;
             // The queue parks and a plain prompt is rejected until a
             // resume site fires.
             core.queued_input_suspended = true;
@@ -622,6 +623,7 @@ impl Worker {
         }
         let mut core = self.core.lock().unwrap();
         core.abort_requested = true;
+        core.turn_cancelled = true;
         // The same TS `requestAbort()` suspension as the bare `abort`.
         core.queued_input_suspended = true;
         drop(core);
@@ -711,6 +713,7 @@ impl Worker {
         {
             let mut core = self.core.lock().unwrap();
             core.abort_requested = true;
+            core.turn_cancelled = true;
             core.steering.clear();
             core.follow_up.clear();
         }

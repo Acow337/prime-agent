@@ -331,6 +331,10 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
     let Some(first) = items.front() else {
         return Vec::new();
     };
+    // Only a real pickup starts a new delivery. Empty or parked lanes retain
+    // the prior delivery's cancellation and successful completion facts.
+    core.turn_cancelled = false;
+    core.turn_completed = false;
     // The armed set forces "all" only when the front item is armed; an un-armed
     // front disarms the batch once no armed item remains queued.
     let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;

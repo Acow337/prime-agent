@@ -543,6 +543,8 @@ impl Worker {
             }
             core.created = true;
             core.abort_requested = false;
+            core.turn_cancelled = false;
+            core.turn_completed = false;
             // A fresh session starts live: the previous close's
             // `session_closed` marker clears with the new session.
             if let Some(agent_engine) = &self.agent_engine {
