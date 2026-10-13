@@ -295,7 +295,7 @@ pub(crate) fn checkpoint_queue_recovery(
     ) {
         Ok(()) => true,
         Err(error) => {
-            tracing::warn!(%error, operation, "queue recovery checkpoint failed");
+            eprintln!("pa-daemon: queue recovery checkpoint {operation} failed: {error:#}");
             false
         }
     }
