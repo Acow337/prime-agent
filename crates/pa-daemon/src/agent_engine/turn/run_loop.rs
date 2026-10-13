@@ -55,7 +55,7 @@ impl AgentSessionEngine {
                 && self
                     .threshold_checks_enabled
                     .load(std::sync::atomic::Ordering::SeqCst)
-                    && self.run_auto_compaction(aborted, emit) == AutoCompactionRun::Cancelled
+                && self.run_auto_compaction(aborted, emit) == AutoCompactionRun::Cancelled
             {
                 return;
             }
