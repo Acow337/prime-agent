@@ -126,7 +126,10 @@ async fn cancelled_pickup_shutdown(cancellation: Cancellation) {
     }
     if matches!(cancellation, Cancellation::BareAbort) {
         let queued = worker
-            .dispatch("follow_up", &json!({ "message": "synthetic remaining input" }))
+            .dispatch(
+                "follow_up",
+                &json!({ "message": "synthetic remaining input" }),
+            )
             .await;
         assert!(queued.success, "keep a visible queue row: {queued:?}");
     }

@@ -674,7 +674,10 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
             .lock()
             .expect("an engine panic outside the callback must not poison the core");
         assert!(core.shutdown_requested && core.abort_requested);
-        assert!(!core.busy, "the panicked engine must settle its actual turn");
+        assert!(
+            !core.busy,
+            "the panicked engine must settle its actual turn"
+        );
     }
     // Recover from the files, not the picked batch or the old in-memory store.
     // Either durable user rows or pending queue rows may retain the input;
@@ -712,7 +715,9 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
         let pending: Vec<Value> = steering
             .iter()
             .chain(&follow_up)
-            .filter(|item| item.message != crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT)
+            .filter(|item| {
+                item.message != crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT
+            })
             .map(|item| serde_json::to_value(item).unwrap())
             .collect();
         assert_eq!(

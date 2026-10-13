@@ -15,9 +15,9 @@ impl SessionEngine for CompletedBeforeReturnEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         let mut content = vec![json!({ "type": "text", "text": request.message })];
-        content.extend(request.images.iter().map(|image| {
-            json!({ "type": "image", "data": image.data, "mimeType": image.mime_type })
-        }));
+        content.extend(request.images.iter().map(
+            |image| json!({ "type": "image", "data": image.data, "mimeType": image.mime_type }),
+        ));
         let user = json!({ "role": "user", "content": content, "timestamp": 1 });
         let assistant = json!({
             "role": "assistant", "content": "completed synthetic task", "timestamp": 2,
@@ -178,7 +178,9 @@ async fn completed_turn_shutdown_does_not_mint_a_restart_continuation() {
     .await
     .expect("actual shutdown never armed its close gate");
     assert!(worker.core.lock().unwrap().abort_requested);
-    release.send(()).expect("release the completed engine thread");
+    release
+        .send(())
+        .expect("release the completed engine thread");
     let reply = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
         .await
         .expect("actual shutdown never settled")
