@@ -6,7 +6,7 @@ use super::*;
 use crate::protocol::{response_failure, response_success};
 use crate::rlm_children::RlmChildIdentity;
 use crate::supervisor_link::SupervisorLink;
-use pa_core::session_engine::agent_messaging::AgentMessageController;
+use pa_core::session_engine::agent_messaging::{AgentMessageController, AgentObserveController};
 use pa_types::platform::transport::bind_transport;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -51,6 +51,25 @@ async fn spawn_fake_supervisor(
                             Some(&id),
                             "list_agent_peers",
                             Some(json!({ "peers": roster["sessions"] })),
+                        ),
+                        // The observe controller's roster walk.
+                        "list" => response_success(
+                            Some(&id),
+                            "list",
+                            Some(json!({ "sessions": roster["sessions"] })),
+                        ),
+                        // The observe controller's transcript read: a
+                        // fixed five-row tail.
+                        "get_messages" => response_success(
+                            Some(&id),
+                            "get_messages",
+                            Some(json!({ "messages": [
+                                { "role": "user", "content": "m0", "timestamp": 10 },
+                                { "role": "user", "content": "m1", "timestamp": 11 },
+                                { "role": "user", "content": "m2", "timestamp": 12 },
+                                { "role": "user", "content": "m3", "timestamp": 13 },
+                                { "role": "user", "content": "m4", "timestamp": 14 },
+                            ]})),
                         ),
                         "get_worker_peer_transport" => match ticket_response.clone() {
                             Some(ticket) => {
@@ -125,6 +144,17 @@ fn controller_with_children(
     let mut controller = controller(socket, own_summary);
     controller.children = Some(Arc::new(children));
     controller
+}
+
+/// The observe controller over the same scripted supervisor: roster
+/// reads and transcript reads share one link.
+fn observe_controller(socket: std::path::PathBuf) -> LinkAgentObserveController {
+    LinkAgentObserveController::new(
+        Arc::new(SupervisorLink::new(socket)),
+        "aaa111".to_string(),
+        Arc::new(std::sync::Mutex::new(own_summary())),
+        None,
+    )
 }
 
 /// Seed the children registry with one admitted child (the same state
@@ -935,4 +965,131 @@ async fn family_resolves_a_moved_parent_by_the_session_file_alias() {
     assert_eq!(family.len(), 1, "{family:?}");
     assert_eq!(family[0].relationship, AgentFamilyRelationship::Parent);
     assert_eq!(family[0].id, "rrr777");
+}
+
+/// TS `AgentObserveListResult`: the daemon roster walk splits the
+/// caller's own row into `current` and keeps the family in `agents`.
+#[tokio::test]
+async fn list_agents_returns_current_and_family_without_self() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(
+        socket.clone(),
+        json!({ "sessions": [
+            { "activeSessionId": "aaa111", "sessionId": "sess-a", "sessionName": "alpha",
+              "cwd": "/w", "messageCount": 7 },
+            { "activeSessionId": "bbb222", "sessionId": "sess-b", "sessionName": "beta" },
+            { "activeSessionId": "ddd444", "sessionId": "sess-d", "sessionName": "kid",
+              "runtimeKind": "subagent",
+              "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a",
+              "rlmChildId": "sub-kid1" },
+        ]}),
+        None,
+    )
+    .await;
+    let observer = observe_controller(socket);
+    let list = observer.list_agents().await.unwrap();
+    assert_eq!(list.current.active_session_id.as_deref(), Some("aaa111"));
+    assert!(list.current.is_current);
+    assert_eq!(
+        list.agents.len(),
+        2,
+        "the family roster excludes the caller: {:?}",
+        list.agents
+    );
+    assert!(list.agents.iter().all(|summary| !summary.is_current));
+    assert!(
+        list.agents
+            .iter()
+            .any(|summary| summary.active_session_id.as_deref() == Some("bbb222")),
+        "the sibling stays in the roster"
+    );
+    let child = list
+        .agents
+        .iter()
+        .find(|summary| summary.active_session_id.as_deref() == Some("ddd444"))
+        .expect("the child stays in the roster");
+    assert_eq!(child.relationship, Some(AgentFamilyRelationship::Child));
+}
+
+/// TS `AgentObserveRecentMessagesResult`: the transcript read resolves
+/// the family target first (the family gate), then reports the bounded
+/// window with its clamped bounds.
+#[tokio::test]
+async fn recent_messages_resolves_by_name_and_reports_the_envelope() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(
+        socket.clone(),
+        json!({ "sessions": [
+            { "activeSessionId": "aaa111", "sessionId": "sess-a", "sessionName": "alpha" },
+            { "activeSessionId": "ddd444", "sessionId": "sess-d", "sessionName": "kid",
+              "runtimeKind": "subagent",
+              "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a" },
+        ]}),
+        None,
+    )
+    .await;
+    let observer = observe_controller(socket);
+    let recent = observer.recent_messages("kid", 2, 90).await.unwrap();
+    assert_eq!(recent.agent.active_session_id.as_deref(), Some("ddd444"));
+    assert_eq!(recent.limit, 2);
+    assert_eq!(recent.max_chars, 90);
+    assert!(
+        recent.truncated,
+        "five scripted rows minus two leave older ones"
+    );
+    assert_eq!(recent.messages.len(), 2);
+    assert_eq!(recent.messages[0].index, 3);
+    assert_eq!(recent.messages[0].text, "m3");
+    // A target outside the nuclear family never reaches the transcript read.
+    let error = observer.recent_messages("ghost", 2, 90).await.unwrap_err();
+    assert_eq!(error.to_string(), "agent ghost is not reachable");
+}
+
+/// The supervisor roster row's own facts ride the observation summary,
+/// with `firstMessage` capped at the TS preview width.
+#[test]
+fn summaries_carry_the_supervisor_row_facts() {
+    let identity = FamilyIdentity {
+        active_session_id: "ppp000".to_string(),
+        session_id: Some("sess-p".to_string()),
+        session_file: Some("/agent/sessions/sess-p.jsonl".to_string()),
+        ..Default::default()
+    };
+    let sessions = vec![
+        json!({
+            "activeSessionId": "ppp000", "sessionId": "sess-p",
+            "runtimeKind": "top-level", "activity": "idle",
+            "cwd": "/w/agent", "messageCount": 12,
+        }),
+        json!({
+            "activeSessionId": "kid111", "sessionId": "sess-kid",
+            "sessionName": "kid", "runtimeKind": "subagent", "activity": "working",
+            "cwd": "/w/agent/kid", "messageCount": 3,
+            "parentActiveSessionId": "ppp000", "parentSessionId": "sess-p",
+            "rlmChildId": "sub-kid1", "firstMessage": "x".repeat(300),
+        }),
+    ];
+    let summaries = summaries_from_roster(sessions, &identity, &[]);
+    let child = summaries
+        .iter()
+        .find(|summary| summary.session_id == "sess-kid")
+        .expect("the child row");
+    assert_eq!(child.cwd.as_deref(), Some("/w/agent/kid"));
+    assert_eq!(child.message_count, Some(3));
+    assert_eq!(child.parent_active_session_id.as_deref(), Some("ppp000"));
+    assert_eq!(child.parent_session_id.as_deref(), Some("sess-p"));
+    assert_eq!(child.rlm_child_id.as_deref(), Some("sub-kid1"));
+    assert_eq!(
+        child.first_message.as_ref().map(String::len),
+        Some(240),
+        "firstMessage caps at the TS preview width"
+    );
+    let current = summaries
+        .iter()
+        .find(|summary| summary.is_current)
+        .expect("the caller's own row");
+    assert_eq!(current.cwd.as_deref(), Some("/w/agent"));
+    assert_eq!(current.message_count, Some(12));
 }
