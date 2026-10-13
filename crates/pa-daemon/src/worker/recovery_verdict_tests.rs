@@ -1,4 +1,5 @@
 //! Worker tests.
+mod completed;
 mod panic;
 
 use super::*;
