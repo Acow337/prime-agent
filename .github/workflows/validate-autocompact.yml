@@ -126,10 +126,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - name: Select the touched crates
         id: select
         env:
@@ -200,10 +200,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
         with:
           components: rustfmt
@@ -218,10 +218,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - run: python3 .github/scripts/discussion-notifier/test_notify.py
 
   migration-packaging:
@@ -233,10 +233,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - name: Verify native and npm compatibility packaging
         run: |
           python3 scripts/release/test_native_compat.py
@@ -254,10 +254,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
         with:
           components: clippy
@@ -306,10 +306,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -387,11 +387,14 @@ jobs:
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
           mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
           comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice autocompact_settings; do
+          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice live_mcp autocompact_settings; do
             verifier="scripts/review_${scenario}_parity.py"
             if [ -f "${verifier}" ]; then
               if [ "${scenario}" = "draft_disconnect" ]; then
                 python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
+              fi
+              if [ "${scenario}" = "live_mcp" ]; then
+                python3 scripts/test_review_live_mcp_parity.py || comparison_status=1
               fi
               python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
             fi
@@ -428,10 +431,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: shard-manifest-*
@@ -477,10 +480,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # the ref IS the 1.98.1 toolchain; the action ignores the toolchain input
         with:
           targets: x86_64-pc-windows-gnu
@@ -502,10 +505,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1bf37540f4e0e6028c77779cd00034ef189078db
+          ref: 164e2dd0e62e2bcdee0206a4d1f487e36471768e
           persist-credentials: false
       - name: Verify exact product revision
-        run: test "$(git rev-parse HEAD)" = 1bf37540f4e0e6028c77779cd00034ef189078db
+        run: test "$(git rev-parse HEAD)" = 164e2dd0e62e2bcdee0206a4d1f487e36471768e
       - name: Dependency audit (cargo-deny advisories + licenses)
         uses: ./.github/actions/dependency-audit
 
