@@ -31,6 +31,7 @@ impl AgentSessionEngine {
     /// pair, persisting and broadcasting exactly like the `/compact` flow.
     pub(crate) fn run_auto_compaction(
         &self,
+        aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> AutoCompactionRun {
         // TS runs the summarizer on the session's live model; a fresh
@@ -57,6 +58,14 @@ impl AgentSessionEngine {
             .auto_compaction_abort
             .lock()
             .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
+        // Stop may precede registration (for example just after the last
+        // assistant settled). Register first, then consult the worker flag:
+        // an earlier Stop is observed here; a later one reaches the slot.
+        if aborted() {
+            controller.abort();
+            self.clear_auto_compaction_abort(&controller);
+            return AutoCompactionRun::Cancelled;
+        }
         let engine = self.session.blocking_lock().clone();
         let due = match engine {
             Some(engine) => self.runtime.block_on(async {

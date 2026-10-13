@@ -44,7 +44,7 @@ impl AgentSessionEngine {
             if !self.run_pre_turn_overflow_compaction(emit) {
                 return;
             }
-            if self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled {
+            if self.run_auto_compaction(aborted, emit) == AutoCompactionRun::Cancelled {
                 return;
             }
             // The overflow retry re-issues the loop without a new user
@@ -157,7 +157,7 @@ impl AgentSessionEngine {
             }
             // The settled turn's usage crossing the headroom auto-compacts; the
             // autonomous continuation decision below still runs after it.
-            if self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled {
+            if self.run_auto_compaction(aborted, emit) == AutoCompactionRun::Cancelled {
                 return;
             }
             // The compact-trigger round is NOT consumed here: the review runs

@@ -1574,7 +1574,7 @@ fn a_routed_window_rejects_a_join_that_only_relieves_the_session_window() {
     // against the routed window.
     arm_routed_window(&engine, 64_000);
     let mut drive_events: Vec<EngineEvent> = Vec::new();
-    engine.run_auto_compaction(&mut |event| {
+    engine.run_auto_compaction(&|| false, &mut |event| {
         drive_events.push(event);
         true
     });
@@ -1681,7 +1681,7 @@ fn an_unrelieving_finished_background_summary_never_blocks_the_watermark_band() 
             "the band never restarted the discarded join: {} calls so far",
             registration.call_count()
         );
-        engine.run_auto_compaction(&mut |event| {
+        engine.run_auto_compaction(&|| false, &mut |event| {
             consult_events.push(event);
             true
         });
@@ -1834,7 +1834,7 @@ fn stop_at_compaction_start_never_restarts_a_cancelled_background_join() {
         }
     }
     let mut boundary_events = Vec::new();
-    engine.run_auto_compaction(&mut |event| {
+    engine.run_auto_compaction(&|| false, &mut |event| {
         if matches!(event, EngineEvent::CompactionStart { .. }) {
             engine.abort_in_flight_turn();
         }
@@ -1898,7 +1898,7 @@ fn stop_before_the_core_consult_does_not_start_a_replacement_flight() {
         let engine = std::sync::Arc::clone(&engine);
         std::thread::spawn(move || {
             let mut emitted = Vec::new();
-            let outcome = engine.run_auto_compaction(&mut |event| {
+            let outcome = engine.run_auto_compaction(&|| false, &mut |event| {
                 emitted.push(event);
                 true
             });
@@ -1919,6 +1919,14 @@ fn stop_before_the_core_consult_does_not_start_a_replacement_flight() {
     let (outcome, emitted) = boundary.join().unwrap();
     assert_eq!(outcome, crate::auto_compaction::AutoCompactionRun::NotDue);
     assert!(emitted.is_empty());
+    assert_eq!(registration.call_count(), 3);
+    assert!(engine.auto_compaction_abort.lock().unwrap().is_none());
+    // A Stop before the next boundary registered its controller is caught by
+    // the worker's persisted abort flag, rather than starting a new epoch.
+    assert_eq!(
+        engine.run_auto_compaction(&|| true, &mut |_| panic!("stopped boundary emitted")),
+        crate::auto_compaction::AutoCompactionRun::Cancelled,
+    );
     assert_eq!(registration.call_count(), 3);
     assert!(engine.auto_compaction_abort.lock().unwrap().is_none());
     registration.unregister();
