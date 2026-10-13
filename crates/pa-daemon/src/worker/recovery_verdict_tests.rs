@@ -757,3 +757,141 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
         );
     }
 }
+
+#[tokio::test]
+async fn resumed_queue_restarts_unsuspended_and_delivers_the_same_input() {
+    let fixture = tempfile::tempdir().unwrap();
+    let session_path = fixture.path().join("session.jsonl");
+    let mut session = SessionFile::create(fixture.path().to_str().unwrap(), None, 0);
+    session.set_path(session_path.clone());
+    session.rewrite().unwrap();
+    let worker = worker_with_journal_in(fixture.path());
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": session_path, "cwd": fixture.path() }),
+        )
+        .await;
+    assert!(created.success, "create isolated session: {created:?}");
+    let paused = worker
+        .dispatch(
+            "acquire_session_input_pause",
+            &json!({
+                "leaseKey": "resume-restart-gate", "clientId": "synthetic-client",
+            }),
+        )
+        .await;
+    assert!(paused.success, "acquire actual input pause: {paused:?}");
+    assert!(worker.input_pauses.paused());
+    let admitted = worker
+        .dispatch(
+            "follow_up",
+            &json!({ "message": "synthetic resumed queued input" }),
+        )
+        .await;
+    assert!(
+        admitted.success,
+        "admit the visible queued input: {admitted:?}"
+    );
+    let aborted = worker.dispatch("abort", &json!({})).await;
+    assert!(aborted.success, "abort parks queued input: {aborted:?}");
+    // An idle abort has no turn-end checkpoint. The real update snapshot is
+    // the positive durable suspension boundary before the resume under test.
+    let snapshot = worker.dispatch("update_snapshot", &json!({})).await;
+    assert!(
+        snapshot.success,
+        "persist actual parked snapshot: {snapshot:?}"
+    );
+    let (parked_steering, parked_follow_up, parked_suspended) =
+        WorkerRecoveryJournal::read_queue_snapshot(
+            &worker.config.recovery_journal_path,
+            "target-session",
+        )
+        .unwrap()
+        .expect("parked input is physically checkpointed");
+    assert!(
+        parked_suspended,
+        "the fixture must first prove durable suspension"
+    );
+    assert!(parked_steering.is_empty());
+    assert_eq!(parked_follow_up.len(), 1);
+    assert_eq!(parked_follow_up[0].message, "synthetic resumed queued input");
+    let expected_queue = serde_json::to_value(&parked_follow_up).unwrap();
+    let resumed = worker.dispatch("resume_queue", &json!({})).await;
+    assert!(
+        resumed.success,
+        "resume should acknowledge queued work: {resumed:?}"
+    );
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            !core.queued_input_suspended,
+            "actual resume clears the live suspension"
+        );
+        assert!(core.steering.is_empty());
+        assert_eq!(core.follow_up.len(), 1);
+        assert_eq!(
+            core.store.as_ref().unwrap().message_count(),
+            0,
+            "the actual input pause excludes pickup and transcript acceptance"
+        );
+    }
+    assert!(
+        worker.input_pauses.paused(),
+        "resume must not release the independent input pause"
+    );
+    // Simulate losing this worker without graceful shutdown altering its queue.
+    // The new worker must acquire the single journal/session writer leases.
+    worker.release_session_lease();
+    drop(worker.recovery.lock().unwrap().take());
+    let reopened_snapshot = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("physical snapshot survives the original writer");
+    assert_eq!(
+        serde_json::to_value(&reopened_snapshot.1).unwrap(),
+        expected_queue,
+        "restart must retain the exact original queue record"
+    );
+    let restarted = worker_with_journal_in(fixture.path());
+    let mut subscription = restarted.events.subscribe();
+    let created = restarted
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": session_path, "cwd": fixture.path() }),
+        )
+        .await;
+    assert!(
+        created.success,
+        "new worker must restore from actual disk: {created:?}"
+    );
+    assert!(
+        !restarted.core.lock().unwrap().queued_input_suspended,
+        "a restart after acknowledged resume must restore the queue unsuspended"
+    );
+    assert!(
+        !reopened_snapshot.2,
+        "resume acknowledgement must durably clear suspension"
+    );
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = subscription
+                .recv()
+                .await
+                .expect("new worker event stream");
+            if frame.outbound_type != "session_event" {
+                continue;
+            }
+            let outbound: Value = serde_json::from_slice(&frame.payload).unwrap();
+            let event = &outbound["event"];
+            if event["type"] == "message_end" && event["message"]["role"] == "user" {
+                break event["message"]["content"].clone();
+            }
+        }
+    })
+    .await
+    .expect("restored resumed input must actually reach the new runner");
+    assert_eq!(accepted, json!("synthetic resumed queued input"));
+}
