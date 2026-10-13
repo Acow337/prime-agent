@@ -369,6 +369,12 @@ impl Worker {
                 core.queued_input_suspended = false;
             }
         }
+        self.wake_queued_input();
+    }
+
+    /// Wake queued work and re-evaluate owed continuations without changing
+    /// the suspension gate.
+    pub(crate) fn wake_queued_input(&self) {
         self.work_notify.notify_one();
         if let Some(engine) = self.agent_engine.as_ref() {
             engine.retry_owed_goal_continuation();

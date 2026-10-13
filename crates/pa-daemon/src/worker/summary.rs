@@ -162,8 +162,8 @@ impl Worker {
 
     /// One queue-lane recovery checkpoint: the lane snapshot and the
     /// busy verdict ride one locked read.
-    pub(crate) fn checkpoint_queue(&self, checkpoint: QueueCheckpoint) -> bool {
-        checkpoint_queue_recovery(&self.recovery, &self.core, checkpoint)
+    pub(crate) fn checkpoint_queue(&self, checkpoint: QueueCheckpoint) {
+        checkpoint_queue_recovery(&self.recovery, &self.core, checkpoint);
     }
 
     pub(crate) fn record_recovery(&self, busy: bool, operation: &str) -> Result<()> {

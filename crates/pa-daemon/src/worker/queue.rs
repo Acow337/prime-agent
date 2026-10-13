@@ -249,10 +249,10 @@ pub(crate) fn checkpoint_queue_recovery(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core_lock: &std::sync::Mutex<SessionCore>,
     checkpoint: QueueCheckpoint,
-) -> bool {
+) {
     let mut guard = recovery.lock().unwrap();
     let Some(journal) = guard.as_mut() else {
-        return true;
+        return;
     };
     // The lanes are read under the recovery lock (a microsecond core hold —
     // never across the journal's fsyncs): no persist interleaves this read.
@@ -284,7 +284,7 @@ pub(crate) fn checkpoint_queue_recovery(
     };
     // The verdict never publishes over a snapshot that did not
     // persist: the pair rides ONE durable append.
-    match journal.record_queue_checkpoint(
+    if let Err(error) = journal.record_queue_checkpoint(
         &active_session_id,
         &session_id,
         session_file.as_deref(),
@@ -294,11 +294,7 @@ pub(crate) fn checkpoint_queue_recovery(
         &lanes.follow_up,
         suspended,
     ) {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("pa-daemon: queue recovery checkpoint {operation} failed: {error:#}");
-            false
-        }
+        eprintln!("pa-daemon: queue recovery checkpoint {operation} failed: {error:#}");
     }
 }
 
