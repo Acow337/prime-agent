@@ -692,11 +692,8 @@ fn a_python_repl_straggler_freezes_its_duration_slot() {
         outcome.frames[settle..]
             .iter()
             .any(|frame| frame.contains("late-probe-drained")),
-        "the drain barrier rendered:
-{}",
-        outcome.frames[settle..].join("
-===
-")
+        "the drain barrier rendered:\n{}",
+        outcome.frames[settle..].join("\n===")
     );
     // The frozen duration: the summary's last segment on the settled
     // frame parses as the run's duration (a `durationMs` number), the
@@ -724,7 +721,8 @@ fn a_python_repl_straggler_freezes_its_duration_slot() {
         .trim()
         .to_string();
     assert!(
-        (duration_part.ends_with('s') && duration_part.trim_end_matches('s').parse::<f64>().is_ok())
+        (duration_part.ends_with('s')
+            && duration_part.trim_end_matches('s').parse::<f64>().is_ok())
             || (duration_part.ends_with("ms")
                 && duration_part.trim_end_matches("ms").parse::<f64>().is_ok()),
         "the summary's duration slot freezes on the run's duration, not vanishes:\n{summary}"

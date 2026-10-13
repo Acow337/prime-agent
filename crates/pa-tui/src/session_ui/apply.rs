@@ -1092,7 +1092,7 @@ impl SessionUi {
                 if !self.pending_tools.contains(&card.id) {
                     return None;
                 }
-                let started = card.started_at?;
+                card.started_at?;
                 (card.ended_at.is_none()).then_some(index)
             })
             .collect();
