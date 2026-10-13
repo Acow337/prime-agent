@@ -2078,7 +2078,8 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         ]
         .into(),
     ));
-    let issuance: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>> = std::sync::Arc::default();
+    let issuance: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
+    let started = std::time::Instant::now();
     let summarize_issued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let route = {
         let turn_messages = std::sync::Arc::clone(&turn_messages);
@@ -2092,26 +2093,35 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
                 issuance
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push("summarize");
+                    .push(format!("summarize@{}", started.elapsed().as_millis()));
                 summarize_issued.store(true, std::sync::atomic::Ordering::SeqCst);
                 return Ok(pa_ai::faux::faux_assistant_text_message(
                     "the background summary",
                     pa_ai::faux::FauxAssistantMessageOptions::default(),
                 ));
             }
-            issuance
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push("turn");
-            let reply = turn_messages
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop_front();
-            if turn_messages
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-            {
+            let remaining = {
+                let mut queue = turn_messages
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let reply = queue.pop_front();
+                issuance
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!(
+                        "turn@{}:left={}",
+                        started.elapsed().as_millis(),
+                        queue.len()
+                    ));
+                (reply, queue.len())
+            };
+            let (reply, remaining) = (remaining.0, remaining.1);
+            let held_for_flight = remaining == 0;
+            if held_for_flight {
+                // The run's next model turn holds its response until the
+                // background flight's request issues: proving the flight
+                // started before this turn answered, without blocking the
+                // run on it.
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 while !summarize_issued.load(std::sync::atomic::Ordering::SeqCst) {
                     if std::time::Instant::now() > deadline {
@@ -2119,6 +2129,14 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
+                issuance
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!(
+                        "final-held:{}@{}",
+                        summarize_issued.load(std::sync::atomic::Ordering::SeqCst),
+                        started.elapsed().as_millis()
+                    ));
             }
             Ok(reply.expect("a scripted turn response"))
         }
@@ -2164,8 +2182,8 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let turns = log.iter().filter(|lane| **lane == "turn").count();
-    let summarizes = log.iter().filter(|lane| **lane == "summarize").count();
+    let turns = log.iter().filter(|lane| lane.starts_with("turn")).count();
+    let summarizes = log.iter().filter(|lane| lane.starts_with("summarize")).count();
     assert_eq!(
         turns, 3,
         "the seed turn and the crossing run's two turns: {log:?}"
@@ -2174,21 +2192,9 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         summarizes, 2,
         "the split-cut flight issued both summarize calls: {log:?}"
     );
-    let first_turn = log
-        .iter()
-        .position(|lane| lane == &"turn")
-        .expect("a turn issued");
-    let first_summarize = log
-        .iter()
-        .position(|lane| lane == &"summarize")
-        .expect("the background summarize issued during the run");
-    let last_turn = log
-        .iter()
-        .rposition(|lane| lane == &"turn")
-        .expect("the run finished its turns");
     assert!(
-        first_turn < first_summarize && first_summarize < last_turn,
-        "the flight started mid-run, before the next model turn: {log:?}"
+        log.iter().any(|lane| lane.starts_with("final-held:true")),
+        "the flight issued before the run's next model turn answered: {log:?}"
     );
     registration.unregister();
 }
