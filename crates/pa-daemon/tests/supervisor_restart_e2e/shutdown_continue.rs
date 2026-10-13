@@ -212,6 +212,12 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
     }
 
     client.send_command(
+        "observe-busy",
+        &json!({ "type": "attach", "activeSessionId": busy_session }),
+    );
+    let attached = client.read_response("observe-busy");
+    assert_eq!(attached["success"], true, "attach busy failed: {attached}");
+    client.send_command(
         "p1",
         &json!({
             "type": "prompt",
