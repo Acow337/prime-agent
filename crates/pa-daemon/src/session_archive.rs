@@ -389,11 +389,19 @@ fn commit_no_replace(
     }
     fs::remove_file(source).with_context(|| format!("remove {}", source.display()))?;
     if let Some(stage) = staged {
-        // The destination holds the inode now; unlink the stage name
-        // and disarm the guard so its `Drop` cannot touch it again.
+        // The destination holds the inode and the source is gone: the
+        // move HAS landed. The stage-name unlink is pure residue
+        // cleanup - a failure (e.g. a read-only staging parent) is
+        // logged, never a failed move: an `Err` here would make a
+        // successful move look failed (restore errors, the sweep
+        // undercounts and re-visits a session it already archived).
         let stage = stage.consumed();
-        fs::remove_file(&stage)
-            .with_context(|| format!("unwind the published stage {}", stage.display()))?;
+        if let Err(err) = fs::remove_file(&stage) {
+            eprintln!(
+                "session archive: could not unlink the published stage {}: {err}",
+                stage.display()
+            );
+        }
     }
     Ok(MoveOutcome::Moved)
 }
@@ -1317,5 +1325,56 @@ mod tests {
             "the session landed on the symlink's target filesystem"
         );
         assert!(!source.is_file(), "the aged session left the sessions dir");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_stage_unlink_after_publish_does_not_fail_the_move() {
+        // Red-first regression for the post-publish residue: the
+        // publish linked the staged inode under the destination and the
+        // source is already removed - the move HAS landed. If the
+        // stage-name unlink then fails (here: the staging parent is
+        // read-only), the commit must still report `Moved`: an `Err`
+        // would make a successful move look failed (restore reports a
+        // nonexistent failure, the sweep undercounts and re-visits the
+        // session it already archived).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let staging = dir.path().join("staging");
+        let target = dir.path().join("target");
+        fs::create_dir_all(&staging).expect("staging dir");
+        fs::create_dir_all(&target).expect("target dir");
+        let source = dir.path().join("source.jsonl");
+        fs::write(&source, "session").expect("source");
+        let stage = staging.join(".archiving-source.jsonl");
+        fs::write(&stage, "staged copy").expect("staged copy");
+        // Read-only staging parent: the unlink of the stage name will
+        // fail even though everything before it succeeded. ROOT (and
+        // any DAC-bypassing run) ignores directory permissions, so a
+        // writeable probe means the oracle cannot be built there -
+        // restore and skip rather than test the wrong thing.
+        let mut perms = fs::metadata(&staging).expect("staging perms").permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&staging, perms).expect("staging readonly");
+        let restore_writable = || {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&staging, perms).expect("staging writable again");
+        };
+        if fs::write(staging.join("dac-probe"), "probe").is_ok() {
+            restore_writable();
+            eprintln!("skipping: this run bypasses directory permissions");
+            return;
+        }
+        let destination = target.join("source.jsonl");
+        let outcome =
+            commit_no_replace(&source, Some(StagedFile::new(stage.clone())), &destination)
+                .expect("the landed move reports success");
+        assert_eq!(outcome, MoveOutcome::Moved);
+        assert!(destination.is_file(), "the destination holds the session");
+        assert!(!source.exists(), "the source moved");
+        assert!(stage.is_file(), "the residue stage remains (logged)");
+        // Restore BEFORE the scope ends: the TempDir drop must be able
+        // to unlink the residue inside the staging dir.
+        restore_writable();
     }
 }
