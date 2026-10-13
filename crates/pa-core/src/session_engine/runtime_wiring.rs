@@ -9,7 +9,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use super::runtime::QueuedGoalContextPurge;
-use crate::cron::store::AgentCronJobStore;
 use crate::kernel::bootstrap::KernelPythonSkill;
 use crate::kernel::provisioner::{
     IpythonKernelProvisioner as KernelProvisioner, IpythonKernelProvisionerOptions,
@@ -93,8 +92,9 @@ pub struct SessionKernelWiring {
     pub rlm_usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
 }
 
-/// Build the session runtime and register the `goal.*`, `rlm_heartbeat.*`, and `rlm.*`
-/// host handlers; `goal_complete_purge` is the embedding's queued-goal-context purge.
+/// Build the session runtime and register the `goal.*`, `rlm.*`, and —
+/// only when `cron_store` wiring exists — the `rlm_heartbeat.*` host
+/// handlers; `goal_complete_purge` is the embedding's queued-goal-context purge.
 #[must_use]
 pub fn wire_session_runtime(
     session: SessionManager,
@@ -134,16 +134,14 @@ pub fn wire_session_runtime(
         ),
         None => fallback_binding(),
     };
-    // An embedding-owned store replaces the engine-private one, so
-    // kernel `rlm_heartbeat.*` writes reach the daemon catalog; the
-    // private file store remains the embedded/standalone default.
+    // An embedding-owned store, so kernel `rlm_heartbeat.*` writes reach
+    // the daemon catalog. Kernel heartbeat requests need the embedding's
+    // scheduler to fire the jobs they create: without cron wiring they
+    // stay unregistered (TS registers only with the heartbeat controller).
     let mutation_hook = cron_store
         .as_ref()
         .and_then(|wiring| wiring.mutation_hook.clone());
-    let cron_store = cron_store.map_or_else(
-        || Arc::new(AgentCronJobStore::new(agent_dir.join("cron-jobs.json"))),
-        |wiring| wiring.store,
-    );
+    let cron_store = cron_store.map(|wiring| wiring.store);
     let mut runtime = SessionRuntime::new(&session, cron_store, active_session_id, binding);
     if let Some(purge) = goal_complete_purge {
         runtime.set_goal_complete_purge(purge);
@@ -366,5 +364,46 @@ pub fn ipython_tool_options(
         provisioner,
         ui: None,
         on_late_sent_agent_message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cron::store::AgentCronJobStore;
+
+    fn cron_wiring(dir: &std::path::Path) -> KernelCronWiring {
+        KernelCronWiring {
+            store: Arc::new(AgentCronJobStore::new(dir.join("jobs.json"))),
+            binding: None,
+            mutation_hook: None,
+        }
+    }
+
+    /// An engine build without cron wiring (print/RPC) serves no
+    /// `rlm_heartbeat.*` requests: no scheduler fires the jobs they create.
+    #[test]
+    fn without_cron_wiring_the_rlm_heartbeat_handlers_stay_unregistered() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionManager::in_memory(dir.path());
+        let wiring = wire_session_runtime(session, dir.path(), RlmWiring::default(), None, None);
+        assert!(wiring.handlers.get("rlm_heartbeat.create").is_none());
+        assert!(wiring.handlers.get("rlm_heartbeat.list").is_none());
+        // The goal surface needs no scheduler and stays registered.
+        assert!(wiring.handlers.get("goal.get").is_some());
+    }
+
+    #[test]
+    fn with_cron_wiring_the_rlm_heartbeat_handlers_register() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionManager::in_memory(dir.path());
+        let wiring = wire_session_runtime(
+            session,
+            dir.path(),
+            RlmWiring::default(),
+            None,
+            Some(cron_wiring(dir.path())),
+        );
+        assert!(wiring.handlers.get("rlm_heartbeat.create").is_some());
     }
 }

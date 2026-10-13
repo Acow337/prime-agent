@@ -336,7 +336,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
 }
 
 #[tokio::test]
-async fn create_session_registers_goal_and_heartbeat_handlers() {
+async fn create_session_registers_the_kernel_backed_tools_without_cron_wiring() {
     let dir = tempfile::TempDir::new().unwrap();
     let registration =
         pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
