@@ -25,11 +25,12 @@ pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
-    checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch, parse_custom_message,
-    parse_prompt_images, queue_lanes, restore_queue_snapshot, restored_turn_policy,
-    withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
-    TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
-    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
+    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
+    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
+    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
+    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -447,6 +448,8 @@ impl Worker {
                 // The in-run autonomous continuation seam: the hook holds
                 // itself weakly through the registered arc.
                 concrete.register_arc();
+                concrete
+                    .set_rlm_usage_store(std::sync::Arc::new(CoreUsageStore(Arc::clone(&core))));
                 let sink_core = Arc::clone(&core);
                 let sink_notify = Arc::clone(&work_notify);
                 let autonomous_sink: crate::agent_engine::AutonomousAdmission = {
@@ -460,6 +463,7 @@ impl Worker {
                 concrete.set_autonomous_admission(autonomous_sink);
                 let purge_core = Arc::clone(&core);
                 let purge_recovery = Arc::clone(&recovery);
+                let purge_engine = Arc::downgrade(concrete);
                 let autonomous_purge: std::sync::Arc<dyn Fn() + Send + Sync> =
                     std::sync::Arc::new(move || {
                         {
@@ -470,6 +474,9 @@ impl Worker {
                             core.steering.retain(|item| {
                                 item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
                             });
+                            if let Some(engine) = purge_engine.upgrade() {
+                                clear_withdrawn_progress_note(&core, engine.as_ref());
+                            }
                         }
                         // The withdraw settles the rows: dropping the last
                         // queued row must not leave busy=true promising a
@@ -525,11 +532,15 @@ impl Worker {
                 // goal-context turns.
                 let purge_core = Arc::clone(&core);
                 let purge_recovery = Arc::clone(&recovery);
+                let purge_engine = Arc::downgrade(concrete);
                 let queue_purge: std::sync::Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                     {
                         let mut core = purge_core.lock().unwrap();
                         core.steering.retain(|item| !is_goal_context_item(item));
                         core.follow_up.retain(|item| !is_goal_context_item(item));
+                        if let Some(engine) = purge_engine.upgrade() {
+                            clear_withdrawn_progress_note(&core, engine.as_ref());
+                        }
                     }
                     // Same settle as the autonomous withdraw: a pause/clear
                     // cannot leave busy=true.
@@ -621,10 +632,33 @@ impl Worker {
                 });
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
+                let withdraw_engine = Arc::downgrade(concrete);
                 let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
-                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, &notice);
+                    let engine = withdraw_engine.upgrade();
+                    withdraw_bash_completion_notice(
+                        &withdraw_recovery,
+                        &withdraw_core,
+                        &notice,
+                        engine.as_deref().map(|engine| engine as &dyn SessionEngine),
+                    );
                 });
                 concrete.set_bash_notice_sinks(completion, consumed);
+                // The accepted note frames as a session event on the pump.
+                let note_core = Arc::clone(&core);
+                let note_events = events.clone();
+                let note_emit: pa_core::session_engine::rlm_host::RlmProgressNoteEmit =
+                    Arc::new(move |message, timestamp| {
+                        emit_worker_event_with(
+                            &note_core,
+                            &note_events,
+                            json!({
+                                "type": "rlm_progress_note",
+                                "message": message,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    });
+                concrete.set_progress_note_emit(note_emit);
             }
             // The live roster activity feed (TS `observeRosterEvent`): busy
             // flips and trigger events coalesce into `worker_roster_delta`
@@ -916,6 +950,73 @@ fn emit_refinement_row(
         json!({ "type": "message_end", "message": message }),
     );
     true
+}
+
+struct CoreUsageStore(Arc<Mutex<SessionCore>>);
+
+fn missing_usage_target(target_id: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("Assistant message entry {target_id} not found"),
+    )
+}
+
+fn assistant_message(entry: &crate::session_store::SessionEntry) -> Option<&Value> {
+    if entry.type_ != "message" {
+        return None;
+    }
+    let message = entry.fields.get("message")?;
+    (crate::types::message_role(message) == Some("assistant")).then_some(message)
+}
+
+impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
+    fn last_assistant(
+        &self,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
+        '_,
+        Option<(String, pa_types::ai::Usage)>,
+    > {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            let core = core.lock().unwrap();
+            let store = core.store.as_ref()?;
+            store.entries().iter().rev().find_map(|entry| {
+                let message = assistant_message(entry)?;
+                Some((
+                    entry.id.clone(),
+                    message
+                        .get("usage")
+                        .cloned()
+                        .and_then(|usage| serde_json::from_value(usage).ok())
+                        .unwrap_or_default(),
+                ))
+            })
+        })
+    }
+
+    fn append_attribution(
+        &self,
+        row_id: &str,
+        target_id: &str,
+        child_usage: pa_types::ai::Usage,
+        origin: Option<pa_types::session::ChildUsageOrigin>,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
+        '_,
+        std::io::Result<pa_core::session_engine::rlm_usage::ChildUsageAppendResult>,
+    > {
+        let core = Arc::clone(&self.0);
+        let row_id = row_id.to_owned();
+        let target_id = target_id.to_owned();
+        Box::pin(async move {
+            let mut core = core.lock().unwrap();
+            let Some(store) = core.store.as_mut() else {
+                return Err(missing_usage_target(&target_id));
+            };
+            store
+                .append_child_usage_once(&row_id, &target_id, child_usage, origin)
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        })
+    }
 }
 
 /// Whether one queued item is a minted goal-context turn (TS's
