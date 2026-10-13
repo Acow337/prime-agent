@@ -366,7 +366,7 @@ impl Worker {
         if let Err(response) = self.require_created("resume_queue") {
             return response;
         }
-        let had_queued_work = {
+        let queued_at_transition = {
             let mut recovery = self.recovery.lock().unwrap();
             let mut core = self.core.lock().unwrap();
             let has_queued_work = !core.steering.is_empty() || !core.follow_up.is_empty();
@@ -408,7 +408,7 @@ impl Worker {
         // Only effects run after unlock; a concurrent later abort must not have
         // its suspension cleared again here.
         self.wake_queued_input();
-        let has_queued_work = had_queued_work || {
+        let has_queued_work = queued_at_transition || {
             let core = self.core.lock().unwrap();
             !core.steering.is_empty() || !core.follow_up.is_empty()
         };
