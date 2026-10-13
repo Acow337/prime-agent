@@ -72,6 +72,7 @@ pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
 use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel, StartupScope};
 
+mod reload;
 mod session_engine_impl;
 
 mod turn;
@@ -291,6 +292,13 @@ pub struct AgentSessionEngine {
     /// The in-run threshold hook reads the armed route's target model live,
     /// so the slot rides an `Arc`.
     pub(crate) image_route: std::sync::Arc<std::sync::Mutex<Option<ImageRoute>>>,
+    /// Serializes `/reload`'s whole live-input refresh: overlapping reloads
+    /// resolve the store at their own read times, so an earlier reload's
+    /// already-resolved key/header pair must never land over a later
+    /// reload's fresher pair (the last reload to run leaves the target
+    /// serving the newest store).
+    pub(crate) reload_lock: std::sync::Mutex<()>,
+
     /// Turn-boundary runs register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,
