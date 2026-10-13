@@ -48,13 +48,9 @@ impl AgentSessionEngine {
             if !self.run_pre_turn_overflow_compaction(emit) {
                 return;
             }
-            // A run aborted before its first turn never starts boundary
-            // work: the admission below settles the abort (DoneAborted)
-            // instead of the compaction's silent cancellation.
-            if !aborted()
-                && self
-                    .threshold_checks_enabled
-                    .load(std::sync::atomic::Ordering::SeqCst)
+            if self
+                .threshold_checks_enabled
+                .load(std::sync::atomic::Ordering::SeqCst)
                 && self.run_auto_compaction(aborted, emit) == AutoCompactionRun::Cancelled
             {
                 return;

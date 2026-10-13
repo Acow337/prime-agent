@@ -76,10 +76,14 @@ impl AgentSessionEngine {
         // Stop may precede registration (for example just after the last
         // assistant settled). Register first, then consult the worker flag:
         // an earlier Stop is observed here; a later one reaches the slot.
+        // Nothing ran for this boundary, so the turn loop's own abort
+        // handling settles the run — `NotDue`, like the post-consult
+        // abort path below (`Cancelled` would stop the loop without the
+        // trailing Done settle).
         if aborted() {
             controller.abort();
             self.clear_auto_compaction_abort(&controller);
-            return AutoCompactionRun::Cancelled;
+            return AutoCompactionRun::NotDue;
         }
         let engine = self.session.blocking_lock().clone();
         let due = match engine {

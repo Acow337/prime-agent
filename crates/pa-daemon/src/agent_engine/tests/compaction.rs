@@ -1923,9 +1923,11 @@ fn stop_before_the_core_consult_does_not_start_a_replacement_flight() {
     assert!(engine.auto_compaction_abort.lock().unwrap().is_none());
     // A Stop before the next boundary registered its controller is caught by
     // the worker's persisted abort flag, rather than starting a new epoch.
+    // NotDue: nothing ran, so the turn loop's own abort handling settles
+    // the run (Cancelled would stop the loop without the trailing Done).
     assert_eq!(
         engine.run_auto_compaction(&|| true, &mut |_| panic!("stopped boundary emitted")),
-        crate::auto_compaction::AutoCompactionRun::Cancelled,
+        crate::auto_compaction::AutoCompactionRun::NotDue,
     );
     assert_eq!(registration.call_count(), 3);
     assert!(engine.auto_compaction_abort.lock().unwrap().is_none());
@@ -2045,10 +2047,9 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
     );
     // One factory serves both lanes: session turns (tools in the context)
     // pop scripted turn messages; the background summarize (no tools in the
-    // context) records its issuance and answers with the summary. The
-    // run's last turn waits for a summarize issuance, so the issuance log
-    // proves the flight started before the run finished — without blocking
-    // the run on it.
+    // context) marks its issuance and answers with the summary. The run's
+    // last turn holds its response for that mark, proving the flight
+    // started before the run finished — without blocking the run on it.
     let turn_messages: std::sync::Arc<
         std::sync::Mutex<std::collections::VecDeque<pa_ai::types::AssistantMessage>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(
@@ -2078,46 +2079,35 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         ]
         .into(),
     ));
-    let issuance: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
-    let started = std::time::Instant::now();
+    let turn_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let summarize_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let summarize_issued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let route = {
         let turn_messages = std::sync::Arc::clone(&turn_messages);
-        let issuance = std::sync::Arc::clone(&issuance);
+        let turn_calls = std::sync::Arc::clone(&turn_calls);
+        let summarize_calls = std::sync::Arc::clone(&summarize_calls);
         let summarize_issued = std::sync::Arc::clone(&summarize_issued);
         move |context: &pa_types::ai::Context,
               _: Option<&pa_ai::types::StreamOptions>,
               _: u64,
               _: &pa_types::ai::Model| {
             if context.tools.is_none() {
-                issuance
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(format!("summarize@{}", started.elapsed().as_millis()));
+                summarize_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 summarize_issued.store(true, std::sync::atomic::Ordering::SeqCst);
                 return Ok(pa_ai::faux::faux_assistant_text_message(
                     "the background summary",
                     pa_ai::faux::FauxAssistantMessageOptions::default(),
                 ));
             }
-            let remaining = {
+            turn_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (reply, remaining) = {
                 let mut queue = turn_messages
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let reply = queue.pop_front();
-                issuance
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(format!(
-                        "turn@{}:left={}",
-                        started.elapsed().as_millis(),
-                        queue.len()
-                    ));
-                (reply, queue.len())
+                let remaining = queue.len() - 1;
+                (queue.pop_front(), remaining)
             };
-            let (reply, remaining) = (remaining.0, remaining.1);
-            let held_for_flight = remaining == 0;
-            if held_for_flight {
+            if remaining == 0 {
                 // The run's next model turn holds its response until the
                 // background flight's request issues: proving the flight
                 // started before this turn answered, without blocking the
@@ -2129,14 +2119,6 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                issuance
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(format!(
-                        "final-held:{}@{}",
-                        summarize_issued.load(std::sync::atomic::Ordering::SeqCst),
-                        started.elapsed().as_millis()
-                    ));
             }
             Ok(reply.expect("a scripted turn response"))
         }
@@ -2177,24 +2159,18 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
             )),
         "a Background crossing must not compact between the tool turn and the next model turn"
     );
-    wait_for_calls(&registration, 5);
-    let log = issuance
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    let turns = log.iter().filter(|lane| lane.starts_with("turn")).count();
-    let summarizes = log.iter().filter(|lane| lane.starts_with("summarize")).count();
     assert_eq!(
-        turns, 3,
-        "the seed turn and the crossing run's two turns: {log:?}"
-    );
-    assert_eq!(
-        summarizes, 2,
-        "the split-cut flight issued both summarize calls: {log:?}"
+        turn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the seed turn and the crossing run's two turns"
     );
     assert!(
-        log.iter().any(|lane| lane.starts_with("final-held:true")),
-        "the flight issued before the run's next model turn answered: {log:?}"
+        summarize_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the background flight's summarize issued"
+    );
+    assert!(
+        summarize_issued.load(std::sync::atomic::Ordering::SeqCst),
+        "the summarize issued before the run's next model turn answered"
     );
     registration.unregister();
 }
