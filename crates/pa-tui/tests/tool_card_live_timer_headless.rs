@@ -145,23 +145,23 @@ impl MockSupervisor {
                                     &mut w,
                                     "call_1",
                                     "bash",
-                                    json!({ "command": "sleep 1" }),
+                                    &json!({ "command": "sleep 1" }),
                                 );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
                                 tool_end(&mut w, "call_1", "bash", "ok");
-                                event(&mut w, json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "turn_end" }));
                             }
                             Scenario::Straggler => {
                                 tool_start(
                                     &mut w,
                                     "call_1",
                                     "bash",
-                                    json!({ "command": "sleep 1" }),
+                                    &json!({ "command": "sleep 1" }),
                                 );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
                                 // The end frame is dropped: the turn
                                 // settles with a still-running card.
-                                event(&mut w, json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "turn_end" }));
                                 // The probes, after the turn: a late end
                                 // (the resurrection probe — the aborted
                                 // stamp must keep it landing on nothing)
@@ -174,7 +174,7 @@ impl MockSupervisor {
                                     &mut w,
                                     "call_1",
                                     "bash",
-                                    json!({ "command": "sleep 2" }),
+                                    &json!({ "command": "sleep 2" }),
                                 );
                                 drain_barrier(&mut w);
                             }
@@ -183,10 +183,10 @@ impl MockSupervisor {
                                     &mut w,
                                     "call_1",
                                     "ipython",
-                                    json!({ "code": "print('x')" }),
+                                    &json!({ "code": "print('x')" }),
                                 );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
-                                event(&mut w, json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "turn_end" }));
                                 drain_barrier(&mut w);
                             }
                             Scenario::LostTurn => {
@@ -198,12 +198,12 @@ impl MockSupervisor {
                                     &mut w,
                                     "call_1",
                                     "bash",
-                                    json!({ "command": "sleep 1" }),
+                                    &json!({ "command": "sleep 1" }),
                                 );
                                 std::thread::sleep(std::time::Duration::from_millis(300));
                                 event(
                                     &mut w,
-                                    json!({
+                                    &json!({
                                         "type": "tool_execution_update",
                                         "toolCallId": "call_1",
                                         "partialResult": {
@@ -218,16 +218,16 @@ impl MockSupervisor {
                                 // own settle; the pending-scoped sweep
                                 // must leave turn one's card alone.
                                 std::thread::sleep(std::time::Duration::from_millis(300));
-                                event(&mut w, json!({ "type": "turn_start" }));
+                                event(&mut w, &json!({ "type": "turn_start" }));
                                 tool_start(
                                     &mut w,
                                     "call_2",
                                     "bash",
-                                    json!({ "command": "sleep 2" }),
+                                    &json!({ "command": "sleep 2" }),
                                 );
                                 std::thread::sleep(std::time::Duration::from_millis(300));
                                 tool_end(&mut w, "call_2", "bash", "turn two output");
-                                event(&mut w, json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "turn_end" }));
                                 drain_barrier(&mut w);
                             }
                         }
@@ -258,7 +258,7 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
 }
 
 /// One session event frame on the mock socket.
-fn event(writer: &mut UnixStream, payload: Value) {
+fn event(writer: &mut UnixStream, payload: &Value) {
     write_json(
         writer,
         &json!({
@@ -270,10 +270,10 @@ fn event(writer: &mut UnixStream, payload: Value) {
 }
 
 /// The `tool_execution_start` frame for one call id.
-fn tool_start(writer: &mut UnixStream, call_id: &str, tool: &str, args: Value) {
+fn tool_start(writer: &mut UnixStream, call_id: &str, tool: &str, args: &Value) {
     event(
         writer,
-        json!({
+        &json!({
             "type": "tool_execution_start",
             "toolCallId": call_id,
             "toolName": tool,
@@ -286,7 +286,7 @@ fn tool_start(writer: &mut UnixStream, call_id: &str, tool: &str, args: Value) {
 fn tool_end(writer: &mut UnixStream, call_id: &str, tool: &str, text: &str) {
     event(
         writer,
-        json!({
+        &json!({
             "type": "tool_execution_end",
             "toolCallId": call_id,
             "toolName": tool,
@@ -305,7 +305,7 @@ fn tool_end(writer: &mut UnixStream, call_id: &str, tool: &str, text: &str) {
 fn drain_barrier(writer: &mut UnixStream) {
     event(
         writer,
-        json!({
+        &json!({
             "type": "message_start",
             "message": {
                 "role": "user",
