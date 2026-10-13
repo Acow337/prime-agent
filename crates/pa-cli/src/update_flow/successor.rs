@@ -66,6 +66,12 @@ pub struct SpawnedSuccessor {
     /// process-precise guarantee comes from the unreaped zombie rule -
     /// a held child's pid is never recycled.
     child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    /// Latched once a retirement CONFIRMED the child's death: `retire`
+    /// is idempotent, and the coordinator legitimately calls it twice
+    /// (the failure arm's best-effort first, then the confirmed-death
+    /// gate before the rollback spawn) - a second call must never
+    /// re-signal a pid whose handle already reaped it.
+    retired: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SpawnedSuccessor {
@@ -80,6 +86,9 @@ impl SpawnedSuccessor {
     /// retirement that held it died mid-kill; the pin is unusable).
     #[must_use]
     pub fn retire(&self) -> bool {
+        if self.retired.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
         let mut guard = self.child.lock().expect("the spawned-child handle lock");
         let Some(child) = guard.as_mut() else {
             return crate::daemon_discovery::kill::force_kill_identity_crash(
@@ -94,7 +103,15 @@ impl SpawnedSuccessor {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return true,
+                Ok(Some(_)) => {
+                    // Reaped and confirmed: latch idempotency and DROP
+                    // the handle so no later call can re-signal the
+                    // freed pid.
+                    *guard = None;
+                    self.retired
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    return true;
+                }
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
                         return false;
@@ -118,6 +135,7 @@ pub fn capture_spawned_successor(child: std::process::Child) -> SpawnedSuccessor
         pid,
         process_start_id: pa_types::platform::process::process_start_id(child.id()),
         child: std::sync::Arc::new(std::sync::Mutex::new(Some(child))),
+        retired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
 
@@ -511,6 +529,7 @@ mod tests {
             pid: 4242,
             process_start_id: Some("4242/7".to_string()),
             child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            retired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -625,6 +644,7 @@ mod tests {
                 pid: 5150,
                 process_start_id: Some("5150/3".to_string()),
                 child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                retired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         )
         .unwrap_err();
@@ -668,6 +688,7 @@ mod tests {
                 pid: 4242,
                 process_start_id: None,
                 child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                retired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         assert!(

@@ -121,6 +121,23 @@ struct RacedStopBaseline {
 #[derive(Default)]
 struct LeftoverAdmissionToken(std::sync::Mutex<Option<String>>);
 
+/// Whether DRIVE's prepare step wrote the rollback-roster backup copy
+/// THIS run (the atomic insured copy beside the status record): the
+/// failure arm prefers the backup only when this flag is set, so a
+/// STALE leftover from an earlier unclean run - cleanup is best-effort
+/// - can never be fed to the rollback as this update's roster.
+#[derive(Default)]
+struct RosterBackupWritten(std::sync::atomic::AtomicBool);
+
+/// Drive's shared out-params in one handle (the coordinator records
+/// them; run's failure arms read them back after drive returns).
+#[derive(Default)]
+struct DriveOutParams {
+    baseline: RacedStopBaseline,
+    leftover_token: LeftoverAdmissionToken,
+    roster_backup_written: RosterBackupWritten,
+}
+
 /// Whether a concurrent stop raced the update's release-to-spawn window,
 /// judged from the generation tracks the acquisitions observed. The
 /// root-reach tracks: the rollback observes more than drive on any
@@ -188,7 +205,10 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     // before drive's window (bumping the counters in drive's unbounded
     // acquire wait) is the baseline itself, never mistaken for one that
     // raced the update's release-to-spawn window.
-    let baseline = Arc::new(RacedStopBaseline::default());
+    // Drive's out-params in one handle: the raced baseline, the
+    // leftover admission token, and the roster-backup flag - the
+    // failure arms read them back after drive returns.
+    let drive_out = Arc::new(DriveOutParams::default());
     // This update's state root and its raced-stop reach keys (the
     // discovery's own root filter, never-touch excluded): a CLI pass
     // that can stop this daemon's socket bumps one of them; a pass of a
@@ -202,15 +222,13 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         crate::daemon_discovery::shutdown_reach_keys(&options.socket_path, &state_root);
     let reach_key_refs: Vec<&std::path::Path> =
         reach_keys.iter().map(std::path::PathBuf::as_path).collect();
-    let leftover_token = Arc::new(LeftoverAdmissionToken::default());
     match drive(
         &writer,
         options,
         &update_id,
         &socket_dir,
         &reach_key_refs,
-        &baseline,
-        &leftover_token,
+        &drive_out,
     )
     .await
     {
@@ -242,7 +260,8 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // while every genuinely foreign record still refuses at
             // once.
             let acquire_rollback = || {
-                let own_token = leftover_token
+                let own_token = drive_out
+                    .leftover_token
                     .0
                     .lock()
                     .expect("the leftover-token lock")
@@ -297,8 +316,12 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
             let raced = raced_shutdown_detected(
-                baseline.scope.load(std::sync::atomic::Ordering::SeqCst),
-                &baseline
+                drive_out
+                    .baseline
+                    .scope
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                &drive_out
+                    .baseline
                     .roots
                     .lock()
                     .expect("the raced-baseline lock")
@@ -338,7 +361,17 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // original already: the prepare-time copy beside the status
             // record is the surviving artifact.
             let backup = rollback_roster_path(&options.status_path);
-            let roster = if backup.is_file() {
+            // The backup wins ONLY when this run wrote it: a stale
+            // leftover beside the status record (an earlier unclean run -
+            // cleanup is best-effort) is never this update's roster, and
+            // feeding it to the rollback would revive another update's
+            // sessions; a daemon-less update rolls back with NO roster,
+            // exactly like its success path boots with none.
+            let wrote_backup = drive_out
+                .roster_backup_written
+                .0
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let roster = if wrote_backup && backup.is_file() {
                 Some(backup)
             } else {
                 (roster_path.is_file()).then_some(roster_path)
@@ -386,8 +419,7 @@ async fn drive(
     update_id: &UpdateId,
     socket_dir: &Path,
     reach_keys: &[&Path],
-    baseline: &Arc<RacedStopBaseline>,
-    leftover_token: &Arc<LeftoverAdmissionToken>,
+    drive_out: &Arc<DriveOutParams>,
 ) -> std::result::Result<(), PhaseFailure> {
     let budget = &options.budget;
     // The stop window opens here (TS package-manager-cli.ts
@@ -403,14 +435,20 @@ async fn drive(
         },
     )
     .map_err(PhaseFailure::before_stop)?;
-    baseline.scope.store(
+    drive_out.baseline.scope.store(
         admission.observed_scope_generation(),
         std::sync::atomic::Ordering::SeqCst,
     );
-    *baseline.roots.lock().expect("the raced-baseline lock") =
-        admission.observed_root_generations();
-    *leftover_token.0.lock().expect("the leftover-token lock") =
-        Some(admission.token().to_string());
+    *drive_out
+        .baseline
+        .roots
+        .lock()
+        .expect("the raced-baseline lock") = admission.observed_root_generations();
+    *drive_out
+        .leftover_token
+        .0
+        .lock()
+        .expect("the leftover-token lock") = Some(admission.token().to_string());
     // `Preparing`: connect the old supervisor. An unreachable daemon is a
     // daemon-less update: an empty prepare is trivially durable and the
     // successor boots without a roster (the workers are already gone).
@@ -510,6 +548,13 @@ async fn drive(
                     "the rollback's roster insurance could not be written: {error}"
                 ))
             })?;
+            // THIS run wrote the backup: only now may the failure arm
+            // prefer it over the original artifact (a stale leftover
+            // from an earlier run never earns the preference).
+            drive_out
+                .roster_backup_written
+                .0
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         writer
             .lock()
@@ -736,6 +781,14 @@ async fn finish_failure(
     rollback_admission: &mut pa_daemon::supervisor_ownership::ShutdownAdmission,
 ) -> Result<()> {
     let reason = failure.message.trim_end_matches('.');
+    // A REJECTED successor is never an adopted one: it failed its hello
+    // or its validation, so leaving it alive preserves no consistent
+    // serving pair. EVERY abort below retires it first (best-effort -
+    // the paths that proceed to the rollback spawn re-gate on a
+    // CONFIRMED death at the launcher-restore boundary as before).
+    if let Some(rejected) = &failure.rejected {
+        let _ = rejected.retire();
+    }
     writer.lock().await.set_state(UpdateState::Rollback)?;
     // Every rollback-unavailable path records `Failed` - the status must
     // reach a terminal state, and the failure message is the diagnostic
