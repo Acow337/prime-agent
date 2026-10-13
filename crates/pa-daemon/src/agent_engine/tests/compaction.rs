@@ -1710,3 +1710,90 @@ fn an_unrelieving_finished_background_summary_never_blocks_the_watermark_band() 
     );
     registration.unregister();
 }
+
+/// Stop reaches a watermark flight even after the foreground turn has settled.
+#[test]
+fn stop_discards_a_finished_background_summary_before_the_next_boundary() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _dir, registration) = faux_engine_with_registration(
+        &json!({"responses": [
+            {"text": "seed reply"}, {"text": "crossing reply"},
+            {"text": "cancelled summary"}, {"text": "fresh summary", "delayMs": 30_000}
+        ]}),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    let model = engine.session_model().unwrap();
+    // Holding this lock reproduces the active-turn lock: Stop must use its
+    // independent mirror, never wait for this guard.
+    let guard = engine.session.blocking_lock();
+    let core = guard.as_ref().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !engine
+        .runtime
+        .block_on(core.session.auto_compaction_now(&model, &model, None))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "summary never became ready"
+        );
+        std::thread::yield_now();
+    }
+    let before = engine.runtime.block_on(core.session.entries());
+    engine.abort_in_flight_turn();
+    assert!(
+        !engine
+            .runtime
+            .block_on(core.session.auto_compaction_now(&model, &model, None)),
+        "Stop must discard the finished summary, not commit it at the next boundary"
+    );
+    assert_eq!(engine.runtime.block_on(core.session.entries()), before);
+    wait_for_calls(&registration, 4);
+    registration.unregister();
+}
+
+#[test]
+fn stop_cancels_a_held_background_summary_and_allows_a_fresh_flight() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _dir, registration) = faux_engine_with_registration(
+        &json!({"responses": [
+            {"text": "seed reply"}, {"text": "crossing reply"},
+            {"text": "cancelled summary", "delayMs": 30_000},
+            {"text": "fresh summary", "delayMs": 30_000}
+        ]}),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    wait_for_calls(&registration, 3);
+    let model = engine.session_model().unwrap();
+    let guard = engine.session.blocking_lock();
+    let core = guard.as_ref().unwrap();
+    let before = engine.runtime.block_on(core.session.entries());
+    engine.abort_in_flight_turn();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while registration.call_count() < 4 {
+        assert!(!engine
+            .runtime
+            .block_on(core.session.auto_compaction_now(&model, &model, None)));
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Stop left the old summarize running"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(engine.runtime.block_on(core.session.entries()), before);
+    assert!(no_compaction_events(&events));
+    registration.unregister();
+}
