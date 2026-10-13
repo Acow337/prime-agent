@@ -148,10 +148,13 @@ impl AgentSessionEngine {
             return AuthRecoveryOutcome::Superseded;
         }
         let Ok(outcome) = forced else {
-            return AuthRecoveryOutcome::ReLoginRequired(re_login_sentence(
-                &provider,
-                "the refresh task failed",
-            ));
+            // A dead refresh task (a panic or a cancellation) never
+            // touched the store — the locked write is atomic and
+            // post-callback, and every IO and parse path is a Result —
+            // so the stored credential stands and the ordinary retry
+            // ladder owns this local failure. A re-login sentence here
+            // would end a still-valid session's turn on a task death.
+            return AuthRecoveryOutcome::Continue;
         };
         match outcome {
             StoreOutcome::NotApplicable => return AuthRecoveryOutcome::Continue,
