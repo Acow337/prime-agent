@@ -558,6 +558,13 @@ impl AgentSession {
             };
             let committed = {
                 let mut session = self.session.lock().await;
+                // Linearize Stop with the synchronous commit. No await holds
+                // this guard, and Stop never takes the session lock.
+                let _background_commit = background_abort.as_ref().map(|_| {
+                    self.background_compaction_abort
+                        .lock()
+                        .expect("background compaction abort lock")
+                });
                 pa_agent::abort::throw_if_aborted_signal(background_abort.as_ref())?;
                 crate::session_engine::compact_session::commit_attempt(
                     &mut session,
