@@ -895,3 +895,84 @@ async fn resumed_queue_restarts_unsuspended_and_delivers_the_same_input() {
     .expect("restored resumed input must actually reach the new runner");
     assert_eq!(accepted, json!("synthetic resumed queued input"));
 }
+
+#[tokio::test]
+async fn failed_resume_checkpoint_keeps_live_suspension_and_exact_queued_input() {
+    let fixture = tempfile::tempdir().unwrap();
+    let worker = worker_with_journal_in(fixture.path());
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": fixture.path() }),
+        )
+        .await;
+    assert!(created.success, "create isolated worker: {created:?}");
+    let paused = worker
+        .dispatch(
+            "acquire_session_input_pause",
+            &json!({ "leaseKey": "failed-resume-gate", "clientId": "synthetic-client" }),
+        )
+        .await;
+    assert!(paused.success, "acquire actual input pause: {paused:?}");
+    let admitted = worker
+        .dispatch(
+            "follow_up",
+            &json!({ "message": "synthetic parked input after failed resume" }),
+        )
+        .await;
+    assert!(admitted.success, "admit isolated queue input: {admitted:?}");
+    assert!(worker.dispatch("abort", &json!({})).await.success);
+    assert!(worker.dispatch("update_snapshot", &json!({})).await.success);
+    let parked = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("actual snapshot durably parks this input");
+    assert!(parked.2, "failure fixture starts durably suspended");
+    assert!(parked.0.is_empty());
+    assert_eq!(parked.1.len(), 1);
+    let expected = {
+        let core = worker.core.lock().unwrap();
+        assert!(core.queued_input_suspended);
+        let lanes = queue_lanes(&core);
+        json!({ "steering": lanes.steering, "follow_up": lanes.follow_up })
+    };
+    let journal_path = &worker.config.recovery_journal_path;
+    let preserved_path = fixture.path().join("preserved-recovery.jsonl");
+    let preserved_bytes = std::fs::read(journal_path).unwrap();
+    // The journal opens an append handle per record. Keep its existing writer
+    // lease while making only this fixture's append path fail on every platform.
+    std::fs::rename(journal_path, &preserved_path).unwrap();
+    std::fs::create_dir(journal_path).unwrap();
+    let resumed = worker.dispatch("resume_queue", &json!({})).await;
+    assert!(
+        !resumed.success,
+        "failed persistence must be reported: {resumed:?}"
+    );
+    assert!(resumed.error.is_some());
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            core.queued_input_suspended,
+            "failed resume must not publish an unsuspended live queue"
+        );
+        let lanes = queue_lanes(&core);
+        assert_eq!(
+            json!({ "steering": lanes.steering, "follow_up": lanes.follow_up }),
+            expected,
+            "failure must preserve every original queue field"
+        );
+        assert!(!core.busy, "the independent pause must exclude pickup");
+        assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
+    }
+    assert!(worker.input_pauses.paused());
+    assert_eq!(std::fs::read(&preserved_path).unwrap(), preserved_bytes);
+    let durable = WorkerRecoveryJournal::read_queue_snapshot(&preserved_path, "target-session")
+        .unwrap()
+        .expect("the original durable ownership evidence remains readable");
+    assert_eq!(
+        serde_json::to_value(durable).unwrap(),
+        serde_json::to_value(parked).unwrap()
+    );
+}
