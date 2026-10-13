@@ -405,6 +405,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,
@@ -734,6 +735,7 @@ async fn family_edges_never_cross_families_end_to_end() {
                 agent_dir.clone(),
                 /*telemetry_disabled*/ true,
             )),
+            String::new(),
         );
         children.set_identity(ParentIdentity {
             rlm_depth: 0,
@@ -874,6 +876,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     kid_children.set_identity(ParentIdentity {
         rlm_depth: 1,
@@ -1183,6 +1186,7 @@ async fn parent_renames_a_child_end_to_end() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,

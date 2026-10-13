@@ -793,6 +793,10 @@ fn agent_peer_summary(summary: &Value) -> Value {
         "parentActiveSessionId",
         "parentSessionId",
         "parentSessionPath",
+        // The child's live note and tool count ride the peer rows: the
+        // parent registry's roster read joins them onto its subagent rows.
+        "progressNote",
+        "toolUseCount",
     ] {
         if let Some(value) = summary.get(key).filter(|value| !value.is_null()) {
             peer[key] = value.clone();

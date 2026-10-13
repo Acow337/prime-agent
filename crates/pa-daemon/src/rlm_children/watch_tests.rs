@@ -41,16 +41,28 @@ enum FakeChild {
 /// deliveries). `idle_delay_ms` paces `wait_for_idle` so a test can act
 /// while the child is still "running". `child` scripts the child link
 /// (`FakeChild`).
+/// The fake supervisor's scripted answers: the kill and child behaviors
+/// plus the pushed worker roster `list_agent_peers` serves.
+struct FakeSupervisorScript {
+    kill: FakeKill,
+    child: FakeChild,
+    child_subagents: Arc<FakeChildSubagents>,
+    peers: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
 async fn spawn_fake_supervisor(
     socket: std::path::PathBuf,
     follow_up_tx: mpsc::UnboundedSender<Value>,
     idle_delay_ms: u64,
     kill_tx: mpsc::UnboundedSender<Value>,
-    kill_behavior: FakeKill,
-    child: FakeChild,
-    child_subagents: Arc<FakeChildSubagents>,
-    peers: Arc<std::sync::Mutex<Vec<Value>>>,
+    script: FakeSupervisorScript,
 ) {
+    let FakeSupervisorScript {
+        kill: kill_behavior,
+        child,
+        child_subagents,
+        peers,
+    } = script;
     let kill_behavior = std::sync::Arc::new(kill_behavior);
     // Per-fake child session file: a fixed path would let a leftover file
     // from another test (or run) carry the prompt text, flip the
@@ -291,10 +303,12 @@ async fn sessions_with_fake_child_subagents(
         follow_up_tx,
         idle_delay_ms,
         kill_tx,
-        kill_behavior,
-        child,
-        child_subagents,
-        Arc::new(std::sync::Mutex::new(Vec::new())),
+        FakeSupervisorScript {
+            kill: kill_behavior,
+            child,
+            child_subagents,
+            peers: Arc::new(std::sync::Mutex::new(Vec::new())),
+        },
     )
     .await;
     let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
@@ -306,6 +320,7 @@ async fn sessions_with_fake_child_subagents(
             std::env::temp_dir(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     // A live parent carries its resolved model on the identity; the
     // spawn path resolves the child's model from it.
@@ -348,10 +363,12 @@ async fn sessions_with_roster_peers(
         mpsc::unbounded_channel().0,
         idle_delay_ms,
         kill_tx,
-        FakeKill::Success,
-        FakeChild::Healthy,
-        Arc::new(FakeChildSubagents::default()),
-        peers,
+        FakeSupervisorScript {
+            kill: FakeKill::Success,
+            child: FakeChild::Healthy,
+            child_subagents: Arc::new(FakeChildSubagents::default()),
+            peers,
+        },
     )
     .await;
     let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
@@ -363,6 +380,7 @@ async fn sessions_with_roster_peers(
             std::env::temp_dir(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     sessions.set_identity(ParentIdentity {
         model: Some("mock/mock-1".to_string()),
@@ -394,11 +412,13 @@ async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
     assert_eq!(roster[0].status, "running");
 }
 
-/// #4 A1: a running child's row carries its latest accepted note within one
-/// roster read — the supervisor's pushed worker roster joined onto the
-/// registry row (the watcher's 60s slice is too coarse to be the source).
+/// #4 A1/A2: a running child's row carries its latest accepted note and its
+/// tool-call count within one roster read — the supervisor's pushed worker
+/// roster joined onto the registry row (the watcher's 60s slice is too
+/// coarse to be the source; TS bumps the child's counter per
+/// `tool_execution_start` and omits a zero count).
 #[tokio::test]
-async fn a_running_childs_roster_row_carries_its_live_progress_note() {
+async fn a_running_childs_roster_row_carries_its_live_note_and_tool_count() {
     let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (sessions, _kill_rx) = sessions_with_roster_peers(peers.clone(), 5_000).await;
     let handle = spawn_child(&sessions).await;
@@ -406,6 +426,7 @@ async fn a_running_childs_roster_row_carries_its_live_progress_note() {
         "activeSessionId": "child-live",
         "rlmChildId": handle.rlm_child_id.clone(),
         "progressNote": "halfway through the task",
+        "toolUseCount": 3,
     })];
     let roster = sessions.list_subagents().await.expect("child roster");
     assert_eq!(roster[0].status, "running");
@@ -414,21 +435,6 @@ async fn a_running_childs_roster_row_carries_its_live_progress_note() {
         Some("halfway through the task"),
         "the row joins the pushed roster's live note: {roster:?}"
     );
-}
-
-/// #4 A2: the row's tool count is the child's tool calls (TS bumps the
-/// child's counter per `tool_execution_start`; omitted when zero).
-#[tokio::test]
-async fn a_childs_roster_row_counts_its_tool_calls() {
-    let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (sessions, _kill_rx) = sessions_with_roster_peers(peers.clone(), 5_000).await;
-    let handle = spawn_child(&sessions).await;
-    *peers.lock().unwrap() = vec![json!({
-        "activeSessionId": "child-live",
-        "rlmChildId": handle.rlm_child_id.clone(),
-        "toolUseCount": 3,
-    })];
-    let roster = sessions.list_subagents().await.expect("child roster");
     assert_eq!(
         roster[0].tool_use_count,
         Some(3),
@@ -1370,6 +1376,8 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         answer_text: None,
         answer_captured: false,
         replied_since_task: false,
+        progress_note: None,
+        tool_use_count: None,
         notice_delivered: false,
         prompt_admitted: true,
         error: None,
@@ -1438,6 +1446,8 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         answer_text: Some("the captured say".to_string()),
         answer_captured: true,
         replied_since_task: false,
+        progress_note: None,
+        tool_use_count: None,
         notice_delivered: false,
         prompt_admitted: true,
         error: None,

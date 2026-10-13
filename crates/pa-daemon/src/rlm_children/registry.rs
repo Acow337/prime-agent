@@ -520,6 +520,8 @@ fn ledger_child_records(
             answer_text: None,
             answer_captured: false,
             replied_since_task: false,
+            progress_note: None,
+            tool_use_count: None,
             notice_delivered: true,
             prompt_admitted: true,
             error: None,

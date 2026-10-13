@@ -53,6 +53,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         active_action: None,
         running_tool_calls: std::collections::HashSet::new(),
         running_admission_ids: std::collections::HashSet::new(),
+        tool_use_count: 0,
     }));
     TurnRunner {
         core,
@@ -318,7 +319,11 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
         )
     };
     let summary = serde_json::to_value(&summary).unwrap();
-    assert_eq!(summary["toolUseCount"], json!(2), "the summary: {summary:?}");
+    assert_eq!(
+        summary["toolUseCount"],
+        json!(2),
+        "the summary: {summary:?}"
+    );
 }
 
 /// A settle frame that would forward on a plain flag sighting drops when

@@ -287,14 +287,7 @@ async fn a_resumed_sessions_summary_counts_its_persisted_tool_calls() {
             "provider": "p", "model": "m", "stopReason": "toolUse",
         },
     });
-    std::fs::write(
-        &path,
-        format!("{}
-{}
-{}
-", header, user, tools),
-    )
-    .unwrap();
+    std::fs::write(&path, format!("{header}\n{user}\n{tools}\n")).unwrap();
     let config = WorkerConfig {
         socket_path: dir.join("worker.sock"),
         supervisor_socket_path: std::path::PathBuf::new(),

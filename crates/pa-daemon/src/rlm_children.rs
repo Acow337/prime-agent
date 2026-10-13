@@ -157,6 +157,14 @@ struct ChildRecord {
     /// A child agent message arrived since its task was admitted; the
     /// no-reply terminal notice is withheld once set.
     replied_since_task: bool,
+    /// The latest progress note the parent observed on the child's live
+    /// summary (the supervisor roster join, a refresh's `get_state`); a
+    /// settled row keeps it — the child clears its own note at its run
+    /// boundaries, so only what a read saw survives one.
+    progress_note: Option<String>,
+    /// The child's tool-call count as last observed live; `None` until a
+    /// read saw one (the wire omits a zero count, TS parity).
+    tool_use_count: Option<u64>,
     /// The terminal notice was claimed: exactly one of the settle watcher,
     /// the delete path, or a late natural settle delivers it.
     notice_delivered: bool,
@@ -338,6 +346,9 @@ struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
     parent_active_session_id: String,
+    /// The worker's supervisor token: the roster read that joins the
+    /// children's live summaries authenticates with it.
+    worker_token: String,
     /// The parent session's live name (the worker's summary, the TS
     /// `sessionName` of every spawn row's `from` endpoint): `None` until
     /// the worker publishes a summary, and refreshed by every rename.
@@ -398,18 +409,24 @@ impl Clone for SupervisorChildSessions {
 }
 
 impl SupervisorChildSessions {
-    /// Children registry bound to one parent session worker.
+    /// Children registry bound to one parent session worker. The worker's
+    /// supervisor token is known at construction (the daemon hands the same
+    /// config to the message controllers) and rides the registry from the
+    /// start: a roster read that joins the children's live summaries
+    /// authenticates with it.
     pub fn new(
         link: Arc<SupervisorLink>,
         agent_dir: PathBuf,
         parent_active_session_id: String,
         model_refusal_telemetry: std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
+        worker_token: String,
     ) -> Self {
         Self {
             inner: Arc::new(SupervisorChildSessionsInner {
                 link,
                 agent_dir,
                 parent_active_session_id,
+                worker_token,
                 parent_session_name: std::sync::Mutex::new(None),
                 identity: std::sync::Mutex::new(ParentIdentity::with_default_depth()),
                 children: Mutex::new(Vec::new()),
@@ -693,6 +710,8 @@ impl SupervisorChildSessions {
                 answer_text: None,
                 answer_captured: false,
                 replied_since_task: false,
+                progress_note: None,
+                tool_use_count: None,
                 notice_delivered: false,
                 prompt_admitted: true,
                 error: None,
@@ -767,11 +786,11 @@ impl SupervisorChildSessions {
                 kind: "executing",
                 tool_name: None,
             }),
-            tool_use_count: None,
+            tool_use_count: record.tool_use_count,
             duration_ms: Some(now_ms().saturating_sub(record.started_at_ms)),
             answer_preview: record.answer_preview.clone(),
-            replied_since_task: None,
-            progress_note: None,
+            replied_since_task: Some(record.replied_since_task),
+            progress_note: record.progress_note.clone(),
             label: (!record.label.is_empty()).then(|| record.label.clone()),
             last_activity_at: Some(record.started_at_ms),
             activity_stale_ms: None,
@@ -789,8 +808,8 @@ impl SupervisorChildSessions {
             answer_text: record.answer_text.clone(),
             error: record.error.clone(),
             duration_ms: Some(now_ms().saturating_sub(record.started_at_ms)),
-            tool_use_count: None,
-            replied_since_task: None,
+            tool_use_count: record.tool_use_count,
+            replied_since_task: Some(record.replied_since_task),
         }
     }
 
@@ -851,6 +870,68 @@ impl SupervisorChildSessionsInner {
             *current = running;
             changed
         });
+    }
+
+    /// The supervisor's pushed worker roster (`list_agent_peers`): one
+    /// in-memory read per roster call, no child-worker round trip. `None`
+    /// when no child is live (settled rows keep their cached values), or
+    /// when the supervisor is unreachable: the rows keep the last observed
+    /// values instead of failing the read.
+    pub(super) async fn child_roster_rows(
+        &self,
+        records: &[Arc<Mutex<ChildRecord>>],
+    ) -> Option<Vec<Value>> {
+        let running = async {
+            for record in records {
+                if record.lock().await.settled_status.is_none() {
+                    return true;
+                }
+            }
+            false
+        }
+        .await;
+        if !running {
+            return None;
+        }
+        let data = self
+            .link
+            .request_success(
+                json!({ "type": "list_agent_peers", "workerToken": self.worker_token }),
+                Duration::from_secs(5),
+            )
+            .await
+            .ok()?;
+        Some(
+            data.get("peers")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The child's live summary observed onto its record — the supervisor
+    /// roster join and a refresh's `get_state` alike. A present note or
+    /// count caches; a cleared note keeps the last one a read saw.
+    pub(super) async fn observe_live_state(
+        &self,
+        record: &Arc<Mutex<ChildRecord>>,
+        summary: &Value,
+    ) {
+        let note = summary
+            .get("progressNote")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let count = summary.get("toolUseCount").and_then(Value::as_u64);
+        if note.is_none() && count.is_none() {
+            return;
+        }
+        let mut record = record.lock().await;
+        if note.is_some() {
+            record.progress_note = note;
+        }
+        if count.is_some() {
+            record.tool_use_count = count;
+        }
     }
 
     pub(crate) async fn emit_child_update(&self, record: &Arc<Mutex<ChildRecord>>) {

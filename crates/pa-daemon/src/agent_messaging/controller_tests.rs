@@ -120,6 +120,7 @@ fn controller_with_children(
             std::path::PathBuf::from("/agent"),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     let mut controller = controller(socket, own_summary);
     controller.children = Some(Arc::new(children));
