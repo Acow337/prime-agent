@@ -57,6 +57,22 @@ pub(crate) static CREATE_SETUP_SWAP: std::sync::Mutex<Option<std::path::PathBuf>
     std::sync::Mutex::new(None);
 
 #[cfg(all(test, target_os = "linux"))]
+pub(crate) static FRESH_MKDIR_VANISH: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn fresh_mkdir_vanish_take(path: &Path) -> bool {
+    let Ok(mut armed) = FRESH_MKDIR_VANISH.lock() else {
+        return false;
+    };
+    matches!(armed.as_ref(), Some(armed_path) if armed_path == path)
+        .then(|| {
+            *armed = None;
+        })
+        .is_some()
+}
+
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn create_setup_swap_take(path: &Path) -> bool {
     let Ok(mut armed) = CREATE_SETUP_SWAP.lock() else {
         return false;
@@ -982,6 +998,13 @@ impl LockDir {
         // mismatch refusal below; a takeover between the pin and the
         // writes cannot redirect them - they target this call's inode,
         // so a successor's published record is never corrupted.
+        // Test seam (the exact racing-reclaim window): when armed for
+        // this path, remove the fresh directory between the witness and
+        // the pin - the reclaim race this protocol must survive.
+        #[cfg(all(test, target_os = "linux"))]
+        if fresh_mkdir_vanish_take(path) {
+            let _ = remove_candidate_dir(path);
+        }
         // The pin is a NO-FOLLOW, DIRECTORY-ONLY open: a parent-writer
         // who swaps a FIFO onto the path between the mkdir and this
         // open must fail (ENOTDIR) instead of hanging the acquisition
@@ -1010,6 +1033,24 @@ impl LockDir {
             pfd if pfd >= 0 => unsafe { fs::File::from_raw_fd(pfd) },
             _ => {
                 let error = io::Error::last_os_error();
+                // The witness proved THIS call created the path, and the
+                // no-follow pin now finds nothing there: a racing
+                // reclaim removed the fresh directory between the mkdir
+                // and the pin. That is CONTENTION, not a fatal I/O
+                // error: reclassified so `acquire_retrying` retries the
+                // acquisition honestly instead of failing the daemon
+                // startup on every non-Linux Unix host and every
+                // mkdir-fallback mount.
+
+                if error.kind() == io::ErrorKind::NotFound {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!(
+                            "fresh lock directory vanished before its pin: {}",
+                            path.display()
+                        ),
+                    ));
+                }
                 // Never leave a fresh lock artifact behind a failed pin -
                 // it would wedge later acquisitions behind contention
                 // until it goes stale. Remove only the directory this

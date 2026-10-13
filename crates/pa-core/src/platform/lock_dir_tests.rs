@@ -980,3 +980,41 @@ fn a_create_path_fresh_name_swap_regenerates_a_candidate() {
         "the moved-aside own candidate also stays (inert, never removed through the swapped name)"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_vanishing_fresh_mkdir_is_contention_not_a_fatal_pin_error() {
+    // Red-first regression for the acquire retry gap: a racing
+    // reclaim removes the fresh lock directory between the mkdir and
+    // the pin, and the pin fails with NotFound. The old behavior
+    // returned the raw NotFound - a non-WouldBlock error that
+    // `acquire_retrying` treats as fatal, failing the startup on
+    // every non-Linux Unix host and every mkdir-fallback mount. The
+    // vanished-own-creation is CONTENTION: the reclassified error
+    // retries, and the acquisition wins once the window clears.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let lock = dir.path().join("daemon.sock.lock");
+    // Arm the vanish hook for the fresh-mkdir window of THIS path.
+    {
+        let mut armed = crate::platform::lock_dir::FRESH_MKDIR_VANISH
+            .lock()
+            .expect("arm the vanish hook");
+        *armed = Some(lock.clone());
+    }
+    let vanished = crate::platform::LockDir::create_by_mkdir(&lock, None)
+        .expect_err("the vanished fresh directory fails the pin");
+    assert_eq!(
+        vanished.kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the vanished-own-creation is contention, not a fatal pin error"
+    );
+    // With the one-shot window cleared, the plain acquisition wins.
+    let guard = crate::platform::LockDir::acquire_retrying(
+        &lock,
+        std::time::Duration::from_millis(100),
+        3,
+        std::time::Duration::from_millis(10),
+    )
+    .expect("the acquisition wins once the window clears");
+    drop(guard);
+}

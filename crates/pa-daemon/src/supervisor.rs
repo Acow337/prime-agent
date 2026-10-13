@@ -532,24 +532,73 @@ impl Supervisor {
             }
         }
         #[cfg(unix)]
-        let socket_lease = socket::SocketLease::acquire(&self.options.socket_path).await?;
-        #[cfg(unix)]
-        socket::prepare_socket_path_with_lease(&self.options.socket_path, &socket_lease).await?;
+        let (socket_lease, listener) = {
+            // The startup chain runs inside a block whose EVERY failure
+            // path carries the acquired lease OUT of the block instead
+            // of letting it drop on the Tokio worker: the lease's Drop
+            // joins the refresh thread (up to a full tick interval) and
+            // runs the release choreography - on a worker that is the
+            // exact stall `shutdown` exists to avoid. The block's error
+            // carries the lease when one was acquired; the outer match
+            // consumes it through the awaited `shutdown` (a blocking
+            // thread) before propagating the startup failure.
+            let attempt = async {
+                let socket_lease =
+                    match socket::SocketLease::acquire(&self.options.socket_path).await {
+                        Ok(lease) => lease,
+                        Err(error) => return Err((error, None)),
+                    };
+                let result = socket::prepare_socket_path_with_lease(
+                    &self.options.socket_path,
+                    &socket_lease,
+                )
+                .await;
+                if let Err(error) = result {
+                    return Err((error, Some(socket_lease)));
+                }
+                if let Err(error) = socket_lease.assert_held_async().await {
+                    return Err((error, Some(socket_lease)));
+                }
+                // Hand the spawned housekeeping passes (the archive
+                // sweep) the lease's ownership probe: they re-assert
+                // the no-grace compromise verdict under the
+                // reclaim-sidecar exclusion at every destructive
+                // commit, while the lease itself stays here for its
+                // release choreography.
+                let _ = self
+                    .sweep_lease_probe
+                    .set(std::sync::Arc::new(socket_lease.probe()));
+                let listener = bind_transport(&self.options.socket_path)
+                    .await
+                    .context(format!(
+                        "bind supervisor socket {}",
+                        self.options.socket_path.display()
+                    ));
+                match listener {
+                    Ok(listener) => match socket_lease.assert_held_async().await {
+                        Ok(()) => Ok((socket_lease, listener)),
+                        Err(error) => Err((error, Some(socket_lease))),
+                    },
+                    Err(error) => Err((error, Some(socket_lease))),
+                }
+            };
+            match attempt.await {
+                Ok(pair) => pair,
+                Err((error, lease)) => {
+                    if let Some(lease) = lease {
+                        if let Err(shutdown_error) = lease.shutdown().await {
+                            eprintln!(
+                                "supervisor: lease shutdown after a failed startup failed: {shutdown_error:#}"
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+        };
         #[cfg(not(unix))]
         socket::prepare_socket_path(&self.options.socket_path).await?;
-        #[cfg(unix)]
-        socket_lease.assert_held_async().await?;
-        // Hand the spawned housekeeping passes (the archive sweep) the
-        // lease's ownership probe: they re-assert the no-grace
-        // compromise verdict under the reclaim-sidecar exclusion at
-        // every destructive commit, while the lease itself stays here
-        // for its release choreography.
-        #[cfg(unix)]
-        {
-            let _ = self
-                .sweep_lease_probe
-                .set(std::sync::Arc::new(socket_lease.probe()));
-        }
+        #[cfg(not(unix))]
         let listener = bind_transport(&self.options.socket_path)
             .await
             .with_context(|| {
@@ -558,8 +607,6 @@ impl Supervisor {
                     self.options.socket_path.display()
                 )
             })?;
-        #[cfg(unix)]
-        socket_lease.assert_held_async().await?;
         socket::bind_capture_gap().await;
         // Capture the bound file's identity before anything can replace
         // it (TS daemon-supervisor.ts:879, between `listen` and
@@ -582,6 +629,12 @@ impl Supervisor {
                 drop(listener);
                 let identity = self.bound_socket_identity.lock().unwrap().clone();
                 socket::cleanup_socket_path_after_close(&self.options.socket_path, identity);
+                #[cfg(unix)]
+                if let Err(shutdown_error) = socket_lease.shutdown().await {
+                    eprintln!(
+                        "supervisor: lease shutdown after a failed journal open failed: {shutdown_error:#}"
+                    );
+                }
                 return Err(error);
             }
         }
