@@ -995,7 +995,10 @@ async fn already_resumed_active_turn_keeps_its_original_durable_queue_snapshot()
             &json!({ "sessionPath": session_path, "cwd": fixture.path() }),
         )
         .await;
-    assert!(created.success, "create isolated durable worker: {created:?}");
+    assert!(
+        created.success,
+        "create isolated durable worker: {created:?}"
+    );
     let paused = worker
         .dispatch(
             "acquire_session_input_pause",
@@ -1010,7 +1013,10 @@ async fn already_resumed_active_turn_keeps_its_original_durable_queue_snapshot()
             &json!({ "message": "synthetic picked input before its first row" }),
         )
         .await;
-    assert!(admitted.success, "durably admit original input: {admitted:?}");
+    assert!(
+        admitted.success,
+        "durably admit original input: {admitted:?}"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(5), native_park)
         .await
         .expect("native runner must observe the actual input pause and park");
@@ -1060,7 +1066,10 @@ async fn already_resumed_active_turn_keeps_its_original_durable_queue_snapshot()
         assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
     }
     let resumed = worker.dispatch("resume_queue", &json!({})).await;
-    assert!(!resumed.success, "legacy no queued work response: {resumed:?}");
+    assert!(
+        !resumed.success,
+        "legacy no queued work response: {resumed:?}"
+    );
     assert_eq!(resumed.error.as_deref(), Some("No queued work to resume"));
     let after = WorkerRecoveryJournal::read_queue_snapshot(
         &worker.config.recovery_journal_path,
