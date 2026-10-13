@@ -307,6 +307,7 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
                 queue_visible: item.queue_visible,
                 policy: item.policy.journal_value().to_string(),
                 forced_batch: item.forced_batch,
+                images: item.images.clone(),
             })
             .collect()
     }
@@ -369,8 +370,6 @@ pub(crate) fn restore_queue_snapshot(
     active_session_id: &str,
 ) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>, bool) {
     fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
-        // Images on a queued prompt do not survive the restart; the
-        // delivery rows ride the item record without them.
         lanes
             .into_iter()
             .map(|record| {
@@ -389,7 +388,7 @@ pub(crate) fn restore_queue_snapshot(
                     agent_message: None,
                     queue_key: record.queue_key,
                     admission_id: None,
-                    images: Vec::new(),
+                    images: record.images,
                     done: None,
                     queue_visible: record.queue_visible,
                     policy,

@@ -390,8 +390,8 @@ impl TurnRunner {
             .iter()
             .filter_map(|item| item.admission_id.clone())
             .collect();
-        // The done senders leave the items behind (done = None): an
-        // uncommitted batch returns to its lane below, whole.
+        // The done senders leave the items behind (done = None): on
+        // shutdown, the batch's unaccepted tail returns to its lane below.
         let items_done: Vec<oneshot::Sender<TurnSettle>> = items
             .iter_mut()
             .filter_map(|item| item.done.take())
@@ -425,11 +425,14 @@ impl TurnRunner {
         // post-join flag read raced `handle_abort`).
         let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
+        let batch_len = items.len();
         let turn = tokio::task::spawn_blocking(move || {
             // The engine's own terminal `turn_end` frame keeps the
             // trailing `Done` fallback silent.
             let mut engine_turn_ended = false;
-            let mut active_committed = false;
+            // The picked batch's accepted rows (primary, then one per
+            // batched item) that passed the abort gate and persisted.
+            let mut accepted_rows = 0usize;
             let mut active_running = false;
             // Restored next-turn rows are PREFIX rows: the "Starting" row
             // drops at the accepted row. The flip closure reads the flag
@@ -644,17 +647,19 @@ impl TurnRunner {
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
                 if !emitting_prefix_rows.get()
-                    && !active_committed
+                    && accepted_rows < batch_len
                     && matches!(
                         event,
                         EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
                     )
                 {
-                    active_committed = true;
-                    if let Some(active) = core.active_action.as_mut() {
-                        active.phase = "committing".to_string();
+                    accepted_rows += 1;
+                    if accepted_rows == 1 {
+                        if let Some(active) = core.active_action.as_mut() {
+                            active.phase = "committing".to_string();
+                        }
+                        action_frame = Some(session_snapshot(&core));
                     }
-                    action_frame = Some(session_snapshot(&core));
                 } else if !active_running
                     && matches!(
                         event,
@@ -1012,11 +1017,11 @@ impl TurnRunner {
             }
             emitting_prefix_rows.set(false);
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
-            active_committed
+            accepted_rows
         });
         // A panicked turn cannot prove its input reached the transcript:
-        // it counts as uncommitted.
-        let committed = turn.await.unwrap_or(false);
+        // none of it counts as accepted.
+        let accepted_rows = turn.await.unwrap_or(0);
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
@@ -1026,19 +1031,20 @@ impl TurnRunner {
         let more_queued = {
             let mut core = self.core.lock().unwrap();
             // The note clear and idle transition stay atomic to roster readers.
-            // Recheck after returning uncommitted input to its lane.
+            // Recheck after returning unaccepted input to its lane.
             core.busy = false;
             core.active_action = None;
             core.running_admission_ids.clear();
-            // A shutdown never loses admitted input: a batch aborted before
-            // its first transcript row exists nowhere else, so it returns to
-            // the front of its lane, in order, for the settle snapshot.
-            if core.shutdown_requested && !committed {
+            // A shutdown never loses admitted input: the batch items whose
+            // transcript row never persisted exist nowhere else, so they
+            // return to the front of their lane, in order, for the settle
+            // snapshot.
+            if core.shutdown_requested {
                 let lane_items = match lane {
                     Lane::Steering => &mut core.steering,
                     Lane::FollowUp => &mut core.follow_up,
                 };
-                for item in items.into_iter().rev() {
+                for item in items.into_iter().skip(accepted_rows).rev() {
                     lane_items.push_front(item);
                 }
             }

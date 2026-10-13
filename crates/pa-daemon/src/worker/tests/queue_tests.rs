@@ -336,6 +336,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_visible: true,
         policy: "injected".to_string(),
         forced_batch: false,
+        images: Vec::new(),
     };
     let plain = crate::journal::WorkerQueueItemRecord {
         message: "follow-me".to_string(),
@@ -346,6 +347,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_visible: true,
         policy: "queued".to_string(),
         forced_batch: false,
+        images: Vec::new(),
     };
     journal
         .record_queue_snapshot(

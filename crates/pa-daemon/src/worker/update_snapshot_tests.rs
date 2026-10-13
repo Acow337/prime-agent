@@ -573,6 +573,7 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
                 queue_visible: true,
                 policy: "queued".to_string(),
                 forced_batch: false,
+                images: Vec::new(),
             }],
             follow_up: Vec::new(),
         },
