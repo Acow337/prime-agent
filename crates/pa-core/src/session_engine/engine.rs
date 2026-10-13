@@ -725,6 +725,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // custom entries; the build patches them onto the rebuilt tool
     // results (TS `_restoreLateIpythonSentAgentMessages`).
     super::late_sent_messages::restore(&wiring.session, &agent).await;
+    // Receipts that record while their cell's row has not landed yet
+    // apply as the row lands (TS `_applyLateIpythonSentAgentMessages`):
+    // the landing seam runs under the same lock as the state push, so
+    // the live row and the persisted one both carry the receipt.
+    agent.set_message_end_transform(Some(super::late_sent_messages::landing_transform(
+        &wiring.session,
+    )));
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
     session.set_agent_dir(config.agent_dir.clone());
     // Every compaction path reads the session's resolved compaction

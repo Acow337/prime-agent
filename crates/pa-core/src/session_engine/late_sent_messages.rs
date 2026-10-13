@@ -162,6 +162,36 @@ pub(crate) async fn restore(session: &Arc<Mutex<SessionManager>>, agent: &Arc<Ag
         .await;
 }
 
+/// The landing arm (TS `_applyLateIpythonSentAgentMessages`): one row
+/// landing through the agent's `MessageEnd` seam picks up every receipt
+/// already persisted for its call. The session's custom entries are the
+/// single parked-receipt source, so no second map exists here.
+pub(crate) fn landing_transform(
+    session: &Arc<Mutex<SessionManager>>,
+) -> pa_agent::agent::MessageEndTransformFn {
+    let session = Arc::clone(session);
+    Arc::new(move |message| {
+        let session = Arc::clone(&session);
+        Box::pin(async move {
+            // The cheap filter runs before any lock: only a python tool
+            // result can carry receipts. `append_to_tool_result` owns the
+            // call-id match.
+            if !matches!(
+                &message,
+                AgentMessage::Standard(Message::ToolResult(result))
+                    if pa_types::ai::is_python_tool_name(&result.tool_name)
+            ) {
+                return message;
+            }
+            let mut message = message;
+            for entry in session.lock().await.late_sent_agent_messages() {
+                append_to_tool_result(&mut message, &entry.tool_call_id, &entry.message);
+            }
+            message
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

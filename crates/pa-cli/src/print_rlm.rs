@@ -242,16 +242,27 @@ pub(crate) fn late_sent_agent_message_sink(
 ) -> pa_core::LateSentAgentMessageHandler {
     let node = Arc::clone(node);
     Arc::new(move |tool_call_id, message| {
-        let Some(engine) = node.engine.get().and_then(Weak::upgrade) else {
-            return;
-        };
-        let tool_call_id = tool_call_id.to_string();
-        tokio::spawn(async move {
-            engine
-                .record_late_sent_agent_message(&tool_call_id, message)
-                .await;
-        });
+        tokio::spawn(record_late_sent_receipt(
+            Arc::clone(&node),
+            tool_call_id.to_string(),
+            message,
+        ));
     })
+}
+
+/// Record one late receipt through the node's adopted engine; the sync
+/// sink spawns this, but correctness no longer depends on its timing.
+async fn record_late_sent_receipt(
+    node: Arc<InlineSessionNode>,
+    tool_call_id: String,
+    message: pa_core::kernel::shared::KernelSentAgentMessage,
+) {
+    let Some(engine) = node.engine.get().and_then(Weak::upgrade) else {
+        return;
+    };
+    engine
+        .record_late_sent_agent_message(&tool_call_id, message)
+        .await;
 }
 
 // The quiescence drive
@@ -1235,8 +1246,59 @@ mod tests {
         assert_eq!(admitted, 0);
     }
 
+    /// The fake python tool of the landing test: records one late receipt
+    /// through the print path (the factored async fn) while its cell's
+    /// result row has not landed.
+    struct LateReceiptPythonTool {
+        node: Arc<InlineSessionNode>,
+    }
+
+    impl pa_agent::types::AgentTool for LateReceiptPythonTool {
+        fn name(&self) -> &'static str {
+            "python_repl"
+        }
+
+        fn description(&self) -> &'static str {
+            "Runs a python cell."
+        }
+
+        fn parameters(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| serde_json::json!({ "type": "object", "properties": {} }))
+        }
+
+        fn execute(
+            self: Arc<Self>,
+            tool_call_id: String,
+            _params: serde_json::Value,
+            _signal: pa_agent::abort::AbortSignal,
+            _on_update: pa_agent::types::AgentToolUpdateCallback,
+        ) -> pa_agent::BoxFut<'static, anyhow::Result<pa_agent::types::AgentToolResult>> {
+            let node = Arc::clone(&self.node);
+            Box::pin(async move {
+                record_late_sent_receipt(
+                    node,
+                    tool_call_id,
+                    pa_core::kernel::shared::KernelSentAgentMessage {
+                        id: "agentmsg_1".to_string(),
+                        message: "Ping.".to_string(),
+                        delivery_status: pa_core::kernel::shared::SentDeliveryStatus::Delivered,
+                        receiver_role: Some(pa_core::kernel::shared::ReceiverRole::Parent),
+                        target: pa_core::kernel::shared::SentAgentMessageTarget {
+                            active_session_id: "a1".to_string(),
+                            session_id: "s1".to_string(),
+                            session_name: Some("Worker".to_string()),
+                        },
+                    },
+                )
+                .await;
+                Ok(pa_agent::types::AgentToolResult::text("cell done"))
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn late_sent_agent_message_receipts_record_through_the_print_sink() {
+    async fn late_receipts_record_through_the_print_path_apply_on_landing() {
         let directory = tempfile::tempdir().unwrap();
         let options = run_options(directory.path());
         std::fs::create_dir_all(&options.config.agent_dir).unwrap();
@@ -1244,7 +1306,14 @@ mod tests {
             directory.path(),
             &directory.path().join("sessions"),
         );
-        let script = json!({ "responses": ["root"] });
+        let script = json!({
+            "responses": [
+                { "content": [
+                    { "type": "toolCall", "id": "call-1", "name": "python_repl", "arguments": {} }
+                ] },
+                "all done",
+            ],
+        });
         let node = root_node(&options, &manager, Some(script.clone()));
         let headless = crate::print_runtime::build_engine(
             &options,
@@ -1259,64 +1328,44 @@ mod tests {
         .unwrap();
         let engine = Arc::new(headless.engine);
         adopt_built_engine(&node, &engine, &headless.model).await;
-
-        // The settled cell's tool result row: the late receipt lands after
-        // it (TS `sentAgentMessages` on the rebuilt row).
+        // The scripted turn runs a fake python tool in place of the
+        // kernel-backed one: the tool records the receipt while its cell's
+        // result row has not landed.
         engine
             .session
             .agent()
-            .append_messages(vec![pa_agent::types::AgentMessage::Standard(
-                pa_agent::types::Message::ToolResult(pa_agent::types::ToolResultMessage {
-                    tool_call_id: "call-1".to_string(),
-                    tool_name: "python_repl".to_string(),
-                    content: Vec::new(),
-                    details: None,
-                    is_error: false,
-                    timestamp: 0,
-                }),
-            )])
+            .set_tools(vec![Arc::new(LateReceiptPythonTool {
+                node: Arc::clone(&node),
+            })])
             .await;
-        let sink = late_sent_agent_message_sink(&node);
-        sink(
-            "call-1",
-            pa_core::kernel::shared::KernelSentAgentMessage {
-                id: "agentmsg_1".to_string(),
-                message: "Ping.".to_string(),
-                delivery_status: pa_core::kernel::shared::SentDeliveryStatus::Delivered,
-                receiver_role: Some(pa_core::kernel::shared::ReceiverRole::Parent),
-                target: pa_core::kernel::shared::SentAgentMessageTarget {
-                    active_session_id: "a1".to_string(),
-                    session_id: "s1".to_string(),
-                    session_name: Some("Worker".to_string()),
-                },
-            },
-        );
 
-        // The sink records on a spawned task; wait for the patch.
-        let mut patched = false;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !patched && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            patched = engine
-                .session
-                .agent()
-                .state()
-                .await
-                .messages
-                .iter()
-                .any(|row| {
-                    matches!(
-                        row,
-                        pa_agent::types::AgentMessage::Standard(
-                            pa_agent::types::Message::ToolResult(result),
-                        ) if result
-                            .details
-                            .as_ref()
-                            .is_some_and(|details| details.get("sentAgentMessages").is_some())
-                    )
-                });
-        }
-        assert!(patched, "the receipt patches the tool result");
+        let outcome = engine
+            .prompt(
+                "run the cell",
+                pa_core::session_engine::PromptOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, pa_core::session_engine::PromptOutcome::Prompt);
+        engine.session.agent().wait_for_idle().await;
+
+        // The landed row carries the receipt in live state.
+        let state = engine.session.agent().state().await;
+        let result = state
+            .messages
+            .iter()
+            .find_map(|row| match row {
+                pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(
+                    result,
+                )) if result.tool_call_id == "call-1" => Some(result.clone()),
+                _ => None,
+            })
+            .expect("the landed tool result");
+        let details = result.details.as_ref().expect("the receipt rides the row");
+        assert_eq!(
+            details["sentAgentMessages"][0]["id"], "agentmsg_1",
+            "the live state row carries the receipt"
+        );
 
         let entries = engine.session.entries().await;
         assert!(
