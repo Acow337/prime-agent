@@ -801,3 +801,49 @@ async fn stop_during_background_prepare_never_starts_the_provider() {
     assert_eq!(engine.entries().await, before);
     summarizer.registration.unregister();
 }
+
+/// A boundary stopped before entering the core must not use the new epoch
+/// created by Stop to launch replacement work.
+#[tokio::test]
+async fn cancelled_boundary_does_not_start_in_the_replacement_epoch() {
+    let (engine, _tmp) = held_engine(true, 3).await;
+    let summarizer = held_summarizer(0, vec![follow_up("must not be requested")]);
+    let mut model = summarizer.model.clone();
+    model.context_window = 128_000;
+    model.max_tokens = 0;
+    let mut reply = faux_reply("usage anchor");
+    reply.usage.total_tokens = 100_000;
+    engine
+        .session
+        .lock()
+        .await
+        .append_message(SessionAgentMessage::Assistant(reply))
+        .unwrap();
+    engine
+        .rebuild_branch_context(engine.entries().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.context_pressure(&model).await,
+        ContextPressure::Background
+    );
+    let boundary = pa_agent::abort::AbortController::new();
+    boundary.abort();
+    engine.abort_background_compaction();
+    assert!(
+        !engine
+            .auto_compaction_now_with_abort(
+                &model,
+                &summarizer.model,
+                None,
+                Some(&boundary.signal())
+            )
+            .await
+    );
+    assert!(
+        engine.compaction_flight.lock().await.is_none(),
+        "stopped boundary created a flight"
+    );
+    assert_eq!(summarizer.registration.call_count(), 0);
+    summarizer.registration.unregister();
+}

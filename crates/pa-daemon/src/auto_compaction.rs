@@ -62,7 +62,12 @@ impl AgentSessionEngine {
             Some(engine) => self.runtime.block_on(async {
                 engine
                     .session
-                    .auto_compaction_now(&run_model, &model, api_key.clone())
+                    .auto_compaction_now_with_abort(
+                        &run_model,
+                        &model,
+                        api_key.clone(),
+                        Some(&signal),
+                    )
                     .await
             }),
             // No built session: the live context is empty, matching the

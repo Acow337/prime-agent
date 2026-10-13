@@ -106,6 +106,20 @@ impl AgentSession {
         summarizer_model: &pa_types::ai::Model,
         api_key: Option<String>,
     ) -> bool {
+        self.auto_compaction_now_with_abort(run_model, summarizer_model, api_key, None)
+            .await
+    }
+
+    /// Consult a boundary that may itself be cancelled before it begins.
+    /// The host aborts this signal before cancelling the background epoch,
+    /// so a stopped boundary cannot acquire work in the replacement epoch.
+    pub async fn auto_compaction_now_with_abort(
+        &self,
+        run_model: &pa_types::ai::Model,
+        summarizer_model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        abort: Option<&pa_agent::abort::AbortSignal>,
+    ) -> bool {
         // Capture before the first await: Stop during pressure/prepare must
         // cancel this consult too, rather than create work in the new epoch.
         let signal = self
@@ -114,7 +128,7 @@ impl AgentSession {
             .expect("background compaction abort lock")
             .signal();
         let pressure = self.context_pressure(run_model).await;
-        if signal.is_aborted() {
+        if signal.is_aborted() || abort.is_some_and(pa_agent::abort::AbortSignal::is_aborted) {
             return false;
         }
         match pressure {

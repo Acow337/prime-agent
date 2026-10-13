@@ -561,6 +561,17 @@ impl SessionEngine for AgentSessionEngine {
     /// The abort races the run: the summarizer call is cancelled by
     /// dropping the future (the entry write happens inside it).
     fn abort_auto_compaction(&self) {
+        // Abort the boundary FIRST: a consult entering after the epoch reset
+        // below must observe its cancelled boundary signal, not start work in
+        // the replacement epoch. Only the boundary's own controller clears it.
+        let controller = self
+            .auto_compaction_abort
+            .lock()
+            .expect("auto compaction abort lock")
+            .clone();
+        if let Some(controller) = controller {
+            controller.abort();
+        }
         // The weak mirror never waits for the session mutex the active turn owns.
         let core = self
             .compaction_session
@@ -569,15 +580,6 @@ impl SessionEngine for AgentSessionEngine {
             .upgrade();
         if let Some(core) = core {
             core.session.abort_background_compaction();
-        }
-        // Aborts the controller in flight; only its own controller clears the slot.
-        let controller = self
-            .auto_compaction_abort
-            .lock()
-            .expect("auto compaction abort lock")
-            .clone();
-        if let Some(controller) = controller {
-            controller.abort();
         }
     }
 
