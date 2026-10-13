@@ -1799,3 +1799,64 @@ fn stop_cancels_a_held_background_summary_and_allows_a_fresh_flight() {
     assert!(no_compaction_events(&events));
     registration.unregister();
 }
+
+#[test]
+fn stop_at_compaction_start_never_restarts_a_cancelled_background_join() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _dir, registration) = faux_engine_with_registration(
+        &json!({"responses": [
+            {"text": "seed reply"}, {"text": "crossing reply"},
+            {"text": "cancelled summary"}, {"text": "must not request a replacement"}
+        ]}),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    let model = engine.session_model().unwrap();
+    {
+        let guard = engine.session.blocking_lock();
+        let core = guard.as_ref().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !engine
+            .runtime
+            .block_on(core.session.auto_compaction_now(&model, &model, None))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "summary never became ready"
+            );
+            std::thread::yield_now();
+        }
+    }
+    let mut boundary_events = Vec::new();
+    engine.run_auto_compaction(&mut |event| {
+        if matches!(event, EngineEvent::CompactionStart { .. }) {
+            engine.abort_in_flight_turn();
+        }
+        boundary_events.push(event);
+        // The emit gate already passed when Stop arrived. Cancellation must
+        // reach the registered controller independently of this return value.
+        true
+    });
+    assert_eq!(
+        registration.call_count(),
+        3,
+        "Stop must not issue a fresh summary"
+    );
+    let events = compaction_events(&boundary_events);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["aborted"], true);
+    let guard = engine.session.blocking_lock();
+    let entries = engine
+        .runtime
+        .block_on(guard.as_ref().unwrap().session.entries());
+    assert!(!entries
+        .iter()
+        .any(|entry| matches!(entry, pa_types::session::FileEntry::Compaction { .. })));
+    registration.unregister();
+}

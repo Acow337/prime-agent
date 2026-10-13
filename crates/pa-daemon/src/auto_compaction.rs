@@ -47,6 +47,16 @@ impl AgentSessionEngine {
             .armed_image_route()
             .map_or_else(|| model.clone(), |route| route.target.model);
         let api_key = self.resolve_request_api_key(&model);
+        // Register before the pressure consult and start event. Stop must
+        // cancel this boundary even if it lands before the foreground join;
+        // otherwise rejecting a cancelled background result could start a
+        // fresh summarizer after Stop.
+        let controller = std::sync::Arc::new(AbortController::new());
+        let signal = controller.signal();
+        *self
+            .auto_compaction_abort
+            .lock()
+            .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         let engine = self.session.blocking_lock().clone();
         let due = match engine {
             Some(engine) => self.runtime.block_on(async {
@@ -59,7 +69,8 @@ impl AgentSessionEngine {
             // TS pre-turn check on a fresh session.
             None => false,
         };
-        if !due {
+        if !due || signal.is_aborted() {
+            self.clear_auto_compaction_abort(&controller);
             return AutoCompactionRun::NotDue;
         }
         // TS `_runAutoCompaction` emits the start event before the
@@ -67,22 +78,13 @@ impl AgentSessionEngine {
         if !emit(EngineEvent::CompactionStart {
             event: crate::compaction::compaction_start_event("threshold", None),
         }) {
+            self.clear_auto_compaction_abort(&controller);
             return AutoCompactionRun::Cancelled;
         }
         pa_core::session_engine::compaction_trace::trace(
             "auto.threshold_start_emitted",
             &serde_json::Value::Null,
         );
-        // TS assigns `_autoCompactionAbortController` for the run's duration: an
-        // `abort_compaction` command lands in the slot and cancels the in-flight summarizer.
-        let controller = std::sync::Arc::new(AbortController::new());
-        let signal = controller.signal();
-        {
-            *self
-                .auto_compaction_abort
-                .lock()
-                .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
-        }
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();
         let Some(engine) = engine else {
