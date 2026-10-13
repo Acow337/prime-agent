@@ -559,27 +559,7 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
     });
     let entered_notify = Arc::clone(&engine.entered);
     let entered = entered_notify.notified();
-    let runner = TurnRunner {
-        core: Arc::clone(&worker.core),
-        input_pauses: worker.input_pauses.clone(),
-        prompt_admissions: worker.prompt_admissions.clone(),
-        work_notify: Arc::new(Notify::new()),
-        idle_notify: Arc::clone(&worker.idle_notify),
-        events: Arc::clone(&worker.events),
-        engine: engine.clone(),
-        recovery: Arc::clone(&worker.recovery),
-        active_session_id: worker.config.active_session_id.clone(),
-        roster_pushes: worker.roster_pushes.clone(),
-        user_bash: Arc::clone(&worker.user_bash),
-        passivation: crate::worker::turn::PassivationContext {
-            agent_dir: worker.config.agent_dir.clone(),
-            link: Arc::new(crate::supervisor_link::SupervisorLink::new(
-                worker.config.supervisor_socket_path.clone(),
-            )),
-            worker_token: String::new(),
-        },
-        herdr: Arc::clone(&worker.herdr),
-    };
+    let runner = gated_turn_runner(&worker, engine.clone());
     let running = tokio::spawn(async move { runner.run().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
@@ -975,4 +955,130 @@ async fn failed_resume_checkpoint_keeps_live_suspension_and_exact_queued_input()
         serde_json::to_value(durable).unwrap(),
         serde_json::to_value(parked).unwrap()
     );
+}
+
+fn gated_turn_runner(worker: &Worker, engine: Arc<dyn SessionEngine>) -> TurnRunner {
+    TurnRunner {
+        core: Arc::clone(&worker.core),
+        input_pauses: worker.input_pauses.clone(),
+        prompt_admissions: worker.prompt_admissions.clone(),
+        work_notify: Arc::new(Notify::new()),
+        idle_notify: Arc::clone(&worker.idle_notify),
+        events: Arc::clone(&worker.events),
+        engine,
+        recovery: Arc::clone(&worker.recovery),
+        active_session_id: worker.config.active_session_id.clone(),
+        roster_pushes: worker.roster_pushes.clone(),
+        user_bash: Arc::clone(&worker.user_bash),
+        passivation: crate::worker::turn::PassivationContext {
+            agent_dir: worker.config.agent_dir.clone(),
+            link: Arc::new(crate::supervisor_link::SupervisorLink::new(
+                worker.config.supervisor_socket_path.clone(),
+            )),
+            worker_token: String::new(),
+        },
+        herdr: Arc::clone(&worker.herdr),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn already_resumed_active_turn_keeps_its_original_durable_queue_snapshot() {
+    let fixture = tempfile::tempdir().unwrap();
+    let session_path = fixture.path().join("session.jsonl");
+    let mut session = SessionFile::create(fixture.path().to_str().unwrap(), None, 0);
+    session.set_path(session_path.clone());
+    session.rewrite().unwrap();
+    let worker = worker_with_journal_in(fixture.path());
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": session_path, "cwd": fixture.path() }),
+        )
+        .await;
+    assert!(created.success, "create isolated durable worker: {created:?}");
+    let paused = worker
+        .dispatch(
+            "acquire_session_input_pause",
+            &json!({ "leaseKey": "active-resume-gate", "clientId": "synthetic-client" }),
+        )
+        .await;
+    assert!(paused.success, "hold the native runner: {paused:?}");
+    let native_park = worker.idle_notify.notified();
+    let admitted = worker
+        .dispatch(
+            "follow_up",
+            &json!({ "message": "synthetic picked input before its first row" }),
+        )
+        .await;
+    assert!(admitted.success, "durably admit original input: {admitted:?}");
+    tokio::time::timeout(std::time::Duration::from_secs(5), native_park)
+        .await
+        .expect("native runner must observe the actual input pause and park");
+    let before = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("admission persisted the original queue");
+    assert!(!before.2, "this resume is already an unsuspended no-op");
+    assert!(before.0.is_empty());
+    assert_eq!(before.1.len(), 1);
+    let items = {
+        let mut core = worker.core.lock().unwrap();
+        assert!(!core.queued_input_suspended);
+        // Drive the real pickup primitive and turn callback while the actual
+        // input pause keeps Worker::new's native runner parked. This is not a
+        // native run-loop/release-pause scheduling race fixture.
+        let items = gather_delivery_batch(&mut core, Lane::FollowUp);
+        core.running_admission_ids = items
+            .iter()
+            .filter_map(|item| item.admission_id.clone())
+            .collect();
+        core.busy = true;
+        items
+    };
+    let (release, released) = std::sync::mpsc::channel();
+    let engine = Arc::new(BeforeUserRowEngine {
+        entered: Arc::new(Notify::new()),
+        captured: std::sync::Mutex::new(None),
+        boundary: UserRowBoundary::BeforeFirst,
+        release: std::sync::Mutex::new(released),
+    });
+    let entered_notify = Arc::clone(&engine.entered);
+    let entered = entered_notify.notified();
+    let runner = gated_turn_runner(&worker, engine.clone());
+    let running = tokio::spawn(async move {
+        runner.run_turn(engine, Lane::FollowUp, items).await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .expect("picked original must reach the pre-row engine gate");
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(core.busy);
+        assert!(core.steering.is_empty() && core.follow_up.is_empty());
+        assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
+    }
+    let resumed = worker.dispatch("resume_queue", &json!({})).await;
+    assert!(!resumed.success, "legacy no queued work response: {resumed:?}");
+    assert_eq!(resumed.error.as_deref(), Some("No queued work to resume"));
+    let after = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("original queue recovery evidence must remain");
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(before).unwrap(),
+        "an already-resumed active turn must not replace its original queue with an empty snapshot"
+    );
+    // Dropping the gate sender on any preceding failed assertion releases
+    // the blocking engine too; successful teardown joins only this fixture.
+    worker.core.lock().unwrap().abort_requested = true;
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), running)
+        .await
+        .expect("the test-owned turn must settle")
+        .unwrap();
 }
