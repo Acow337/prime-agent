@@ -1424,6 +1424,7 @@ async fn run_prompts_and_emit(
                 api_key.clone(),
                 global_harness_dir.clone(),
                 &autonomous_state,
+                &mut boundary,
                 &command,
             )
             .await;
