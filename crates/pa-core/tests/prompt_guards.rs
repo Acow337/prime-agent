@@ -143,8 +143,16 @@ fn cached_prefix_is_stable_across_sessions() {
 
 /// Host-request types that are host-internal plumbing, not model-facing
 /// programmatic tools (the prompt must not document them).
-const INTERNAL_HOST_REQUESTS: &[&str] =
-    &["model.info", "mcp.config", "mcp.refresh", "mcp.begin_login"];
+const INTERNAL_HOST_REQUESTS: &[&str] = &[
+    "model.info",
+    "mcp.config",
+    "mcp.refresh",
+    "mcp.begin_login",
+    // The runtime's detached-bash notice pair (the kernel's bash module
+    // fires them; the model never calls them).
+    "bash.completed",
+    "bash.consumed",
+];
 
 /// Map one registered host-request type to the prompt token that documents
 /// it. `None` when the request is host-internal.

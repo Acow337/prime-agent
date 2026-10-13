@@ -84,6 +84,12 @@ pub struct SessionEngineConfig {
     /// Fires when the kernel's last live background `bash()` handle
     /// settles; `None` installs nothing.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
+    /// The daemonless bash-completion wake (TS `resumeIfIdle`): with it
+    /// the engine registers the `bash.completed`/`bash.consumed`
+    /// handlers whose in-process sinks steer the `[bash-done]` row onto
+    /// the session's agent and fire the wake. `None` installs nothing —
+    /// the daemon keeps its worker-lane sinks via the extra handlers.
+    pub bash_notice_wake: Option<super::bash_notices::BashNoticeWake>,
     /// An externally owned MCP manager: the engine adopts it instead of
     /// building its own, so ACP-admitted servers reach the prompt's MCP gating.
     pub mcp_manager: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>>,
@@ -430,6 +436,18 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         )
             as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
+    // The daemonless bash-completion lane (TS registers the handlers in
+    // every mode): the in-process sinks steer the notice row onto this
+    // session's agent and fire the embedding's wake once the agent
+    // exists (the slot binds below).
+    let bash_notice_agent = super::bash_notices::BashNoticeAgentSlot::default();
+    if let Some(wake) = config.bash_notice_wake.clone() {
+        super::bash_notices::register_in_process_bash_notice_handlers(
+            &wake,
+            &bash_notice_agent,
+            &mut handlers,
+        );
+    }
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
         handlers,
@@ -670,6 +688,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     });
 
     let agent = Arc::new(agent);
+    // The in-process bash-notice sinks bind their agent late: their
+    // handlers registered before the agent existed.
+    *bash_notice_agent
+        .lock()
+        .expect("bash notice agent slot lock") = Some(Arc::downgrade(&agent));
     // TS `_startRlmChildRun`'s spawn anchor: the `rlm.spawn` host handler
     // names the parent's in-flight turn through this weak seam (the
     // bridge is built before the agent exists, and a strong edge would
@@ -852,6 +875,17 @@ impl SessionEngine {
         &self,
     ) -> std::sync::Weak<crate::kernel::provisioner::IpythonKernelProvisioner> {
         std::sync::Arc::downgrade(&self.provisioner)
+    }
+
+    /// Whether the session's kernel has live background `bash()` work
+    /// (TS `isSessionActive`'s `hasBackgroundWork`; the same read the
+    /// daemon's liveness probe uses).
+    #[must_use]
+    pub fn has_background_bash(&self) -> bool {
+        self.kernel_provisioner_weak()
+            .upgrade()
+            .and_then(|provisioner| provisioner.manager())
+            .is_some_and(|manager| manager.has_background_work())
     }
 
     /// Expand a `/skill:<name>` submission into its `<skill>` block for

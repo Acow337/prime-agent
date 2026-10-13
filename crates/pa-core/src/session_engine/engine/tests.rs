@@ -88,6 +88,7 @@ async fn engine_runs_tool_loop_and_persists() {
         telemetry: None,
         model_info: None,
         on_background_work_settled: None,
+        bash_notice_wake: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
     })
@@ -191,6 +192,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         telemetry: None,
         model_info: None,
         on_background_work_settled: None,
+        bash_notice_wake: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
     })
@@ -262,6 +264,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             telemetry: None,
             model_info: None,
             on_background_work_settled: None,
+            bash_notice_wake: None,
             prewarm_ipython_kernel: None,
             queued_goal_context_purge: None,
         }
@@ -450,6 +453,7 @@ async fn create_session_appends_missing_resume_settings_rows() {
         telemetry: None,
         model_info: None,
         on_background_work_settled: None,
+        bash_notice_wake: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
     })

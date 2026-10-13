@@ -6,6 +6,7 @@ pub mod agent_messaging;
 pub mod auto_refine_trigger;
 pub mod auto_retry;
 pub mod auxiliary_model;
+pub mod bash_notices;
 pub mod branch_summarization;
 pub mod compact_session;
 pub mod compaction;

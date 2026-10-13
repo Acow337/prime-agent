@@ -237,7 +237,10 @@ pub(crate) fn inline_subagent_wiring(
 // The quiescence drive
 
 /// Whether one child has live work (TS `child.isSessionActive`): not
-/// settled, or a delivered row waiting in its lane, or a turn streaming.
+/// settled, or a delivered row waiting in its lane, or a turn
+/// streaming. (Live background bash is a child's own-drive hold, via
+/// [`has_unsettled_rlm_work`]'s engine arm — a child never settles with
+/// a live background command, so it needs no arm here.)
 /// The quiescence predicate, the collect wait, and the roster rows all
 /// read this one fact — never a second bookkeeping writer — so a
 /// follow-up delivered to a settled child reads unsettled until its
@@ -256,7 +259,8 @@ async fn child_is_unsettled(child: &Arc<InlineChild>) -> bool {
 
 /// Whether inline subagent work is unsettled (TS
 /// `_hasUnsettledRlmQuiescenceWork`): a running child, a delivered row
-/// waiting in a child's lane, or a row queued on the root's own agent.
+/// waiting in a child's lane, or a row queued on the root's own agent,
+/// plus live background bash on either (TS `isSessionActive`).
 /// The goal/autonomous continuation gates and the drive's return read
 /// this one predicate: the live session state — not a bookkeeping flag
 /// alone — is the fact (TS `child.isSessionActive`).
@@ -269,7 +273,9 @@ pub(crate) async fn has_unsettled_rlm_work(node: &Arc<InlineSessionNode>) -> boo
     node.engine
         .get()
         .and_then(Weak::upgrade)
-        .is_some_and(|engine| engine.session.agent().has_queued_messages())
+        .is_some_and(|engine| {
+            engine.session.agent().has_queued_messages() || engine.has_background_bash()
+        })
 }
 
 /// Drive one inline session to quiescence: drain delivered messages as
