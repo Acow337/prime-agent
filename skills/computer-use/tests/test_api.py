@@ -705,6 +705,43 @@ class AppDispatchTests(AppTestCase):
         self.assertIn("could not be read", caught.exception.message)
         self.assertNotIn("changed since", caught.exception.message)
 
+    async def test_both_sides_unreadable_identity_never_takes_an_action(self) -> None:
+        # snapshot and live both read as None: equality would pass, so the
+        # guard must reject before the comparison - no identity, no action
+        from computer_use import errors
+
+        env = self.make_env()
+        env.set_tree(fakes.window(children=[fakes.element(role=None, title=None, actions=("AXPress",))]))
+        app = await env.get_app()  # no drift: the live fingerprint is also (None, None)
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.click(0)
+        self.assertEqual(caught.exception.code, "ELEMENT_STALE")
+        self.assertIn("could not be read", caught.exception.message)
+        self.assertEqual(env.recorder.calls, [])
+
+    async def test_a_titleless_element_stays_usable(self) -> None:
+        # a genuinely absent title on BOTH sides is a real element without a
+        # title: the role alone verifies freshness, and refusing it would
+        # break every unnamed control
+        env = self.make_env()
+        env.set_tree(
+            fakes.window(
+                children=[
+                    fakes.element(
+                        role="AXButton",
+                        title=None,
+                        actions=("AXPress",),
+                        position=(20.0, 60.0),
+                        size=(100.0, 30.0),
+                    )
+                ]
+            )
+        )
+        app = await env.get_app()
+        await app.click(0)
+        unnamed = env.current["children"][0]
+        self.assertEqual(env.ax_calls, [("perform_action", unnamed, "AXPress")])
+
     async def test_click_stale_index(self) -> None:
         from computer_use import errors
 
