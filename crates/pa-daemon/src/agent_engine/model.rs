@@ -425,10 +425,7 @@ pub(crate) fn auto_compaction_inputs(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .map_or_else(|| model.clone(), |route| route.target.model.clone());
-    (
-        run_model,
-        request_api_key(selection, agent_dir, model),
-    )
+    (run_model, request_api_key(selection, agent_dir, model))
 }
 
 /// The saved model context of a session file: the pinned `(provider,

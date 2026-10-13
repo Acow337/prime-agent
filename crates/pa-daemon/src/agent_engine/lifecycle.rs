@@ -1067,12 +1067,8 @@ impl AgentSessionEngine {
                         let Some(model) = model else { return Ok(false) };
                         // The consult inputs resolve through the same derivation
                         // the boundary arm uses (see `auto_compaction_inputs`).
-                        let (run_model, api_key) = auto_compaction_inputs(
-                            &image_route,
-                            &selection,
-                            &agent_dir,
-                            &model,
-                        );
+                        let (run_model, api_key) =
+                            auto_compaction_inputs(&image_route, &selection, &agent_dir, &model);
                         // The banded consult the turn boundaries run: the
                         // Background band starts (or keeps) the background
                         // summarize without yielding; a ready-to-commit
