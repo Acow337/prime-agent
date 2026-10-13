@@ -2120,7 +2120,9 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         }
     };
     registration.set_responses(vec![
-        pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(route));
+        pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(route)
+        );
         10
     ]);
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -2136,10 +2138,7 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         .collect();
     assert_eq!(
         assistant_texts(&events),
-        vec![
-            "tool turn reply".to_string(),
-            "task finished".to_string()
-        ],
+        vec!["tool turn reply".to_string(), "task finished".to_string()],
         "the tool run continued to its final turn"
     );
     assert_eq!(
@@ -2148,12 +2147,12 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         "one tool turn and one final turn: {events:?}"
     );
     assert!(
-        !events[assistants[0]..assistants[1]].iter().any(
-            |event| matches!(
+        !events[assistants[0]..assistants[1]]
+            .iter()
+            .any(|event| matches!(
                 event,
                 EngineEvent::CompactionStart { .. } | EngineEvent::Compaction { .. }
-            )
-        ),
+            )),
         "a Background crossing must not compact between the tool turn and the next model turn"
     );
     wait_for_calls(&registration, 5);
