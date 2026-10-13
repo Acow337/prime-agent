@@ -782,7 +782,20 @@ if ($uvKnown) {
     if ($null -eq $prewarm) {
         Step-Fail 'preparing the Python kernel' 'the launcher did not start; the first session retries it online'
     } elseif ($prewarm.WaitForExit($prewarmBoundSec * 1000)) {
-        if ($prewarm.ExitCode -ne 0) {
+        # The parameterless wait forces the exit code to be collected:
+        # a PassThru object on Windows PowerShell 5.1 can hold a null
+        # ExitCode right after the timed wait, and the null would read
+        # as nonzero - a finished pre-warm told it failed. Only an
+        # OBSERVED nonzero code is a failure; an unreadable one means
+        # the pre-warm finished inside the bound.
+        $null = $prewarm.WaitForExit()
+        $prewarmCode = $null
+        try {
+            $prewarmCode = $prewarm.ExitCode
+        } catch {
+            $prewarmCode = $null
+        }
+        if ($null -ne $prewarmCode -and $prewarmCode -ne 0) {
             Step-Fail 'preparing the Python kernel' 'the first session retries it online'
         } else {
             Step-Ok 'kernel ready'
