@@ -14,7 +14,7 @@ use crate::refinement::executor::{
 };
 use crate::refinement::{
     append_global_refinement, format_refinement_notice_body, load_global_refinement_history,
-    load_harness_state, merge_harness_states, update_harness_state, HarnessScope, RefinementResult,
+    load_harness_state, merge_harness_states, HarnessScope, RefinementResult,
 };
 use crate::session::manager::SessionManager;
 
@@ -311,6 +311,96 @@ pub async fn execute_refinement_with_rows(
     refine_call: crate::refinement::executor::RefinerFn,
     agent_dir: Option<&Path>,
 ) -> anyhow::Result<(RefinementResult, Vec<String>)> {
+    let ready = prepare_refinement(
+        session,
+        transcript,
+        global_harness_dir,
+        model,
+        options,
+        refine_call,
+    )
+    .await?;
+    commit_refinement(
+        session,
+        agent,
+        ready,
+        source,
+        agent_dir,
+        /*compaction_flight*/ None,
+        &pa_agent::abort::AbortSignal::never(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_refinement(
+    session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
+    agent: std::sync::Arc<pa_agent::agent::Agent>,
+    compaction_flight: std::sync::Arc<tokio::sync::Mutex<()>>,
+    cancel: pa_agent::abort::AbortSignal,
+    agent_dir: Option<PathBuf>,
+    options: RefineOptions,
+    source: RefinementSource,
+    model: pa_types::ai::Model,
+    refine_call: crate::refinement::executor::RefinerFn,
+    global_harness_dir: PathBuf,
+) -> anyhow::Result<RefinementResult> {
+    let ready = pa_agent::abort::race_with_abort(
+        async {
+            // The transcript's consumed artifacts are extracted under this first
+            // lock straight from the retained rows: no second clone of the rows.
+            let parts = session.lock().await.refine_transcript_parts();
+            let crate::session::manager::RefineTranscriptParts {
+                messages,
+                refinement_history,
+            } = parts.await?;
+            prepare_refinement(
+                &session,
+                RefinementTranscript {
+                    messages: &messages,
+                    refinement_history: &refinement_history,
+                },
+                &global_harness_dir,
+                &model,
+                &options,
+                refine_call,
+            )
+            .await
+        },
+        &cancel,
+    )
+    .await??;
+    let (result, _) = commit_refinement(
+        &session,
+        &agent,
+        ready,
+        source,
+        agent_dir.as_deref(),
+        Some(&compaction_flight),
+        &cancel,
+    )
+    .await?;
+    Ok(result)
+}
+
+/// An ephemeral plan: no persistence or run reservation is held while planning.
+pub(crate) struct ReadyRefinement {
+    plan: RefinementPlan,
+    core_options: CoreRefineOptions,
+    baseline_state: crate::refinement::HarnessState,
+    target_scope: HarnessScope,
+    target_dir: PathBuf,
+    global_harness_dir: PathBuf,
+}
+
+pub(crate) async fn prepare_refinement(
+    session: &tokio::sync::Mutex<SessionManager>,
+    transcript: RefinementTranscript<'_>,
+    global_harness_dir: &Path,
+    model: &pa_types::ai::Model,
+    options: &RefineOptions,
+    refine_call: crate::refinement::executor::RefinerFn,
+) -> anyhow::Result<ReadyRefinement> {
     let RefinementTranscript {
         messages,
         refinement_history,
@@ -377,6 +467,104 @@ pub async fn execute_refinement_with_rows(
         HarnessScope::Global => global_harness_dir.to_path_buf(),
         HarnessScope::Local => local_harness_dir.clone(),
     };
+    Ok(ReadyRefinement {
+        plan,
+        core_options,
+        baseline_state,
+        target_scope,
+        target_dir,
+        global_harness_dir: global_harness_dir.to_path_buf(),
+    })
+}
+
+type RefinementCommitGuards<'a> = (
+    tokio::sync::MutexGuard<'a, ()>,
+    Option<tokio::sync::MutexGuard<'a, ()>>,
+    tokio::sync::MutexGuard<'a, SessionManager>,
+    crate::platform::lock_dir::LockDir,
+);
+
+async fn reserve_refinement_commit<'a>(
+    session: &'a tokio::sync::Mutex<SessionManager>,
+    agent: &'a pa_agent::agent::Agent,
+    target_dir: &Path,
+    compaction_flight: Option<&'a tokio::sync::Mutex<()>>,
+) -> anyhow::Result<RefinementCommitGuards<'a>> {
+    tokio::fs::create_dir_all(&target_dir).await?;
+    let state_path = crate::refinement::get_harness_state_path(&target_dir);
+    let mut attempts = 0;
+    let guards = loop {
+        let admission = agent.reserve_idle().await;
+        let flight = match compaction_flight {
+            Some(flight) => match flight.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    drop(admission);
+                    drop(flight.lock().await);
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let Ok(session_guard) = session.try_lock() else {
+            drop(flight);
+            drop(admission);
+            drop(session.lock().await);
+            continue;
+        };
+        let path = state_path.clone();
+        let lock = tokio::task::spawn_blocking(move || {
+            crate::platform::lock_dir::LockDir::acquire_owned_retrying(
+                &path,
+                std::time::Duration::from_secs(10),
+                1,
+                std::time::Duration::ZERO,
+            )
+        })
+        .await?;
+        match lock {
+            Ok(lock) => break (admission, flight, session_guard, lock),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                drop(session_guard);
+                drop(flight);
+                drop(admission);
+                attempts += 1;
+                if attempts >= 50 {
+                    return Err(error.into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    Ok(guards)
+}
+
+pub(crate) async fn commit_refinement(
+    session: &tokio::sync::Mutex<SessionManager>,
+    agent: &pa_agent::agent::Agent,
+    ready: ReadyRefinement,
+    source: RefinementSource,
+    agent_dir: Option<&Path>,
+    compaction_flight: Option<&tokio::sync::Mutex<()>>,
+    cancel: &pa_agent::abort::AbortSignal,
+) -> anyhow::Result<(RefinementResult, Vec<String>)> {
+    let ReadyRefinement {
+        plan,
+        core_options,
+        baseline_state,
+        target_scope,
+        target_dir,
+        global_harness_dir,
+    } = ready;
+    let (_admission, _flight, mut session, lock) = pa_agent::abort::race_with_abort(
+        reserve_refinement_commit(session, agent, &target_dir, compaction_flight),
+        cancel,
+    )
+    .await??;
+    pa_agent::abort::throw_if_aborted(cancel)?;
+    // From this point the commit completes even if the session closes: dropping
+    // planning is safe, dropping between the durable save and audit append is not.
     // The factory opt-in resolves HERE — immediately before the apply,
     // after the planning request — so a setting that changed during the
     // request (`/factory off` mid-plan) decides, not a snapshot captured
@@ -395,28 +583,25 @@ pub async fn execute_refinement_with_rows(
         None => false,
     };
     let (mut result, state_path) = tokio::task::spawn_blocking(move || {
-        update_harness_state(&target_dir, target_scope, |state| {
-            apply_refinement_plan(
-                state,
-                plan,
-                &core_options,
-                Some(baseline_state),
-                factory_enabled,
-            )
-        })
+        let mut state = load_harness_state(&target_dir, target_scope);
+        let result = apply_refinement_plan(
+            &mut state,
+            plan,
+            &core_options,
+            Some(baseline_state),
+            factory_enabled,
+        );
+        lock.ensure_owned()?;
+        let state_path = crate::refinement::save_harness_state(&target_dir, &state)?;
+        Ok::<_, anyhow::Error>((result, state_path))
     })
     .await
     .map_err(|error| anyhow::anyhow!("refinement harness update task failed: {error}"))??;
     result.harness_state_path = state_path.to_string_lossy().to_string();
-    if target_scope == HarnessScope::Global {
-        append_global_refinement(global_harness_dir, &result)?;
-    }
-    let mut session = loop {
-        agent.wait_for_idle().await;
-        let session = session.lock().await;
-        if agent.signal().is_none() {
-            break session;
-        }
+    let history_write = if target_scope == HarnessScope::Global {
+        append_global_refinement(&global_harness_dir, &result).err()
+    } else {
+        None
     };
     // The audit append is attempted first; a failed write is caught (the row
     // stays live-indexed) and the audit error surfaces only after the outcome
@@ -434,21 +619,41 @@ pub async fn execute_refinement_with_rows(
         outcome.details.clone(),
     );
     let mut context_row_ids = vec![outcome_id];
-    if let Some(error) = audit_write {
-        anyhow::bail!("refinement audit row not persisted: {error}");
-    }
-    if let Some(error) = outcome_write {
-        anyhow::bail!("refinement outcome row not persisted: {error}");
-    }
+    let mut notice_write = None;
     if result.applied_edits.iter().any(|edit| edit.applied) {
         let notice = create_refinement_notice_message(&result, source);
-        let notice_id = session.append_custom_message(
+        let (notice_id, error) = session.append_custom_message_retained(
             &notice.custom_type,
             notice.content.clone(),
             notice.display,
             notice.details.clone(),
-        )?;
+        );
+        notice_write = error;
         context_row_ids.push(notice_id);
+    }
+    let rows = context_rows_by_ids(session.retained_entries(), &context_row_ids);
+    let loop_rows = rows
+        .iter()
+        .filter_map(super::session_message_to_loop)
+        .collect();
+    agent.append_messages(loop_rows).await;
+    let failures: Vec<String> = [
+        (
+            "global history",
+            history_write.map(|error| error.to_string()),
+        ),
+        ("audit", audit_write.map(|error| error.to_string())),
+        ("outcome", outcome_write.map(|error| error.to_string())),
+        ("notice", notice_write.map(|error| error.to_string())),
+    ]
+    .into_iter()
+    .filter_map(|(store, error)| error.map(|error| format!("{store}: {error}")))
+    .collect();
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "refinement applied but records were not persisted: {}",
+            failures.join("; ")
+        );
     }
     Ok((result, context_row_ids))
 }
@@ -473,6 +678,64 @@ pub(crate) enum AutoRefineRound {
     Ran(RefinementResult),
 }
 
+async fn review_compact_refinement(
+    session: &tokio::sync::Mutex<SessionManager>,
+    branch_state: &std::sync::Mutex<super::auto_refine_trigger::CompactAutoRefineState>,
+    model: &pa_types::ai::Model,
+    api_key: Option<String>,
+    global_harness_dir: &Path,
+    turns_since_last_review: u32,
+    branch_version: u64,
+) -> anyhow::Result<Option<AutoRefineReview>> {
+    // The review reads the same planning inputs the run plans
+    // against, extracted under this lock from the retained rows.
+    let (parts, merged_state, history) = {
+        let session = session.lock().await;
+        let local_state =
+            load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
+        let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
+        (
+            session.refine_transcript_parts(),
+            merge_harness_states(&global_state, Some(&local_state)),
+            load_global_refinement_history(global_harness_dir),
+        )
+    };
+    // Refinement deliberately reviews historical messages; await the
+    // transcript parts after releasing the session mutex.
+    let crate::session::manager::RefineTranscriptParts {
+        messages,
+        refinement_history: session_history,
+    } = parts.await?;
+    let history = crate::refinement::merge_refinement_history(&history, &session_history);
+    let review = review_auto_refine(
+        &messages,
+        &merged_state,
+        &history,
+        model,
+        &AutoRefineReviewContext {
+            reason: AUTO_REFINE_COMPACT_REASON.to_string(),
+            turns_since_last_review,
+        },
+        default_refiner_call(api_key.clone()),
+    )
+    .await?;
+    if !review.should_refine {
+        return Ok(None);
+    }
+    // A branch move (or a replacement teardown's discard) bumped the version
+    // while the review's model call was in flight — the approval belongs to
+    // the abandoned conversation, so the refinement run never starts.
+    if branch_state
+        .lock()
+        .expect("compact auto-refine state lock")
+        .branch_version
+        != branch_version
+    {
+        return Ok(None);
+    }
+    Ok(Some(review))
+}
+
 impl AgentSession {
     /// The compact-trigger review: an LLM call over the conversation, the
     /// merged harness state, and the refinement history. `Ok(None)` is the
@@ -490,48 +753,78 @@ impl AgentSession {
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> anyhow::Result<Option<AutoRefineReview>> {
-        // The review reads the same planning inputs the run plans
-        // against, extracted under this lock from the retained rows.
-        let (parts, merged_state, history) = {
-            let session = self.session_handle().lock().await;
-            let local_state =
-                load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
-            let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
-            (
-                session.refine_transcript_parts(),
-                merge_harness_states(&global_state, Some(&local_state)),
-                load_global_refinement_history(global_harness_dir),
-            )
-        };
-        // Refinement deliberately reviews historical messages; await the
-        // transcript parts after releasing the session mutex.
-        let crate::session::manager::RefineTranscriptParts {
-            messages,
-            refinement_history: session_history,
-        } = parts.await?;
-        let history = crate::refinement::merge_refinement_history(&history, &session_history);
-        let review = review_auto_refine(
-            &messages,
-            &merged_state,
-            &history,
-            model,
-            &AutoRefineReviewContext {
-                reason: AUTO_REFINE_COMPACT_REASON.to_string(),
+        pa_agent::abort::race_with_abort(
+            review_compact_refinement(
+                &self.session,
+                &self.compact_auto_refine,
+                model,
+                api_key,
+                global_harness_dir,
                 turns_since_last_review,
-            },
-            default_refiner_call(api_key.clone()),
+                branch_version,
+            ),
+            &self.refinement_signal(),
         )
-        .await?;
-        if !review.should_refine {
-            return Ok(None);
-        }
-        // A branch move (or a replacement teardown's discard) bumped the version
-        // while the review's model call was in flight — the approval belongs to
-        // the abandoned conversation, so the refinement run never starts.
-        if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
-            return Ok(None);
-        }
-        Ok(Some(review))
+        .await?
+    }
+
+    /// Review a compacted conversation and plan its refinement in the background.
+    /// The returned task follows the same disposal and full-run commit boundary
+    /// as [`Self::start_refinement`].
+    pub fn start_auto_refine_after_compaction(
+        &self,
+        model: pa_types::ai::Model,
+        api_key: Option<String>,
+        global_harness_dir: PathBuf,
+        turns_since_last_review: u32,
+        branch_version: u64,
+    ) -> tokio::task::JoinHandle<anyhow::Result<Option<RefinementResult>>> {
+        let session = self.session.clone();
+        let agent = self.agent.clone();
+        let flight = self.compaction_flight.clone();
+        let branch_state = self.compact_auto_refine.clone();
+        let agent_dir = self.agent_dir.clone();
+        let cancel = self.refinement_signal();
+        tokio::spawn(async move {
+            let Some(review) = pa_agent::abort::race_with_abort(
+                review_compact_refinement(
+                    &session,
+                    &branch_state,
+                    &model,
+                    api_key.clone(),
+                    &global_harness_dir,
+                    turns_since_last_review,
+                    branch_version,
+                ),
+                &cancel,
+            )
+            .await??
+            else {
+                return Ok(None);
+            };
+            let options = RefineOptions {
+                global: false,
+                instructions: Some(auto_refine_instructions(
+                    AUTO_REFINE_COMPACT_REASON,
+                    &review,
+                )),
+                rollback_id: None,
+            };
+            run_refinement(
+                session,
+                agent,
+                flight,
+                cancel,
+                agent_dir,
+                options,
+                RefinementSource::Auto,
+                model,
+                default_refiner_call(api_key),
+                global_harness_dir,
+            )
+            .await
+            .map(Some)
+        })
     }
 
     /// The serialized arm's compact-trigger round: the review, then only on
@@ -550,6 +843,7 @@ impl AgentSession {
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> anyhow::Result<Option<RefinementResult>> {
+        let cancel = self.refinement_signal();
         let Some(review) = self
             .review_compact_auto_refine(
                 model,
@@ -563,7 +857,7 @@ impl AgentSession {
             return Ok(None);
         };
         Ok(Some(
-            self.run_approved_refine(&review, model, api_key, global_harness_dir)
+            self.run_approved_refine(&review, model, api_key, global_harness_dir, cancel)
                 .await?,
         ))
     }
@@ -576,17 +870,23 @@ impl AgentSession {
         model: &pa_types::ai::Model,
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
+        cancel: pa_agent::abort::AbortSignal,
     ) -> anyhow::Result<RefinementResult> {
         let options = RefineOptions {
             global: false,
             instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
             rollback_id: None,
         };
-        self.refine(
-            &options,
+        run_refinement(
+            self.session.clone(),
+            self.agent.clone(),
+            self.compaction_flight.clone(),
+            cancel,
+            self.agent_dir.clone(),
+            options,
             RefinementSource::Auto,
-            model,
-            api_key,
+            model.clone(),
+            default_refiner_call(api_key),
             global_harness_dir,
         )
         .await
@@ -1012,7 +1312,7 @@ Reviewer instructions: record it"
         .await
         .unwrap_err();
         assert!(
-            error.to_string().contains("audit row not persisted"),
+            error.to_string().contains("audit:"),
             "the audit error surfaces after the durable writes: {error:#}"
         );
         let session_dir = session.lock().await.get_session_dir().to_path_buf();
@@ -1020,15 +1320,16 @@ Reviewer instructions: record it"
             crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
         let state = load_harness_state(&harness_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m9"));
-        // The notice is ordered after the audit rethrow.
         let entries = session.lock().await.get_all_entries().to_vec();
         assert_eq!(session_refinement_history(&entries).len(), 1);
+        assert!(entries.iter().any(|entry| matches!(entry,
+            FileEntry::CustomMessage { payload, .. }
+            if payload.custom_type == REFINEMENT_NOTICE_CUSTOM_TYPE)));
         assert!(
-            !entries.iter().any(
-                |entry| matches!(entry, FileEntry::CustomMessage { payload, .. }
-                    if payload.custom_type == REFINEMENT_NOTICE_CUSTOM_TYPE)
-            ),
-            "the notice is ordered after the audit rethrow in TS"
+            serde_json::to_string(&agent.state().await.messages)
+                .unwrap()
+                .contains(REFINEMENT_NOTICE_CUSTOM_TYPE),
+            "a committed edit remains visible to the model even when its audit write fails"
         );
     }
 

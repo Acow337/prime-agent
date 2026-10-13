@@ -870,6 +870,11 @@ impl SessionEngine {
     /// Tear the kernel down now with a final namespace snapshot, for a host that
     /// ends the session but keeps the engine alive; dropping the engine tears the kernel down too.
     pub async fn dispose_kernel(&self) {
+        self.session
+            .refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock")
+            .abort();
         self.provisioner.dispose(None).await;
     }
 

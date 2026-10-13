@@ -38,7 +38,7 @@ pub(crate) fn run_session_command(
             return None;
         }
     }
-    let execution = match engine.execute_session_command(command) {
+    let mut execution = match engine.execute_session_command(command) {
         Ok(execution) => execution,
         // Pre-execution failures (model resolution, session build) still record the
         // attempted command as a failure result row (the echo row above already went out).
@@ -52,6 +52,7 @@ pub(crate) fn run_session_command(
                 error: Some(error),
                 refinement: None,
                 refinement_failed: None,
+                pending_refinement: None,
             };
             if !emit_compact_end(command, &execution, emit) {
                 return None;
@@ -64,6 +65,12 @@ pub(crate) fn run_session_command(
             return Some(execution);
         }
     };
+    if let Some(pending) = execution.pending_refinement.take() {
+        engine.report_background_refinement(
+            pending,
+            pa_core::session_engine::refine::RefinementSource::User,
+        );
+    }
     // The post-compaction kernel notice goes out between the compaction start
     // and its settled end (the `message_start`/`message_end` pair precedes
     // `compaction_end` on the wire); the worker persists the row with the event.
