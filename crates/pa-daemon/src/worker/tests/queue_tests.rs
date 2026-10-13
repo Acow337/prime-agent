@@ -293,6 +293,7 @@ fn legacy_queue_record_priority_defaults_by_row_and_keeps_order() {
     journal
         .record_queue_snapshot("legacy", &[machine, human, future], &[], false)
         .unwrap();
+    drop(journal);
     let reopened = WorkerRecoveryJournal::open(&path).unwrap();
     let (lane, _, _) = restore_queue_snapshot(&reopened, "legacy");
     assert_eq!(
@@ -355,6 +356,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         )
         .unwrap();
     // A reopen (respawned worker) reads the latest snapshot per session.
+    drop(journal);
     let reloaded = WorkerRecoveryJournal::open(&journal_path).unwrap();
     let (steering, follow_up, _) = restore_queue_snapshot(&reloaded, "session-a");
     assert_eq!(steering.len(), 1);
@@ -369,10 +371,12 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
     assert_eq!(follow_up[0].priority, QueuePriority::Human);
     // Compaction (triggered by an all-idle record) keeps the snapshot
     // with its full rows.
+    drop(reloaded);
     let mut compacting = WorkerRecoveryJournal::open(&journal_path).unwrap();
     compacting
         .record("session-a", "s1", None, false, "idle")
         .unwrap();
+    drop(compacting);
     let compacted = WorkerRecoveryJournal::open(&journal_path).unwrap();
     let (steering, _, _) = restore_queue_snapshot(&compacted, "session-a");
     assert_eq!(steering.len(), 1);
