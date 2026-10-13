@@ -1001,6 +1001,7 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            forced_batch: false,
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal
@@ -1012,6 +1013,7 @@ mod tests {
                 "prompt_accepted",
                 std::slice::from_ref(&item),
                 &[],
+                /*suspended*/ false,
             )
             .unwrap();
         let whole = serde_json::to_string(&WorkerRecoveryRecord {
@@ -1092,8 +1094,11 @@ mod tests {
                 queue_key: None,
                 queue_visible: true,
                 policy: queue_policy_default(),
+                forced_batch: false,
             };
-            journal.record_queue_snapshot("s1", &[item], &[]).unwrap();
+            journal
+                .record_queue_snapshot("s1", &[item], &[], /*suspended*/ false)
+                .unwrap();
             drop(journal);
             let mut bytes = fs::read(&path).unwrap();
             let marker = b"safeXinstruction";
