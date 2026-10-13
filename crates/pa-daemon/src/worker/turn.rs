@@ -466,6 +466,9 @@ impl TurnRunner {
                         if messages.iter().any(|message| {
                             message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                         })
+                ) || matches!(
+                    &event,
+                    EngineEvent::AutoRetryEnd { aborted: true, .. }
                 );
                 let abort_settle = matches!(
                     &event,
