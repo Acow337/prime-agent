@@ -560,8 +560,9 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
         };
         (wake, Some(notify))
     };
-    let on_late_sent_agent_message =
-        node.as_ref().map(crate::print_rlm::late_sent_agent_message_sink);
+    let on_late_sent_agent_message = node
+        .as_ref()
+        .map(crate::print_rlm::late_sent_agent_message_sink);
     HeadlessEmbeddingFields {
         rlm_subagent_host,
         extra_host_handlers,

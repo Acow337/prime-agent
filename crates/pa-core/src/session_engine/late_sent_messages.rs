@@ -120,10 +120,14 @@ pub(crate) async fn record(
             persisted.tool_call_id == tool_call_id && persisted.message.id == message.id
         });
         if !already {
-            let _ = session.append_custom_entry(
+            // The live tool result below is patched regardless: the running
+            // session should show the receipt; only the rebuild loses it.
+            if let Err(error) = session.append_custom_entry(
                 IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_TYPE,
                 Some(sent_agent_message_entry(tool_call_id, message)),
-            );
+            ) {
+                eprintln!("pa-core: late agent-message receipt not persisted: {error:#}");
+            }
         }
     }
     agent
