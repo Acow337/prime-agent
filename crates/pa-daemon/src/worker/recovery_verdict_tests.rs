@@ -6,11 +6,12 @@ use crate::engine::{
 };
 use std::path::Path;
 
-/// Holds the blocking engine thread before it can emit the first durable user
-/// row. The test's async task releases it only after shutdown has closed input.
+/// Holds the engine before the first or second durable user row. Shutdown
+/// closes input before the async test releases the blocking thread.
 struct BeforeUserRowEngine {
     entered: Arc<Notify>,
     captured: std::sync::Mutex<Option<Value>>,
+    boundary: UserRowBoundary,
     release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
@@ -29,6 +30,20 @@ impl SessionEngine for BeforeUserRowEngine {
                 "text": row.text, "images": row.images,
             })).collect::<Vec<_>>(),
         }));
+        if matches!(self.boundary, UserRowBoundary::AfterFirst) {
+            let mut content = vec![json!({ "type": "text", "text": request.message })];
+            content.extend(request.images.iter().map(|image| {
+                json!({
+                    "type": "image", "data": image.data, "mimeType": image.mime_type,
+                })
+            }));
+            assert!(
+                emit(EngineEvent::UserMessage(json!({
+                    "role": "user", "content": content, "timestamp": 1,
+                }))),
+                "the first input must reach the real worker persistence callback"
+            );
+        }
         self.entered.notify_one();
         // Dropping the sender on a failed assertion releases this blocking
         // thread too, so a red test cannot hang the Tokio runtime teardown.
@@ -460,6 +475,21 @@ async fn shutdown_still_acks_when_its_final_verdict_cannot_persist() {
 
 #[tokio::test]
 async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
+    shutdown_preserves_picked_batch(UserRowBoundary::BeforeFirst).await;
+}
+
+#[tokio::test]
+async fn shutdown_after_first_user_row_preserves_the_unaccepted_batch_tail() {
+    shutdown_preserves_picked_batch(UserRowBoundary::AfterFirst).await;
+}
+
+#[derive(Clone, Copy)]
+enum UserRowBoundary {
+    BeforeFirst,
+    AfterFirst,
+}
+
+async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
     let fixture = tempfile::tempdir().unwrap();
     let fixture_dir = fixture.path();
     let worker = worker_with_journal_in(fixture_dir);
@@ -489,7 +519,16 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
                     mime_type: "image/png".to_string(),
                 }],
             ),
-            ("batched second", Vec::new()),
+            (
+                "batched second",
+                match boundary {
+                    UserRowBoundary::BeforeFirst => Vec::new(),
+                    UserRowBoundary::AfterFirst => vec![pa_agent::types::ImageContent {
+                        data: "REVG".to_string(),
+                        mime_type: "image/png".to_string(),
+                    }],
+                },
+            ),
         ] {
             core.steering.push_back(QueuedItem {
                 priority: QueuePriority::Human,
@@ -515,6 +554,7 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
     let engine = Arc::new(BeforeUserRowEngine {
         entered: Arc::new(Notify::new()),
         captured: std::sync::Mutex::new(None),
+        boundary,
         release: std::sync::Mutex::new(release_rx),
     });
     let entered_notify = Arc::clone(&engine.entered);
@@ -550,15 +590,45 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
             core.busy && core.steering.is_empty() && core.follow_up.is_empty(),
             "runner picked the batch"
         );
-        assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
+        assert_eq!(
+            core.store.as_ref().unwrap().message_count(),
+            match boundary {
+                UserRowBoundary::BeforeFirst => 0,
+                UserRowBoundary::AfterFirst => 1,
+            }
+        );
     }
 
+    let tail_images = match boundary {
+        UserRowBoundary::BeforeFirst => json!([]),
+        UserRowBoundary::AfterFirst => json!([{ "data": "REVG", "mimeType": "image/png" }]),
+    };
+    if matches!(boundary, UserRowBoundary::AfterFirst) {
+        let disk_rows: Vec<Value> = std::fs::read_to_string(fixture_dir.join("session.jsonl"))
+            .expect("first input must already be in the physical transcript")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["type"] == "message" && row["message"]["role"] == "user")
+            .map(|row| row["message"].clone())
+            .collect();
+        assert_eq!(
+            disk_rows,
+            vec![json!({
+                "role": "user", "timestamp": 1,
+                "content": [
+                    { "type": "text", "text": "original with image" },
+                    { "type": "image", "data": "QUJD", "mimeType": "image/png" },
+                ],
+            })],
+            "the first-row control proves durable acceptance before shutdown, not inferred text matching"
+        );
+    }
     assert_eq!(
         engine.captured.lock().unwrap().as_ref().unwrap(),
         &json!({
             "message": "original with image",
             "images": [{ "data": "QUJD", "mimeType": "image/png" }],
-            "batch": [{ "text": "batched second", "images": [] }],
+            "batch": [{ "text": "batched second", "images": tail_images }],
         }),
         "the held engine owns the original text, image and batched tail"
     );
@@ -625,6 +695,40 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
     )
     .unwrap()
     .expect("shutdown queue snapshot");
+    let recovered_payloads = if matches!(boundary, UserRowBoundary::AfterFirst) {
+        let mut payloads: Vec<Value> = transcript
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["type"] == "message" && row["message"]["role"] == "user")
+            .map(|row| {
+                let content = row["message"]["content"].as_array().unwrap();
+                let text = content
+                    .iter()
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("");
+                let images: Vec<_> = content
+                    .iter()
+                    .filter(|block| block["type"] == "image")
+                    .map(|block| json!({ "data": block["data"], "mimeType": block["mimeType"] }))
+                    .collect();
+                json!({ "text": text, "images": images })
+            })
+            .collect();
+        payloads.extend(
+            steering
+                .iter()
+                .chain(&follow_up)
+                .filter(|item| item.message != crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT)
+                .map(|item| {
+                    let record = serde_json::to_value(item).unwrap();
+                    json!({ "text": item.message, "images": record.get("images").cloned().unwrap_or_else(|| json!([])) })
+                }),
+        );
+        Some(payloads)
+    } else {
+        None
+    };
     recovered.extend(
         steering
             .into_iter()
@@ -640,6 +744,16 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
             "original with image".to_string(),
             "batched second".to_string(),
         ],
-        "shutdown lost or duplicated the picked batch before the first user row"
+        "shutdown lost or duplicated original input at the held batch boundary"
     );
+    if let Some(payloads) = recovered_payloads {
+        assert_eq!(
+            payloads,
+            vec![
+                json!({ "text": "original with image", "images": [{ "data": "QUJD", "mimeType": "image/png" }] }),
+                json!({ "text": "batched second", "images": [{ "data": "REVG", "mimeType": "image/png" }] }),
+            ],
+            "partial-batch recovery must preserve exact image association without duplicates"
+        );
+    }
 }
