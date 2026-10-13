@@ -177,16 +177,22 @@ pub(super) async fn perform_agent_trace_upload(
     {
         use sha2::{Digest, Sha256};
         use std::fmt::Write as _;
-        let prefix = Sha256::digest(&body.as_bytes()[..offset]).iter().fold(
-            String::new(),
-            |mut output, byte| {
+        let hex = |digest: &[u8]| {
+            digest.iter().fold(String::new(), |mut output, byte| {
                 let _ = write!(output, "{byte:02x}");
                 output
-            },
-        );
+            })
+        };
+        // The server checks the prefix hash and stores the whole one, so it
+        // never reads the stored session back.
+        let mut hasher = Sha256::new();
+        hasher.update(&body.as_bytes()[..offset]);
+        let prefix = hex(&hasher.clone().finalize());
+        hasher.update(tail.as_bytes());
         let mut append_headers = headers.clone();
         append_headers.push(("X-Append-Offset".to_string(), offset.to_string()));
         append_headers.push(("X-Append-Prefix-Sha256".to_string(), prefix));
+        append_headers.push(("X-Append-Sha256".to_string(), hex(&hasher.finalize())));
         let result = fetch_with_retry(
             options,
             &format!("{url}/append"),
