@@ -510,9 +510,10 @@ pub(crate) enum ChildLane {
 
 /// The per-embedding fields both headless builders (the real provider
 /// and the faux script) share: the inline host + agent-message handlers
-/// with the RLM depth, and the background-bash wake both engine seams
-/// fire — the completion row's admission wake and the kernel's
-/// background-settle callback.
+/// with the RLM depth, the background-bash wake both engine seams fire
+/// (the completion row's admission wake and the kernel's
+/// background-settle callback), and the late agent-message receipt sink
+/// print sessions record through.
 pub(crate) struct HeadlessEmbeddingFields {
     pub(crate) rlm_subagent_host:
         Option<Arc<dyn pa_core::session_engine::rlm_host::RlmSubagentHost>>,
@@ -522,6 +523,9 @@ pub(crate) struct HeadlessEmbeddingFields {
     /// The RPC mode's wake handle, carried onto the engine handle so the
     /// queue-pump listener parks on it; `None` outside the RPC embedding.
     pub(crate) rpc_bash_wake: Option<Arc<Notify>>,
+    /// The late fire-and-forget `agent_message.send` receipt sink
+    /// (#10-print); `None` for the RPC embedding (no print node).
+    pub(crate) on_late_sent_agent_message: Option<pa_core::LateSentAgentMessageHandler>,
 }
 
 /// The embedding-owned fields for one headless engine build: print
@@ -556,6 +560,8 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
         };
         (wake, Some(notify))
     };
+    let on_late_sent_agent_message =
+        node.as_ref().map(crate::print_rlm::late_sent_agent_message_sink);
     HeadlessEmbeddingFields {
         rlm_subagent_host,
         extra_host_handlers,
@@ -565,6 +571,7 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
         },
         bash_wake,
         rpc_bash_wake,
+        on_late_sent_agent_message,
     }
 }
 
@@ -753,6 +760,7 @@ pub(crate) async fn build_headless_engine_with(
         rlm_depth,
         bash_wake,
         rpc_bash_wake,
+        on_late_sent_agent_message,
     } = headless_embedding_fields(embedding);
     let (semantic_edges, thinking_level) = match embedding {
         HeadlessEmbedding::Child(overrides) => (
@@ -787,7 +795,7 @@ pub(crate) async fn build_headless_engine_with(
     };
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
-            on_late_sent_agent_message: None,
+            on_late_sent_agent_message,
             cron_store: None,
             semantic_edges,
             telemetry,

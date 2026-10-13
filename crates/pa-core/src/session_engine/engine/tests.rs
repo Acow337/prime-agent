@@ -617,3 +617,117 @@ async fn model_visible_skills_follow_the_embedding_wiring() {
         }
     }
 }
+
+/// A receipt that landed after its cell's tool result persists as a
+/// custom entry; a rebuilt engine patches it onto the tool result (#10).
+#[tokio::test]
+async fn engine_build_restores_late_sent_agent_message_receipts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let sessions = tmp.path().join("sessions");
+    let mut manager = SessionManager::persisted(&cwd, &sessions);
+    // The durable-append rule delays non-assistant rows until the first
+    // assistant entry, so the history needs one to reach the file.
+    manager
+        .append_message(pa_types::session::AgentMessage::Assistant(
+            serde_json::from_value(serde_json::json!({
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "history reply" }],
+                "api": "test",
+                "provider": "test",
+                "model": "m",
+                "usage": {
+                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 0,
+                    "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 }
+                },
+                "stopReason": "stop",
+                "timestamp": 1,
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    manager
+        .append_message(pa_types::session::AgentMessage::ToolResult(
+            pa_types::ai::ToolResultMessage {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "python_repl".to_string(),
+                content: Vec::new(),
+                details: Some(serde_json::json!({ "status": "ok" })),
+                is_error: false,
+                timestamp: 1,
+                rest: pa_types::JsonMap::new(),
+            },
+        ))
+        .unwrap();
+    manager
+        .append_custom_entry(
+            "ipython_sent_agent_message",
+            Some(serde_json::json!({
+                "toolCallId": "call-1",
+                "message": {
+                    "id": "agentmsg_1",
+                    "message": "Ping.",
+                    "deliveryStatus": "delivered",
+                    "receiverRole": "parent",
+                    "target": {
+                        "activeSessionId": "a1",
+                        "sessionId": "s1",
+                        "sessionName": "Worker",
+                    },
+                },
+            })),
+        )
+        .unwrap();
+    let session_file = manager
+        .get_session_file()
+        .expect("the persisted session file")
+        .to_path_buf();
+    let manager = SessionManager::open(&cwd, &sessions, &session_file);
+
+    let model = pa_agent::types::Model {
+        id: "m".into(),
+        name: "m".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 1_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    let engine = create_session(SessionEngineConfig {
+        cwd: cwd.clone(),
+        agent_dir: tmp.path().join("agent"),
+        model: Some(model),
+        stream_fn: Some(provider.stream_fn()),
+        session_manager: Some(manager),
+        daemonless: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let state = engine.session.agent().state().await;
+    let result = state
+        .messages
+        .iter()
+        .find_map(|row| match row {
+            pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(
+                result,
+            )) if result.tool_call_id == "call-1" => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the rebuilt tool result");
+    let details = result.details.as_ref().expect("the tool result details");
+    assert_eq!(details["status"], "ok");
+    let sent = details["sentAgentMessages"]
+        .as_array()
+        .expect("the restored receipt");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["id"], "agentmsg_1");
+    assert_eq!(sent[0]["target"]["sessionName"], "Worker");
+}

@@ -131,10 +131,11 @@ pub(crate) async fn build_faux_engine_with(
         rlm_depth,
         bash_wake,
         rpc_bash_wake,
+        on_late_sent_agent_message,
     } = super::headless_embedding_fields(embedding);
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
-            on_late_sent_agent_message: None,
+            on_late_sent_agent_message,
             cron_store: None,
             // Faux verification harness: no product telemetry.
             semantic_edges: None,

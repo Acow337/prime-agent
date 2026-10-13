@@ -721,6 +721,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         Some(digest_context),
     )
     .await?;
+    // Receipts that landed after their cell's tool result persist as
+    // custom entries; the build patches them onto the rebuilt tool
+    // results (TS `_restoreLateIpythonSentAgentMessages`).
+    super::late_sent_messages::restore(&wiring.session, &agent).await;
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
     session.set_agent_dir(config.agent_dir.clone());
     // Every compaction path reads the session's resolved compaction
@@ -905,6 +909,24 @@ impl SessionEngine {
     /// `skill_use_count` counter counts at the admission, not here.
     pub fn expand_skill_submission(&self, text: &str) -> String {
         crate::skills::expand_skill_command(text, &self.skills).0
+    }
+
+    /// Record one late (fire-and-forget) `agent_message.send` receipt (TS
+    /// `_recordLateIpythonSentAgentMessage`): the receipt persists as a
+    /// custom entry and the newest matching `python_repl` tool result
+    /// carries it in its `sentAgentMessages` details.
+    pub async fn record_late_sent_agent_message(
+        &self,
+        tool_call_id: &str,
+        message: crate::kernel::shared::KernelSentAgentMessage,
+    ) {
+        super::late_sent_messages::record(
+            self.session.session_handle(),
+            self.session.agent(),
+            tool_call_id,
+            &message,
+        )
+        .await;
     }
 
     /// Withdraw the queued goal-context turns: a minted continuation waiting
