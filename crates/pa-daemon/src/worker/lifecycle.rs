@@ -360,6 +360,64 @@ impl Worker {
         Ok(())
     }
 
+    /// `resume_queue`: the queue's queued work resumes (the turn runner
+    /// drains the lanes when idle); the failure string is TS-verbatim for the empty queue.
+    pub(crate) fn handle_resume_queue(&self) -> DaemonResponse {
+        if let Err(response) = self.require_created("resume_queue") {
+            return response;
+        }
+        let had_queued_work = {
+            let mut recovery = self.recovery.lock().unwrap();
+            let mut core = self.core.lock().unwrap();
+            let has_queued_work = !core.steering.is_empty() || !core.follow_up.is_empty();
+            // Persist only the idle parked transition. Active turns have already
+            // picked their inputs out of these lanes; rewriting that snapshot
+            // could erase their original recovery evidence.
+            let checkpoint_idle_resume =
+                core.queued_input_suspended && !core.busy && !core.compacting;
+            if let (true, Some(journal)) = (checkpoint_idle_resume, recovery.as_mut()) {
+                let lanes = crate::worker::queue_lanes(&core);
+                let store = core.store.as_ref();
+                let session_file = store.map(|store| store.path.to_string_lossy().to_string());
+                // Keep pickup and cancellation blocked until this transition
+                // is durable; failure leaves the live suspension unchanged.
+                if let Err(error) = journal.record_queue_checkpoint(
+                    &core.active_session_id,
+                    store.map_or("", crate::session_store::SessionFile::session_id),
+                    session_file.as_deref(),
+                    has_queued_work,
+                    "queue_resumed",
+                    &lanes.steering,
+                    &lanes.follow_up,
+                    /*suspended*/ false,
+                ) {
+                    eprintln!("pa-daemon: queue resume checkpoint failed: {error:#}");
+                    return response_failure(
+                        None,
+                        "resume_queue",
+                        "Could not persist queue resume state",
+                        None,
+                    );
+                }
+            }
+            // Busy, compacting and already-resumed calls retain legacy behavior
+            // without replacing the saved admission snapshot.
+            core.queued_input_suspended = false;
+            has_queued_work
+        };
+        // Only effects run after unlock; a concurrent later abort must not have
+        // its suspension cleared again here.
+        self.wake_queued_input();
+        let has_queued_work = had_queued_work || {
+            let core = self.core.lock().unwrap();
+            !core.steering.is_empty() || !core.follow_up.is_empty()
+        };
+        if !has_queued_work {
+            return response_failure(None, "resume_queue", "No queued work to resume", None);
+        }
+        response_success(None, "resume_queue", None)
+    }
+
     /// Clear the queued-input suspension and wake the turn runner so parked
     /// lanes drain; an owed continuation re-evaluates here too.
     pub(crate) fn resume_queued_input(&self) {
