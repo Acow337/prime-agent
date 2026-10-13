@@ -161,7 +161,52 @@ pub(super) async fn perform_agent_trace_upload(
         base_url,
         encode_uri_component(&header.id)
     );
-    let response = match fetch_with_retry(options, &url, headers, body, before_request).await {
+    // The recorded upload is the server's copy: while the file still extends
+    // it, send only the tail. The server answers 409 unless its copy is that
+    // prefix (404 before it took appends); any refusal but a rate limit sends
+    // the whole file instead.
+    let mut appended = None;
+    if let Some((offset, tail)) = read_agent_trace_outbox_entry(options.agent_dir, session_file)
+        .and_then(|uploaded| usize::try_from(uploaded.size).ok())
+        .filter(|&offset| offset > 0)
+        .and_then(|offset| {
+            body.get(offset..)
+                .filter(|tail| !tail.is_empty())
+                .map(|tail| (offset, tail))
+        })
+    {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+        let prefix = Sha256::digest(&body.as_bytes()[..offset]).iter().fold(
+            String::new(),
+            |mut output, byte| {
+                let _ = write!(output, "{byte:02x}");
+                output
+            },
+        );
+        let mut append_headers = headers.clone();
+        append_headers.push(("X-Append-Offset".to_string(), offset.to_string()));
+        append_headers.push(("X-Append-Prefix-Sha256".to_string(), prefix));
+        let result = fetch_with_retry(
+            options,
+            &format!("{url}/append"),
+            append_headers,
+            tail.to_string(),
+            before_request,
+        )
+        .await;
+        if !result
+            .as_ref()
+            .is_ok_and(|response| !(200..300).contains(&response.status) && response.status != 429)
+        {
+            appended = Some(result);
+        }
+    }
+    let result = match appended {
+        Some(result) => result,
+        None => fetch_with_retry(options, &url, headers, body, before_request).await,
+    };
+    let response = match result {
         Ok(response) => response,
         Err(error) => {
             return TraceUploadResult::Failed {
@@ -181,7 +226,13 @@ pub(super) async fn perform_agent_trace_upload(
     let response_data: Option<Value> = serde_json::from_str(&response.body)
         .ok()
         .filter(|data: &Value| data.is_object());
-    if let Err(error) = record_agent_trace_outbox_upload(options.agent_dir, session_file, signature)
+    // The server now holds the bytes read, not the size stat saw before the
+    // read: the next append continues from there.
+    let uploaded = TraceUploadSignature {
+        size: body_bytes,
+        ..signature
+    };
+    if let Err(error) = record_agent_trace_outbox_upload(options.agent_dir, session_file, uploaded)
     {
         return TraceUploadResult::Failed {
             status_code: None,
