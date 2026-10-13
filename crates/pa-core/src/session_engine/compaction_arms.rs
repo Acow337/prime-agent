@@ -6,6 +6,21 @@ use super::{
 };
 
 impl AgentSession {
+    /// Cancel speculative compaction without waiting for the foreground turn or
+    /// session lock. A subsequent boundary may start a fresh cancellation epoch.
+    /// Normal turn completion deliberately does not call this method.
+    ///
+    /// # Panics
+    /// Panics if the background cancellation lock is poisoned.
+    pub fn abort_background_compaction(&self) {
+        let mut controller = self
+            .background_compaction_abort
+            .lock()
+            .expect("background compaction abort lock");
+        controller.abort();
+        *controller = pa_agent::abort::AbortController::new();
+    }
+
     pub async fn latest_compaction_timestamp(&self) -> Option<u64> {
         let state = self.agent.state().await;
         state
@@ -67,6 +82,9 @@ impl AgentSession {
         summary: &crate::session_engine::compact_session::BackgroundSummary,
         relief_model: &pa_types::ai::Model,
     ) -> bool {
+        if summary.abort.is_aborted() {
+            return false;
+        }
         let (context_window, max_output_tokens) = self.relief_limits(relief_model).await;
         let settings = self.compaction_settings();
         let session = self.session.lock().await;
@@ -88,7 +106,18 @@ impl AgentSession {
         summarizer_model: &pa_types::ai::Model,
         api_key: Option<String>,
     ) -> bool {
-        match self.context_pressure(run_model).await {
+        // Capture before the first await: Stop during pressure/prepare must
+        // cancel this consult too, rather than create work in the new epoch.
+        let signal = self
+            .background_compaction_abort
+            .lock()
+            .expect("background compaction abort lock")
+            .signal();
+        let pressure = self.context_pressure(run_model).await;
+        if signal.is_aborted() {
+            return false;
+        }
+        match pressure {
             compaction::ContextPressure::Reserve => true,
             compaction::ContextPressure::Background => {
                 // The band never blocks: every consult resolves a finished
@@ -129,7 +158,7 @@ impl AgentSession {
                 if due {
                     true
                 } else {
-                    self.start_background_compaction(summarizer_model, api_key)
+                    self.start_background_compaction_with_signal(summarizer_model, api_key, signal)
                         .await;
                     false
                 }
@@ -140,11 +169,30 @@ impl AgentSession {
 
     /// Start the background watermark's summarize; a no-op while the flight or
     /// the slot is held.
+    #[cfg(test)]
     pub(crate) async fn start_background_compaction(
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
     ) {
+        let signal = self
+            .background_compaction_abort
+            .lock()
+            .expect("background compaction abort lock")
+            .signal();
+        self.start_background_compaction_with_signal(model, api_key, signal)
+            .await;
+    }
+
+    async fn start_background_compaction_with_signal(
+        &self,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        signal: pa_agent::abort::AbortSignal,
+    ) {
+        if signal.is_aborted() {
+            return;
+        }
         let Ok(mut slot) = self.compaction_flight.try_lock() else {
             return;
         };
@@ -160,7 +208,7 @@ impl AgentSession {
                 api_key: api_key.clone(),
                 custom_instructions: None,
                 settings,
-                abort: None,
+                abort: Some(&signal),
                 harness_digest: None,
                 auxiliary: self.auxiliary_model.as_ref(),
                 summary_delta: None,
@@ -183,16 +231,19 @@ impl AgentSession {
                 api_key,
                 custom_instructions: None,
                 settings,
-                abort: None,
+                abort: Some(&signal),
                 harness_digest,
                 auxiliary: auxiliary.as_ref(),
                 summary_delta: None,
                 semantic_edges,
             };
-            let prepared =
-                crate::session_engine::compact_session::summarize_attempt(&attempt, &options)
-                    .await?;
+            let prepared = pa_agent::abort::race_with_abort(
+                crate::session_engine::compact_session::summarize_attempt(&attempt, &options),
+                &signal,
+            )
+            .await??;
             Ok(crate::session_engine::compact_session::BackgroundSummary {
+                abort: signal,
                 attempt,
                 prepared,
                 summarize_ms: started_at.elapsed().as_millis() as u64,
@@ -468,6 +519,7 @@ impl AgentSession {
                     joined = None;
                 }
             }
+            let background_abort = joined.as_ref().map(|summary| summary.abort.clone());
             let (mut attempt, prepared, duration_ms) = if let Some(summary) = joined {
                 (summary.attempt, summary.prepared, summary.summarize_ms)
             } else {
@@ -506,6 +558,7 @@ impl AgentSession {
             };
             let committed = {
                 let mut session = self.session.lock().await;
+                pa_agent::abort::throw_if_aborted_signal(background_abort.as_ref())?;
                 crate::session_engine::compact_session::commit_attempt(
                     &mut session,
                     &mut attempt,

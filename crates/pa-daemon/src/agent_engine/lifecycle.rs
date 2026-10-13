@@ -141,6 +141,7 @@ impl AgentSessionEngine {
             goal_backoff_wake_job_id: std::sync::Mutex::new(None),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
+            compaction_session: std::sync::Mutex::default(),
             queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
             background_bash_probe: std::sync::Mutex::new(None),
@@ -255,7 +256,12 @@ impl AgentSessionEngine {
         }
         let built = self.build_session(model).await?;
         self.adopt_built_session(&built).await?;
-        self.session.lock().await.replace(Arc::new(built));
+        let built = Arc::new(built);
+        *self
+            .compaction_session
+            .lock()
+            .expect("compaction session lock") = Arc::downgrade(&built);
+        self.session.lock().await.replace(built);
         Ok(())
     }
 
@@ -627,6 +633,10 @@ impl AgentSessionEngine {
         *self.goal_runtime.lock().expect("goal runtime lock") = None;
         *self.progress_notes.lock().expect("progress notes lock") = None;
         *self.turn_agent.lock().expect("turn agent lock") = None;
+        *self
+            .compaction_session
+            .lock()
+            .expect("compaction session lock") = std::sync::Weak::new();
         *self
             .autonomous_boundary
             .lock()

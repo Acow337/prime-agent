@@ -766,3 +766,38 @@ async fn a_larger_output_budget_rejects_a_prepared_background_join() {
     assert_eq!(compaction_rows(&engine).await, 1);
     summarizer.registration.unregister();
 }
+
+/// A Stop during PREPARE must not let that old boundary create a new request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_during_background_prepare_never_starts_the_provider() {
+    use std::future::Future as _;
+    use std::task::Poll;
+
+    let (engine, _tmp) = held_engine(true, 3).await;
+    let summarizer = held_summarizer(0, vec![follow_up("must not be requested")]);
+    let before = engine.entries().await;
+    let guard = engine.session.lock().await;
+    let mut start = Box::pin(engine.start_background_compaction(&summarizer.model, None));
+    std::future::poll_fn(|cx| {
+        assert!(start.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    engine.abort_background_compaction();
+    drop(guard);
+    start.await;
+    let flight = engine.compaction_flight.lock().await.take();
+    let Some(super::BackgroundFlight::Summarizing(handle)) = flight else {
+        panic!("the prepared task should observe its cancelled epoch");
+    };
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+        .await
+        .expect("cancelled task must settle")
+        .expect("task joins");
+    assert!(pa_agent::abort::is_abort_error(
+        &outcome.err().expect("cancelled task")
+    ));
+    assert_eq!(summarizer.registration.call_count(), 0);
+    assert_eq!(engine.entries().await, before);
+    summarizer.registration.unregister();
+}

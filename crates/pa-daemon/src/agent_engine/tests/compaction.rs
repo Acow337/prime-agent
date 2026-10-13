@@ -1783,6 +1783,8 @@ fn stop_cancels_a_held_background_summary_and_allows_a_fresh_flight() {
     let before = engine.runtime.block_on(core.session.entries());
     engine.abort_in_flight_turn();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // These explicit consults simulate a later admitted turn. Stop itself
+    // only cancels; it must not schedule replacement work.
     while registration.call_count() < 4 {
         assert!(!engine
             .runtime

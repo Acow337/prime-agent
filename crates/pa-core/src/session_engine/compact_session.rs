@@ -145,6 +145,7 @@ pub(crate) struct PreparedCompaction {
 }
 
 pub(crate) struct BackgroundSummary {
+    pub(crate) abort: pa_agent::abort::AbortSignal,
     pub(crate) attempt: CompactionAttempt,
     pub(crate) prepared: PreparedCompaction,
     pub(crate) summarize_ms: u64,

@@ -144,6 +144,8 @@ pub struct AgentSessionEngine {
     /// The live agent handle: the eager turn-abort funnel's target, mirrored
     /// because a running turn holds the core session's mutex.
     pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
+    /// Stop reaches speculative compaction even while a turn owns `session`.
+    pub(crate) compaction_session: std::sync::Mutex<std::sync::Weak<CoreSessionEngine>>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
     /// Whether the settled turn parked: the park's pause, not the goal's death.
     pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,

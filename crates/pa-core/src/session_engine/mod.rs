@@ -175,6 +175,8 @@ pub struct AgentSession {
     /// keep using the session lock meanwhile; its slot holds the
     /// background summarize.
     compaction_flight: tokio::sync::Mutex<Option<BackgroundFlight>>,
+    /// Explicit Stop cancels this epoch independently of the foreground turn.
+    background_compaction_abort: std::sync::Mutex<pa_agent::abort::AbortController>,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
@@ -262,6 +264,7 @@ impl AgentSession {
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
             compaction_flight: tokio::sync::Mutex::new(None),
+            background_compaction_abort: std::sync::Mutex::default(),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
