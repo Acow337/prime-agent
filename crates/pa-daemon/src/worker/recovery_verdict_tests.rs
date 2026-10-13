@@ -8,6 +8,8 @@ use crate::engine::{
 };
 use std::path::Path;
 
+mod cancellation;
+
 /// Holds the engine before the first or second durable user row. Shutdown
 /// closes input before the async test releases the blocking thread.
 struct BeforeUserRowEngine {
