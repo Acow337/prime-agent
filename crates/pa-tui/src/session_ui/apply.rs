@@ -1114,9 +1114,15 @@ impl SessionUi {
                         is_error: true,
                     });
                 }
-                // A streamed partial keeps its output; either way the card
-                // closes: terminal (non-partial), the freeze instant, and
-                // the aborted stamp that blocks late end frames.
+                // A streamed partial keeps its output, but the card
+                // still closes as an ERROR: the turn cut the call off,
+                // so a terminal Done check would dress an interrupted
+                // call up as a success. Either way the card closes —
+                // terminal (non-partial), the freeze instant, and the
+                // aborted stamp that blocks late end frames.
+                if let Some(result) = card.result.as_mut() {
+                    result.is_error = true;
+                }
                 card.result_partial = false;
                 if let Some(result) = card.result.as_mut() {
                     if result.details.is_null() {

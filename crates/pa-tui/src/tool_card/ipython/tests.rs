@@ -326,6 +326,26 @@ fn background_shell_duration_label_and_exit() {
 }
 
 #[test]
+fn aborted_cell_never_renders_done_from_a_stale_exit_code() {
+    // The settle shape: a straggler's kept partial carries a background
+    // shell that already exited 0, but the aborted stamp is the truth —
+    // the turn cut the call off, so the summary renders the aborted
+    // marker, never the success checkmark.
+    let code = "h = bash('sleep 0.1')";
+    let details = json!({
+        "status": "ok",
+        "durationMs": 12,
+        "result": "<BashHandle pid=421 exit_code=0 command='sleep 0.1'>",
+    });
+    let mut card = cell_card(code, details, false, false);
+    card.aborted = true;
+    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    let text = text_of(&lines[0]);
+    assert!(text.contains("\u{2717}"), "got: {text}");
+    assert!(!text.contains("\u{2713}"), "got: {text}");
+}
+
+#[test]
 fn partial_cell_shows_waiting_for_output() {
     let card = cell_card("print(2)", json!({ "status": "ok" }), false, true);
     let lines = render(&card, 0, Detail::All, &theme(), 100, true);

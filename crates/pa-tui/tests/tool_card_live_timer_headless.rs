@@ -185,6 +185,25 @@ impl MockSupervisor {
                                     "ipython",
                                     &json!({ "code": "print('x')" }),
                                 );
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                // The cell streams a partial before the turn
+                                // cuts it off: the settle keeps the streamed
+                                // output but must still close the card as an
+                                // ERROR — an unfinished cell never renders
+                                // the success checkmark.
+                                event(
+                                    &mut w,
+                                    &json!({
+                                        "type": "tool_execution_update",
+                                        "toolCallId": "call_1",
+                                        "partialResult": {
+                                            "content": [{
+                                                "type": "text",
+                                                "text": "streamed cell output",
+                                            }],
+                                        },
+                                    }),
+                                );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
                                 event(&mut w, &json!({ "type": "turn_end" }));
                                 drain_barrier(&mut w);

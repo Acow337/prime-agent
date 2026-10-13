@@ -39,6 +39,13 @@ enum CardStatus {
 
 impl CardStatus {
     fn of(card: &ToolCallCard, details: &IpythonDetails) -> CardStatus {
+        // An interrupted cell never renders as a success: a settled
+        // straggler's kept partial can still carry a background shell
+        // whose exit code reads Done, and the aborted stamp is the
+        // truth the exit code never saw.
+        if card.aborted {
+            return CardStatus::Aborted;
+        }
         let result = card.result.as_ref();
         let is_error = result.is_some_and(|r| r.is_error);
         if !card.result_partial {
