@@ -238,8 +238,16 @@ pub struct Supervisor {
     /// such wake - tests use it as the fence's observable readiness.
     #[cfg(all(test, unix))]
     pub(crate) fence_at_gate: tokio::sync::Notify,
+    /// The socket lease's ownership probe for the spawned housekeeping
+    /// passes (the archive sweep): the lease itself stays in `run` (its
+    /// release choreography is consumed there), but the sweep's
+    /// destructive commit re-asserts the lease's no-grace compromise
+    /// verdict under the reclaim-sidecar exclusion through this probe.
+    /// Set once by `run` right after the lease acquire (the immutable
+    /// `Arc<Supervisor>` is shared with the spawned boot tasks).
+    #[cfg(unix)]
+    pub(crate) sweep_lease_probe: std::sync::OnceLock<std::sync::Arc<crate::socket::LeaseProbe>>,
 }
-
 
 /// Register a boot pass in the shared slot. Every spawn registers in
 /// its own step (no await between the spawn and the registration), so
@@ -318,6 +326,8 @@ impl Supervisor {
             owner_cleanup_timers: std::sync::Mutex::new(Vec::new()),
             #[cfg(all(test, unix))]
             fence_at_gate: tokio::sync::Notify::new(),
+            #[cfg(unix)]
+            sweep_lease_probe: std::sync::OnceLock::new(),
         })
     }
 
@@ -379,24 +389,58 @@ impl Supervisor {
         lease_lost
     }
 
-    /// The lease-loss fence: with the flags already up, EVERY tracked
-    /// handle - owner-cleanup timers AND boot passes - is aborted FIRST
-    /// (a handle caught in an unpreemptible step must not strand the
-    /// other handles' aborts behind its join), and only then are the
-    /// joins awaited. The stop gate runs last: stop transitions already
-    /// past their final recheck complete their durable persist before
-    /// the lease can release, and every later stop is refused at the
-    /// gate (the flags are already up).
+    /// The lease-loss fence: with the flags already up, the BOOT passes
+    /// (archive sweep, adoption fan-out, restore, warmup, watchdog) are
+    /// aborted FIRST - they must not act against a successor while the
+    /// fence proceeds. A Tokio abort CANCELS the task at its next
+    /// poll/await point - it cannot stop an already-executing
+    /// synchronous step mid-syscall - so the sweep's protection is its
+    /// own guard boundaries, not the abort: every candidate re-asks the
+    /// flags, and the destructive commit additionally re-asserts the
+    /// lease's no-grace compromise verdict under the reclaim-sidecar
+    /// exclusion (a COMPLIANT successor cannot displace the lock while
+    /// the exclusion is held). An in-flight synchronous step may
+    /// finish, but a PENDING commit - parked at the sidecar
+    /// acquisition, or refused under it - never lands: the guard
+    /// re-asserts and refuses at the next boundary, the staged copy
+    /// (if any) unwinds through its RAII drop, and the abort cancels
+    /// the task at its next poll. The stop gate runs next: an owner-cleanup timer
+    /// already past its final recheck completes its durable tombstone
+    /// persist before that timer is aborted and the lease can release,
+    /// and every later stop is refused at the gate recheck (the flags
+    /// are already up). A boot task's own in-flight stop is cancelled
+    /// by the immediate boot abort - the interrupted-stop residual the
+    /// next boot retries.
     #[cfg(unix)]
     async fn lease_loss_fence(&self, boot_tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
-        // The stop gate runs FIRST: a stop transition that already
+        // The BOOT passes die FIRST: the archive sweep, adoption
+        // fan-out, and restore pass must not act against a successor
+        // while the fence waits - their aborts land before the gate
+        // wait begins, so no ownership work outlives the fence's gate
+        // hold. A Tokio abort CANCELS a task at its next poll/await
+        // point - it cannot stop an in-flight synchronous step - so
+        // the sweep's real protection is its own guard boundaries (the
+        // per-candidate flag re-ask and the commit-time sidecar
+        // exclusion); an in-flight synchronous step may finish, but a
+        // pending commit re-asserts and refuses at the next guard
+        // boundary (a staged copy unwinds through its RAII drop), and
+        // the abort cancels the loop before any later candidate.
+        for task in boot_tasks.iter() {
+            task.abort();
+        }
+        // The stop gate follows: an owner-cleanup TIMER that already
         // passed its final recheck holds this gate across its durable
-        // tombstone persist - aborting its timer task before the gate
-        // would CANCEL the mid-await persist and leave the tombstone
-        // unwritten (an admitted stop's durable intent must land before
-        // the lease releases). Waiting for the gate lets the in-flight
+        // tombstone persist - aborting that timer task mid-persist
+        // would CANCEL the write and leave the tombstone unwritten (an
+        // admitted stop's durable intent must land before the lease
+        // releases). Waiting for the gate lets the in-flight timer
         // persist complete; every stop attempt that starts after the
-        // flags went up is refused at the gate's recheck.
+        // flags went up is refused at the gate's recheck. A boot
+        // task's own in-flight stop is cancelled by the abort above -
+        // the same immediate teardown its whole pass already takes at
+        // lease loss, the interrupted-stop residual the next boot
+        // retries - while the TIMERS (whose aborts wait behind the
+        // gate) keep the v15 tombstone protection.
         let admission = self.stop_admission.lock().await;
         let timers: Vec<_> = self
             .owner_cleanup_timers
@@ -407,14 +451,11 @@ impl Supervisor {
         for timer in &timers {
             timer.abort();
         }
-        for task in boot_tasks.iter() {
-            task.abort();
+        for task in boot_tasks.drain(..) {
+            let _ = task.await;
         }
         for timer in timers {
             let _ = timer.await;
-        }
-        for task in boot_tasks.drain(..) {
-            let _ = task.await;
         }
         #[cfg(all(test, unix))]
         self.fence_at_gate.notify_waiters();
@@ -498,6 +539,17 @@ impl Supervisor {
         socket::prepare_socket_path(&self.options.socket_path).await?;
         #[cfg(unix)]
         socket_lease.assert_held_async().await?;
+        // Hand the spawned housekeeping passes (the archive sweep) the
+        // lease's ownership probe: they re-assert the no-grace
+        // compromise verdict under the reclaim-sidecar exclusion at
+        // every destructive commit, while the lease itself stays here
+        // for its release choreography.
+        #[cfg(unix)]
+        {
+            let _ = self
+                .sweep_lease_probe
+                .set(std::sync::Arc::new(socket_lease.probe()));
+        }
         let listener = bind_transport(&self.options.socket_path)
             .await
             .with_context(|| {

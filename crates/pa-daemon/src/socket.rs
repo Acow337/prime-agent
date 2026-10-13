@@ -4,6 +4,8 @@
 //! differ only in the implementation module.
 
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -271,6 +273,23 @@ impl SocketLease {
         self.path_lost()
     }
 
+    /// A Send + 'static ownership probe for spawned housekeeping passes
+    /// (the archive sweep): the lease's own no-grace compromise verdict
+    /// and its reclaim-sidecar exclusion, WITHOUT sharing the lease or
+    /// its release choreography. The supervisor hands this to the boot
+    /// tasks that must reassert ownership at their destructive steps;
+    /// the probe sees exactly what the lease sees - the monitor's
+    /// compromise flag is a shared atomic and the identity check reads
+    /// the live lock path.
+    #[cfg(unix)]
+    pub(crate) fn probe(&self) -> LeaseProbe {
+        LeaseProbe {
+            flag: std::sync::Arc::clone(&self.compromised),
+            lock_path: self.lock_path.clone(),
+            identity: self.identity.clone(),
+        }
+    }
+
     /// The reclaim-sidecar exclusion for this lease's lock: held across a
     /// destructive pass (the boot reap), it excludes every COMPLIANT
     /// successor - a judge or reclaim dance must hold this same sidecar
@@ -359,6 +378,34 @@ impl SocketLease {
             ));
         }
         if self.compromised_after_grace() {
+            return Err(anyhow!(
+                "Daemon socket lease for {} was compromised",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// The exit-cleanup fence: the compromise verdict WITHOUT the
+    /// displacement grace (the flag OR a plain path-loss stat - no
+    /// thread sleep). The lease's own monitors - the refresh thread,
+    /// the serving select's `wait_compromised` arm, the fence - all wait
+    /// the grace asynchronously BEFORE the exit cleanup runs, so a
+    /// displacement still standing here is a compromise already past
+    /// its grace or a takeover mid-flight; the cleanup's fail-closed
+    /// answer (leave the successor's socket untouched) is the same
+    /// either way, and this method runs on a Tokio worker where the
+    /// grace's `thread::sleep` would stall every task on it
+    /// (`signal_drain`, catalog refresh) - the stall the async fence
+    /// exists to avoid. The only caller is the supervisor's exit path.
+    fn assert_path_held_without_grace(&self, path: &Path) -> Result<()> {
+        if path != self.socket_path {
+            return Err(anyhow!(
+                "Daemon socket lease does not match {}",
+                path.display()
+            ));
+        }
+        if self.compromised() {
             return Err(anyhow!(
                 "Daemon socket lease for {} was compromised",
                 path.display()
@@ -475,14 +522,14 @@ impl SocketLease {
     /// preserves the path, and the next bind's stale-socket prepare
     /// cleans a file nothing serves).
     pub fn cleanup_socket_path(&self, path: &Path, expected: Option<SocketIdentity>) {
-        if self.assert_path_held(path).is_err() {
+        if self.assert_path_held_without_grace(path).is_err() {
             return;
         }
         let Some(expected) = expected else { return };
         if socket_identity(path) != Some(expected.clone()) {
             return;
         }
-        if self.assert_path_held(path).is_err() {
+        if self.assert_path_held_without_grace(path).is_err() {
             return;
         }
         // The claim-probe-remove choreography is Linux-only: only there
@@ -497,7 +544,9 @@ impl SocketLease {
                 // claim name could be found.
                 return;
             };
-            if socket_identity(&claim) == Some(expected) && self.assert_path_held(path).is_ok() {
+            if socket_identity(&claim) == Some(expected)
+                && self.assert_path_held_without_grace(path).is_ok()
+            {
                 // The claimed inode is this holder's own. It is removed
                 // only on a definitely-closed verdict probed through the
                 // private pathname - the claim cannot be swapped from
@@ -957,6 +1006,51 @@ fn lock_identity_matches(path: &Path, expected: &SocketIdentity) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| {
         metadata.file_type().is_dir() && metadata_identity(&metadata) == *expected
     })
+}
+
+/// A Send + 'static ownership probe for a spawned housekeeping pass
+/// (the archive sweep): the lease's no-grace compromise verdict and its
+/// reclaim-sidecar exclusion, without the lease itself. See
+/// [`SocketLease::probe`].
+#[cfg(unix)]
+pub(crate) struct LeaseProbe {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    lock_path: PathBuf,
+    identity: SocketIdentity,
+}
+
+#[cfg(unix)]
+impl LeaseProbe {
+    /// The same no-grace verdict as [`SocketLease::compromised`]: the
+    /// monitor's cached compromise flag OR the live lock path no longer
+    /// naming the lease's pinned inode. A takeover that displaces the
+    /// lock directory trips this on the very next poll - the 250ms
+    /// displacement grace never runs here.
+    #[must_use]
+    pub(crate) fn compromised(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Acquire)
+            || !lock_identity_matches(&self.lock_path, &self.identity)
+    }
+
+    /// The same reclaim-sidecar exclusion as
+    /// [`SocketLease::hold_reclaim_exclusion`], with the acquisition on
+    /// a blocking thread. `Ok(None)` means the budget expired (a
+    /// suspended dance holds the sidecar); `Err` means the acquisition
+    /// task itself failed. Callers fail closed on both.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn hold_reclaim_exclusion(
+        &self,
+        budget: Duration,
+    ) -> anyhow::Result<Option<std::fs::File>> {
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            pa_core::platform::try_reclaim_guard(&lock_path, budget)
+        })
+        .await
+        .map_err(|join_error| {
+            anyhow::anyhow!("the reclaim-exclusion acquisition task failed: {join_error:#}")
+        })
+    }
 }
 
 /// Remove a stale socket file after verifying nothing is listening.
@@ -2156,5 +2250,43 @@ mod tests {
                 .map(std::fs::DirEntry::file_name)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn exit_cleanup_does_not_stall_the_runtime_with_a_displacement_grace() {
+        // Red-first regression for the exit-cleanup stall: a lease whose
+        // lock directory is displaced (path lost, refresh flag unset) is
+        // skipped by the cleanup WITHOUT the 250ms displacement-grace
+        // thread sleep - the grace was already waited by the async fence
+        // before the exit cleanup runs, and the cleanup runs on a Tokio
+        // worker where the sleep stalls every task on that worker.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        std::fs::write(&socket, "stale").unwrap();
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        std::fs::rename(&lock_path, dir.path().join("displaced.lock")).unwrap();
+        assert!(!lease.compromised.load(std::sync::atomic::Ordering::Acquire));
+        // Oracle: cleanup_socket_path is a SYNC call, so its duration
+        // is measured directly around the call - no spawned tasks, no
+        // timers, no scheduler interleavings: the witness is the call's
+        // own wall time. With the no-grace fence the displaced-lease
+        // cleanup is two stats and a compare - microseconds. With the
+        // grace fence restored (the RED) the call takes the FIXED
+        // 250ms thread sleep (a deterministic lower bound, not a
+        // race); the 100ms bound sits at 2.5x the grace and ~1000x
+        // the GREEN, so a CI deschedule cannot false-fail the GREEN
+        // and cannot rescue the RED.
+        let started = std::time::Instant::now();
+        lease.cleanup_socket_path(&socket, socket_identity(&socket));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "the cleanup call took {elapsed:?} - the displacement grace slept the calling worker"
+        );
+        // The lease is consumed through the supervisor's own exit path
+        // (never dropped on the worker, never forgotten and leaked):
+        // the awaited shutdown runs the release on a blocking thread.
+        lease.shutdown().await.expect("the lease shutdown");
     }
 }
