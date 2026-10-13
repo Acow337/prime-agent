@@ -113,6 +113,9 @@ impl AgentSession {
     /// Consult a boundary that may itself be cancelled before it begins.
     /// The host aborts this signal before cancelling the background epoch,
     /// so a stopped boundary cannot acquire work in the replacement epoch.
+    ///
+    /// # Panics
+    /// Panics if the background cancellation lock is poisoned.
     pub async fn auto_compaction_now_with_abort(
         &self,
         run_model: &pa_types::ai::Model,
