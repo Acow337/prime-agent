@@ -476,3 +476,144 @@ async fn create_session_appends_missing_resume_settings_rows() {
         "entries: {entries:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The model-visible surface follows the wired host handlers (#8) and the
+// late agent-message receipts restore onto rebuilt tool results (#10).
+// ---------------------------------------------------------------------------
+
+use crate::session_engine::runtime_wiring::KernelCronWiring;
+
+/// Host handlers for the wire names the skill packages send: named
+/// no-ops are all the registry filter keys on.
+fn handlers(names: &[&str]) -> crate::kernel::shared::HostRequestHandlers {
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    for name in names {
+        handlers.register(
+            *name,
+            crate::kernel::shared::host_handler(|_payload| {
+                Box::pin(async { Ok(serde_json::Value::Null) })
+            }),
+        );
+    }
+    handlers
+}
+
+fn cron_wiring(dir: &std::path::Path) -> KernelCronWiring {
+    KernelCronWiring {
+        store: std::sync::Arc::new(crate::cron::store::AgentCronJobStore::new(
+            dir.join("jobs.json"),
+        )),
+        binding: None,
+        mutation_hook: None,
+    }
+}
+
+async fn engine_over(
+    extra_host_handlers: Option<crate::kernel::shared::HostRequestHandlers>,
+    cron_store: Option<KernelCronWiring>,
+    daemonless: bool,
+) -> (SessionEngine, tempfile::TempDir) {
+    let model = pa_agent::types::Model {
+        id: "m".into(),
+        name: "m".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 1_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let engine = create_session(SessionEngineConfig {
+        cron_store,
+        cwd: cwd.clone(),
+        agent_dir: tmp.path().join("agent"),
+        model: Some(model),
+        stream_fn: Some(provider.stream_fn()),
+        extra_host_handlers,
+        daemonless,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    (engine, tmp)
+}
+
+fn prompt_lists_skill(engine: &SessionEngine, name: &str) -> bool {
+    engine
+        .system_prompt
+        .contains(&format!("<name>{name}</name>"))
+}
+
+fn kernel_skill_imports(engine: &SessionEngine) -> Vec<String> {
+    engine
+        .provisioner
+        .python_skills()
+        .iter()
+        .map(|skill| skill.import_name.clone())
+        .collect()
+}
+
+/// One model-visible surface per embedding, keyed on the wired host
+/// handlers (#8): the prompt and the kernel pre-import list only the
+/// skills whose host requests registered. Print wires the messaging
+/// handlers, RPC none, the daemon shape all three (its cron wiring also
+/// serves the heartbeat requests).
+#[tokio::test]
+async fn model_visible_skills_follow_the_embedding_wiring() {
+    let all = ["agent-message", "agent-observe", "rlm-heartbeat"];
+    let imports_of = [
+        ("agent-message", "agent_message"),
+        ("agent-observe", "agent_observe"),
+        ("rlm-heartbeat", "rlm_heartbeat"),
+    ];
+    let cron_dir = tempfile::tempdir().unwrap();
+    let daemon_cron = Some(cron_wiring(cron_dir.path()));
+    let cases = [
+        (
+            "print",
+            &["agent_message.send"][..],
+            None,
+            true,
+            &["agent-message"][..],
+        ),
+        ("rpc", &[][..], None, true, &[][..]),
+        (
+            "daemon",
+            &[
+                "agent_message.send",
+                "agent_observe.list",
+                "rlm_heartbeat.create",
+            ][..],
+            daemon_cron.clone(),
+            false,
+            &["agent-message", "agent-observe", "rlm-heartbeat"][..],
+        ),
+    ];
+    for (label, wired, cron, daemonless, visible) in cases {
+        let (engine, _tmp) = engine_over(Some(handlers(wired)), cron, daemonless).await;
+        // The bundled fixtures loaded at all.
+        assert!(prompt_lists_skill(&engine, "compact"), "{label}");
+        for skill in all {
+            assert_eq!(
+                prompt_lists_skill(&engine, skill),
+                visible.contains(&skill),
+                "{label}: {skill}"
+            );
+        }
+        let imports = kernel_skill_imports(&engine);
+        for (skill, import) in imports_of {
+            assert_eq!(
+                imports.iter().any(|name| name == import),
+                visible.contains(&skill),
+                "{label}: {import}"
+            );
+        }
+    }
+}

@@ -190,6 +190,33 @@ pub fn wire_session_runtime(
     }
 }
 
+/// Bundled skills whose kernel host requests are controller-backed: the
+/// skill is model-visible only when its host request is registered (the
+/// registry decides, like TS `_modelVisibleSkills` reads its controllers).
+const CONTROLLER_BACKED_SKILLS: [(&str, &str); 3] = [
+    // skills/agent-message sends `agent_message.send`.
+    ("agent-message", "agent_message.send"),
+    // skills/agent-observe sends `agent_observe.list`.
+    ("agent-observe", "agent_observe.list"),
+    // skills/rlm-heartbeat sends `rlm_heartbeat.create`.
+    ("rlm-heartbeat", "rlm_heartbeat.create"),
+];
+
+/// The model-visible skill list for a final host-handler registry: a
+/// controller-backed bundled skill whose host request is not registered
+/// (print/RPC builds without that wiring) drops out.
+#[must_use]
+pub fn model_visible_skills(skills: Vec<Skill>, handlers: &HostRequestHandlers) -> Vec<Skill> {
+    skills
+        .into_iter()
+        .filter(|skill| {
+            !CONTROLLER_BACKED_SKILLS
+                .iter()
+                .any(|(name, request)| skill.name == *name && handlers.get(request).is_none())
+        })
+        .collect()
+}
+
 /// Kernel-side Python skill modules, pre-imported at bootstrap.
 #[must_use]
 pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
@@ -371,6 +398,8 @@ pub fn ipython_tool_options(
 mod tests {
     use super::*;
     use crate::cron::store::AgentCronJobStore;
+    use crate::kernel::shared::{host_handler, HostRequestHandlers};
+    use serde_json::Value;
 
     fn cron_wiring(dir: &std::path::Path) -> KernelCronWiring {
         KernelCronWiring {
@@ -405,5 +434,57 @@ mod tests {
             Some(cron_wiring(dir.path())),
         );
         assert!(wiring.handlers.get("rlm_heartbeat.create").is_some());
+    }
+
+    fn skill_named(name: &str) -> crate::skills::Skill {
+        use crate::skills::{create_synthetic_source_info, SkillKind, SourceScope};
+        crate::skills::Skill {
+            name: name.to_string(),
+            description: "a skill".to_string(),
+            file_path: std::path::PathBuf::from("/skills/SKILL.md"),
+            base_dir: std::path::PathBuf::from("/skills"),
+            source_info: create_synthetic_source_info("/skills", "user", SourceScope::User, None),
+            disable_model_invocation: false,
+            kind: SkillKind::Markdown,
+            python: None,
+        }
+    }
+
+    /// A controller-backed bundled skill whose host request is not
+    /// registered drops out; the registered ones and plain skills stay.
+    #[test]
+    fn model_visible_skills_follow_the_handler_registry() {
+        let skills = vec![
+            skill_named("agent-message"),
+            skill_named("agent-observe"),
+            skill_named("rlm-heartbeat"),
+            skill_named("websearch"),
+        ];
+        let mut handlers = HostRequestHandlers::default();
+        handlers.register(
+            "agent_message.send",
+            host_handler(|_payload| Box::pin(async { Ok(Value::Null) })),
+        );
+        let visible = model_visible_skills(skills, &handlers);
+        let names: Vec<&str> = visible.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["agent-message", "websearch"]);
+
+        handlers.register(
+            "agent_observe.list",
+            host_handler(|_payload| Box::pin(async { Ok(Value::Null) })),
+        );
+        handlers.register(
+            "rlm_heartbeat.create",
+            host_handler(|_payload| Box::pin(async { Ok(Value::Null) })),
+        );
+        let visible = model_visible_skills(
+            vec![
+                skill_named("agent-message"),
+                skill_named("agent-observe"),
+                skill_named("rlm-heartbeat"),
+            ],
+            &handlers,
+        );
+        assert_eq!(visible.len(), 3);
     }
 }

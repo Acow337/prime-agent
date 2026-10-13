@@ -238,12 +238,17 @@ fn registered_host_requests() -> BTreeSet<String> {
                 continue;
             }
             let source = std::fs::read_to_string(&path).expect("read source");
-            // Direct registrations: the first string literal after each
-            // `.register(` (the request type comes first in the call).
+            // Direct registrations: the request type is the FIRST
+            // argument of each `.register(` — a literal right at the
+            // call's head counts; anything after a non-literal first
+            // argument is not the request type.
             for remainder in source.split(".register(").skip(1) {
-                if let Some(literal) = first_string_literal(remainder) {
-                    if is_request_type_literal(&literal) {
-                        found.insert(literal);
+                let rest = remainder.trim_start();
+                if rest.starts_with('"') {
+                    if let Some(literal) = first_string_literal(rest) {
+                        if is_request_type_literal(&literal) {
+                            found.insert(literal);
+                        }
                     }
                 }
             }

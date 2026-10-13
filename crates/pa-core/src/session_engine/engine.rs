@@ -312,7 +312,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     };
     let model_context_window = model.context_window;
 
-    let python_skills = super::runtime_wiring::kernel_python_skills(&resources.skills);
     let session_id = wiring.session.lock().await.get_session_id().to_string();
     let mut handlers = wiring.handlers.clone();
     if let Some(extra) = config.extra_host_handlers.clone() {
@@ -448,10 +447,18 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             &mut handlers,
         );
     }
+    // One model-visible skill list, computed now that the host-handler
+    // registry is final (every registration, the refine handlers, and
+    // the in-process bash notices are in): a controller-backed bundled
+    // skill whose host request never registered drops out (TS
+    // `_modelVisibleSkills`).
+    let model_visible_skills =
+        super::runtime_wiring::model_visible_skills(resources.skills.clone(), &handlers);
+    let python_skills = super::runtime_wiring::kernel_python_skills(&model_visible_skills);
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
         handlers,
-        python_skills,
+        python_skills.clone(),
         cwd.clone(),
         &config.agent_dir,
         kernel_shell_path,
@@ -535,7 +542,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 .iter()
                 .map(|file| (file.path.display().to_string(), file.content.clone()))
                 .collect(),
-            skills: resources.skills.clone(),
+            skills: model_visible_skills.clone(),
             selected_tools: Some(
                 active_tool_names
                     .iter()
@@ -569,7 +576,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             .iter()
             .any(|name| name == PYTHON_TOOL_NAME),
         include_shell_examples: active_tool_names.iter().any(|name| name == "bash"),
-        include_refine: resources.skills.iter().any(|skill| {
+        include_refine: model_visible_skills.iter().any(|skill| {
             !skill.disable_model_invocation
                 && skill.name == crate::prompts::system_prompt::REFINE_SKILL_NAME
         }),
@@ -744,6 +751,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         std::sync::Arc::downgrade(&provisioner),
     ));
     session.set_kernel_state_probe(Some(kernel_state_probe));
+    // The admission path's `/skill:` expansion reads the FULL loader
+    // inventory (TS `_expandSkillCommand` expands from the loader); the
+    // model-visible list only shapes the prompt, pre-import, and counts.
     session.set_skills(resources.skills.clone());
     session.set_image_model_router(config.image_model_router.clone());
     // The semantic-edge handoff: the daemon's child registry and retry
@@ -795,9 +805,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let telemetry = match (config.telemetry.take(), config.rlm_depth.unwrap_or(0)) {
         (Some(wiring), 0) => {
             let skill_counts = super::telemetry::SkillCounts {
-                skill_count: resources.skills.len(),
-                python_skill_count: super::runtime_wiring::kernel_python_skills(&resources.skills)
-                    .len(),
+                skill_count: model_visible_skills.len(),
+                python_skill_count: python_skills.len(),
             };
             let installed = super::telemetry::install_session_telemetry(
                 &telemetry_agent,
