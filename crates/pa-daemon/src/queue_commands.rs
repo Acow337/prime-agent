@@ -156,6 +156,16 @@ impl Worker {
         // The suspension clears first, so `resume_queue` is a resume
         // site even when it answers "No queued work to resume".
         self.resume_queued_input();
+        if !self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
+            operation: "queue_resumed",
+        }) {
+            return response_failure(
+                None,
+                "resume_queue",
+                "Could not persist queue resume state",
+                None,
+            );
+        }
         let has_queued_work = {
             let core = self.core.lock().unwrap();
             !core.steering.is_empty() || !core.follow_up.is_empty()

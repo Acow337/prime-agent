@@ -815,7 +815,10 @@ async fn resumed_queue_restarts_unsuspended_and_delivers_the_same_input() {
     );
     assert!(parked_steering.is_empty());
     assert_eq!(parked_follow_up.len(), 1);
-    assert_eq!(parked_follow_up[0].message, "synthetic resumed queued input");
+    assert_eq!(
+        parked_follow_up[0].message,
+        "synthetic resumed queued input"
+    );
     let expected_queue = serde_json::to_value(&parked_follow_up).unwrap();
     let resumed = worker.dispatch("resume_queue", &json!({})).await;
     assert!(
@@ -877,10 +880,7 @@ async fn resumed_queue_restarts_unsuspended_and_delivers_the_same_input() {
     );
     let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let frame = subscription
-                .recv()
-                .await
-                .expect("new worker event stream");
+            let frame = subscription.recv().await.expect("new worker event stream");
             if frame.outbound_type != "session_event" {
                 continue;
             }
