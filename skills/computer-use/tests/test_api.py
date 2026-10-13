@@ -688,6 +688,23 @@ class AppDispatchTests(AppTestCase):
         clicks = env.recorder.calls_named("click")
         self.assertEqual(clicks[0]["point"], (110.0, 70.0))
 
+    async def test_unreadable_snapshot_identity_names_the_real_cause(self) -> None:
+        # a failed describe read stores None just like a genuinely absent
+        # value; the refusal must say the identity could not be read during
+        # the observation, not claim the element changed
+        from computer_use import errors
+
+        env = self.make_env()
+        env.set_tree(fakes.window(children=[fakes.element(role=None, title=None, actions=("AXPress",))]))
+        env.drift = True  # the live read succeeds while the snapshot stored None
+        app = await env.get_app()
+        await app.get_ax_state()
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.perform_secondary_action(0, "AXShowMenu")
+        self.assertEqual(caught.exception.code, "ELEMENT_STALE")
+        self.assertIn("could not be read", caught.exception.message)
+        self.assertNotIn("changed since", caught.exception.message)
+
     async def test_click_stale_index(self) -> None:
         from computer_use import errors
 

@@ -1127,6 +1127,18 @@ class App:
         element = ax._flatten(observation.tree)[element_index]
         live_role, live_title = ax._live_fingerprint(refs[element_index])
         if live_role != element.get("role") or live_title != element.get("title"):
+            if element.get("role") is None or element.get("title") is None:
+                # the observation could not read this element's identity (a
+                # failed read is stored as None, like a genuinely absent
+                # value), so the freshness comparison has no basis: the
+                # element did not necessarily change, but an unverifiable
+                # element never takes an action either
+                raise ComputerUseError(
+                    "ELEMENT_STALE",
+                    f"element {element_index}'s identity could not be read during the last "
+                    "observation; re-observe with get_ax_state()",
+                    {"element_index": element_index},
+                )
             raise ComputerUseError(
                 "ELEMENT_STALE",
                 f"element {element_index} changed since the last observation "
