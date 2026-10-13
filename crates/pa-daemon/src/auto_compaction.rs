@@ -20,9 +20,21 @@ pub(crate) enum AutoCompactionRun {
     /// The check fired and a compaction ran (success, skip, or failure —
     /// the `compaction_start`/`compaction_end` pair went out either way).
     Ran,
+    /// A summary committed and the retained context replaced the old context.
+    Compacted,
     /// The emit callback cancelled the run (an aborted turn): the caller
     /// stops the turn loop like any other cancelled emit.
     Cancelled,
+}
+
+impl AutoCompactionRun {
+    /// Whether in-run threshold checks stay armed after this boundary
+    /// outcome: a summary attempt that failed to commit suppresses the
+    /// rest of the run's checks; a committed summary and a plain
+    /// not-due recheck keep them armed.
+    pub(crate) fn continues_threshold_checks(self) -> bool {
+        !matches!(self, Self::Ran)
+    }
 }
 
 impl AgentSessionEngine {
@@ -44,10 +56,13 @@ impl AgentSessionEngine {
         // TS `_thresholdCompactionNeeded` reads `_runModel()` — the routed image model
         // while a routed turn is armed — so the threshold decision compares against the
         // model that actually serves; the summarizer below stays on the session model.
-        let run_model = self
-            .armed_image_route()
-            .map_or_else(|| model.clone(), |route| route.target.model);
-        let api_key = self.resolve_request_api_key(&model);
+        // The same derivation the in-run threshold hook consults through.
+        let (run_model, api_key) = crate::agent_engine::auto_compaction_inputs(
+            &self.image_route,
+            &self.selection,
+            &self.config.agent_dir,
+            &model,
+        );
         // Register before the pressure consult and start event. Stop must
         // cancel this boundary even if it lands before the foreground join;
         // otherwise rejecting a cancelled background result could start a
@@ -223,6 +238,10 @@ impl AgentSessionEngine {
                 }
             }
         }
-        AutoCompactionRun::Ran
+        if matches!(outcome, Ok(Ok(CompactOutcome::Ran(_)))) {
+            AutoCompactionRun::Compacted
+        } else {
+            AutoCompactionRun::Ran
+        }
     }
 }

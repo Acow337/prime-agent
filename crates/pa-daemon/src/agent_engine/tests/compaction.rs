@@ -1931,3 +1931,282 @@ fn stop_before_the_core_consult_does_not_start_a_replacement_flight() {
     assert!(engine.auto_compaction_abort.lock().unwrap().is_none());
     registration.unregister();
 }
+
+#[test]
+fn threshold_crossing_inside_one_run_compacts_before_the_next_model_turn() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({
+            "responses": [
+                {"text":"seed reply"},
+                {"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]},
+                {"text":"history summary"},
+                {"text":"prefix summary"},
+                {"text":"task finished"}
+            ]
+        }),
+        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed".into(), &mut events);
+    events.clear();
+    admit(&engine, "continue task".into(), &mut events);
+    let compaction = events
+        .iter()
+        .position(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .expect("threshold crossed inside run");
+    let assistants: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, EngineEvent::AssistantMessage(_)).then_some(index)
+        })
+        .collect();
+    assert_eq!(assistants.len(), 2, "one tool turn and one final turn");
+    assert!(
+        assistants[0] < compaction && compaction < assistants[1],
+        "compaction must precede the next ordinary model call"
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("task finished")
+    );
+}
+
+#[test]
+fn failed_mid_run_compaction_resumes_without_retrying_each_tool_round() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tool_turn = json!({"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]});
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({
+            "responses": [
+                {"text":"seed reply"}, tool_turn,
+                {"text":"", "stopReason":"error", "errorMessage":"synthetic summary failure"},
+                {"text":"prefix summary"}, tool_turn,
+                {"text":"task finished"}
+            ]
+        }),
+        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed".into(), &mut events);
+    events.clear();
+    admit(&engine, "continue task".into(), &mut events);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("task finished")
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Done(Ok(())))));
+    let core = engine.session.blocking_lock().clone().unwrap();
+    let entries = engine
+        .runtime
+        .block_on(async { core.session.shared_persistence().lock().await.get_entries() });
+    let user_prompts: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::User(user),
+                ..
+            } => Some(user.content.text()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_prompts, ["seed", "continue task"]);
+}
+
+/// An in-run crossing into the Background band starts the background
+/// summarize without yielding the tool run: the flight's requests issue
+/// during the run — before its next model turn — no compaction pair fires
+/// between the tool-round assistant and the run's next assistant, and the
+/// run finishes its tool turns.
+#[test]
+fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let crossing_prompt = format!("crossing {}", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), crossing_prompt.clone()]);
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({ "responses": [] }),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    // One factory serves both lanes: session turns (tools in the context)
+    // pop scripted turn messages; the background summarize (no tools in the
+    // context) records its issuance and answers with the summary. The
+    // run's last turn waits for a summarize issuance, so the issuance log
+    // proves the flight started before the run finished — without blocking
+    // the run on it.
+    let turn_messages: std::sync::Arc<
+        std::sync::Mutex<std::collections::VecDeque<pa_ai::types::AssistantMessage>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(
+        [
+            pa_ai::faux::faux_assistant_text_message(
+                "seed reply",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+            pa_ai::faux::faux_assistant_message(
+                vec![
+                    pa_ai::faux::faux_text("tool turn reply"),
+                    pa_ai::faux::faux_tool_call(
+                        "synthetic_missing_tool",
+                        &serde_json::json!({}),
+                        Some("synthetic-call"),
+                    ),
+                ],
+                pa_ai::faux::FauxAssistantMessageOptions {
+                    stop_reason: Some(pa_ai::types::StopReason::ToolUse),
+                    ..Default::default()
+                },
+            ),
+            pa_ai::faux::faux_assistant_text_message(
+                "task finished",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        ]
+        .into(),
+    ));
+    let issuance: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>> = std::sync::Arc::default();
+    let summarize_issued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let route = {
+        let turn_messages = std::sync::Arc::clone(&turn_messages);
+        let issuance = std::sync::Arc::clone(&issuance);
+        let summarize_issued = std::sync::Arc::clone(&summarize_issued);
+        move |context: &pa_types::ai::Context,
+              _: Option<&pa_ai::types::StreamOptions>,
+              _: u64,
+              _: &pa_types::ai::Model| {
+            if context.tools.is_none() {
+                issuance
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push("summarize");
+                summarize_issued.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Ok(pa_ai::faux::faux_assistant_text_message(
+                    "the background summary",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ));
+            }
+            let reply = turn_messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            if turn_messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+            {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !summarize_issued.load(std::sync::atomic::Ordering::SeqCst) {
+                    if std::time::Instant::now() > deadline {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            Ok(reply.expect("a scripted turn response"))
+        }
+    };
+    registration.set_responses(vec![
+        pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(route));
+        10
+    ]);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    events.clear();
+    admit(&engine, crossing_prompt, &mut events);
+    let assistants: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, EngineEvent::AssistantMessage(_)).then_some(index)
+        })
+        .collect();
+    assert_eq!(
+        assistant_texts(&events),
+        vec![
+            "tool turn reply".to_string(),
+            "task finished".to_string()
+        ],
+        "the tool run continued to its final turn"
+    );
+    assert_eq!(
+        assistants.len(),
+        2,
+        "one tool turn and one final turn: {events:?}"
+    );
+    assert!(
+        !events[assistants[0]..assistants[1]].iter().any(
+            |event| matches!(
+                event,
+                EngineEvent::CompactionStart { .. } | EngineEvent::Compaction { .. }
+            )
+        ),
+        "a Background crossing must not compact between the tool turn and the next model turn"
+    );
+    wait_for_calls(&registration, 5);
+    let log = issuance
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let turns = log.iter().filter(|lane| **lane == "turn").count();
+    let summarizes = log.iter().filter(|lane| **lane == "summarize").count();
+    assert_eq!(
+        turns, 3,
+        "the seed turn and the crossing run's two turns: {log:?}"
+    );
+    assert_eq!(
+        summarizes, 2,
+        "the split-cut flight issued both summarize calls: {log:?}"
+    );
+    let first_turn = log
+        .iter()
+        .position(|lane| lane == &"turn")
+        .expect("a turn issued");
+    let first_summarize = log
+        .iter()
+        .position(|lane| lane == &"summarize")
+        .expect("the background summarize issued during the run");
+    let last_turn = log
+        .iter()
+        .rposition(|lane| lane == &"turn")
+        .expect("the run finished its turns");
+    assert!(
+        first_turn < first_summarize && first_summarize < last_turn,
+        "the flight started mid-run, before the next model turn: {log:?}"
+    );
+    registration.unregister();
+}
+
+/// A not-due recheck after a threshold yield keeps the in-run threshold
+/// machinery armed: the suppression is reserved for a summary attempt
+/// that failed to commit (cursor: "Recheck mismatch disables further
+/// compaction").
+#[test]
+fn a_not_due_recheck_keeps_threshold_checks_armed() {
+    use crate::auto_compaction::AutoCompactionRun;
+    assert!(
+        AutoCompactionRun::NotDue.continues_threshold_checks(),
+        "a not-due recheck is not a failed summary"
+    );
+    assert!(
+        AutoCompactionRun::Compacted.continues_threshold_checks(),
+        "a committed summary keeps checking"
+    );
+    assert!(
+        !AutoCompactionRun::Ran.continues_threshold_checks(),
+        "a failed or skipped summary suppresses the rest of the run"
+    );
+}

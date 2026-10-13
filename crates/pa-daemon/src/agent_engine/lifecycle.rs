@@ -1,8 +1,10 @@
 //! The engine's lifecycle surface: the constructor and the session
 //! build/adopt/retire cycle, the closed-state markers, the skill
 //! expansion and session-command funnels, and the kernel host wiring.
+use std::sync::atomic::Ordering;
+
 use super::{
-    execute_session_command, json_round_trip, map_thinking_level,
+    auto_compaction_inputs, execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
     EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
@@ -148,17 +150,21 @@ impl AgentSessionEngine {
             kernel_release_probe: std::sync::Mutex::new(None),
             registered_jobs_probe: std::sync::Mutex::new(None),
             session_file,
-            selection: std::sync::RwLock::new(selection.clone()),
+            selection: std::sync::Arc::new(std::sync::RwLock::new(selection.clone())),
             restored_model: std::sync::Mutex::new(None),
             startup_scope: std::sync::Mutex::new(None),
             initial_selection: std::sync::RwLock::new(selection),
             effective_thinking: std::sync::RwLock::new(None),
             service_tier: std::sync::RwLock::new(None),
-            session: tokio::sync::Mutex::new(None),
+            session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            threshold_yielded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            threshold_checks_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             session_build: tokio::sync::Mutex::new(()),
             pending_branch: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            image_route: std::sync::Mutex::new(None),
+            image_route: std::sync::Arc::new(std::sync::Mutex::new(None)),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             create_resources: std::sync::RwLock::default(),
             autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -1025,6 +1031,64 @@ impl AgentSessionEngine {
             queued_goal_context_purge,
             // The steering lane owns the stop hooks (a queued steer cuts the next turn).
             queued_steering_probe: self.config.queued_steering_probe.clone(),
+            should_stop_after_turn: Some({
+                let session = Arc::downgrade(&self.session);
+                let target = Arc::clone(&self.provider_target);
+                let image_route = Arc::clone(&self.image_route);
+                let selection = Arc::clone(&self.selection);
+                let agent_dir = self.config.agent_dir.clone();
+                let yielded = Arc::clone(&self.threshold_yielded);
+                let enabled = Arc::clone(&self.threshold_checks_enabled);
+                Arc::new(move |context| {
+                    let session = session.clone();
+                    let target = Arc::clone(&target);
+                    let image_route = Arc::clone(&image_route);
+                    let selection = Arc::clone(&selection);
+                    let agent_dir = agent_dir.clone();
+                    let yielded = Arc::clone(&yielded);
+                    let enabled = Arc::clone(&enabled);
+                    Box::pin(async move {
+                        if context.tool_results.is_empty() || !enabled.load(Ordering::SeqCst) {
+                            return Ok(false);
+                        }
+                        let Some(session) = session.upgrade() else {
+                            return Ok(false);
+                        };
+                        let engine = session.lock().await.clone();
+                        let Some(engine) = engine else {
+                            return Ok(false);
+                        };
+                        // Capture the actual serving model before AgentEnd clears a routed override.
+                        let model = target
+                            .read()
+                            .expect("provider target lock")
+                            .as_ref()
+                            .map(|target| target.model.clone());
+                        let Some(model) = model else { return Ok(false) };
+                        // The consult inputs resolve through the same derivation
+                        // the boundary arm uses (see `auto_compaction_inputs`).
+                        let (run_model, api_key) = auto_compaction_inputs(
+                            &image_route,
+                            &selection,
+                            &agent_dir,
+                            &model,
+                        );
+                        // The banded consult the turn boundaries run: the
+                        // Background band starts (or keeps) the background
+                        // summarize without yielding; a ready-to-commit
+                        // summary or a Reserve crossing yields for the model
+                        // turn's boundary arm to commit.
+                        let due = engine
+                            .session
+                            .auto_compaction_now_with_abort(&run_model, &model, api_key, None)
+                            .await;
+                        if due {
+                            yielded.store(true, Ordering::SeqCst);
+                        }
+                        Ok(due)
+                    })
+                })
+            }),
             // Seeded from settings at create; the live switch updates the slot ahead of any later
             // build.
             steering_mode,

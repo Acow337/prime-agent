@@ -57,6 +57,7 @@ use turn_types::{
 
 mod model;
 
+pub(crate) use model::auto_compaction_inputs;
 pub(crate) use model::saved_session_context_from_parts;
 
 mod config;
@@ -173,8 +174,9 @@ pub struct AgentSessionEngine {
     /// The worker-owned session file (conversation-log path), set at create.
     session_file: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// The authoritative model selection: the process fallback, re-bound when
-    /// a create carries explicit wire flags.
-    selection: std::sync::RwLock<EngineModelSelection>,
+    /// a create carries explicit wire flags. The in-run threshold hook and the
+    /// threshold consult share the live slot, so the selection rides an `Arc`.
+    pub(crate) selection: std::sync::Arc<std::sync::RwLock<EngineModelSelection>>,
     /// The restored-from-session decision, scoped to the file it was computed
     /// for: a revived session's saved model (or the fallback message); an
     /// explicit flag wins.
@@ -193,7 +195,9 @@ pub struct AgentSessionEngine {
     /// Built once on the first prompt, reused across prompts: long-running
     /// arms clone the Arc and release this mutex before their awaits, so
     /// every read seam answers while a turn streams.
-    pub(crate) session: tokio::sync::Mutex<Option<Arc<CoreSessionEngine>>>,
+    pub(crate) session: Arc<tokio::sync::Mutex<Option<Arc<CoreSessionEngine>>>>,
+    threshold_yielded: Arc<std::sync::atomic::AtomicBool>,
+    threshold_checks_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// The build gate: at most one `build_session` in flight; the eager build
     /// and the first demand seam meet at one build.
     pub(crate) session_build: tokio::sync::Mutex<()>,
@@ -284,7 +288,9 @@ pub struct AgentSessionEngine {
     /// The image-model route armed for the dispatched episode, re-applied at
     /// every model-turn attempt so retries keep serving it; cleared when the
     /// episode settles.
-    pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
+    /// The in-run threshold hook reads the armed route's target model live,
+    /// so the slot rides an `Arc`.
+    pub(crate) image_route: std::sync::Arc<std::sync::Mutex<Option<ImageRoute>>>,
     /// Turn-boundary runs register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,
