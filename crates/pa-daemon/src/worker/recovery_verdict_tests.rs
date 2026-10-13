@@ -1,4 +1,6 @@
 //! Worker tests.
+mod panic;
+
 use super::*;
 use crate::engine::{
     CompactionOutcome, CompactionRequest, PromptRequest, SessionEngine, SideQuestionOutcome,
@@ -30,7 +32,10 @@ impl SessionEngine for BeforeUserRowEngine {
                 "text": row.text, "images": row.images,
             })).collect::<Vec<_>>(),
         }));
-        if matches!(self.boundary, UserRowBoundary::AfterFirst) {
+        if matches!(
+            self.boundary,
+            UserRowBoundary::AfterFirst | UserRowBoundary::AfterFirstPanic
+        ) {
             let mut content = vec![json!({ "type": "text", "text": request.message })];
             content.extend(request.images.iter().map(|image| {
                 json!({
@@ -50,6 +55,15 @@ impl SessionEngine for BeforeUserRowEngine {
         if self.release.lock().unwrap().recv().is_err() {
             emit(EngineEvent::DoneAborted);
             return;
+        }
+        if matches!(self.boundary, UserRowBoundary::AfterFirstPanic) {
+            // The persistence callback has returned and the channel guard has
+            // dropped. This panic cannot poison the worker core or gate mutex.
+            assert!(
+                aborted(),
+                "shutdown must close input before the engine panic"
+            );
+            panic!("isolated engine panic after the durable first input");
         }
         if aborted() {
             emit(EngineEvent::DoneAborted);
@@ -487,6 +501,7 @@ async fn shutdown_after_first_user_row_preserves_the_unaccepted_batch_tail() {
 enum UserRowBoundary {
     BeforeFirst,
     AfterFirst,
+    AfterFirstPanic,
 }
 
 async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
@@ -523,10 +538,12 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
                 "batched second",
                 match boundary {
                     UserRowBoundary::BeforeFirst => Vec::new(),
-                    UserRowBoundary::AfterFirst => vec![pa_agent::types::ImageContent {
-                        data: "REVG".to_string(),
-                        mime_type: "image/png".to_string(),
-                    }],
+                    UserRowBoundary::AfterFirst | UserRowBoundary::AfterFirstPanic => {
+                        vec![pa_agent::types::ImageContent {
+                            data: "REVG".to_string(),
+                            mime_type: "image/png".to_string(),
+                        }]
+                    }
                 },
             ),
         ] {
@@ -574,16 +591,21 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
             core.store.as_ref().unwrap().message_count(),
             match boundary {
                 UserRowBoundary::BeforeFirst => 0,
-                UserRowBoundary::AfterFirst => 1,
+                UserRowBoundary::AfterFirst | UserRowBoundary::AfterFirstPanic => 1,
             }
         );
     }
 
     let tail_images = match boundary {
         UserRowBoundary::BeforeFirst => json!([]),
-        UserRowBoundary::AfterFirst => json!([{ "data": "REVG", "mimeType": "image/png" }]),
+        UserRowBoundary::AfterFirst | UserRowBoundary::AfterFirstPanic => {
+            json!([{ "data": "REVG", "mimeType": "image/png" }])
+        }
     };
-    if matches!(boundary, UserRowBoundary::AfterFirst) {
+    if matches!(
+        boundary,
+        UserRowBoundary::AfterFirst | UserRowBoundary::AfterFirstPanic
+    ) {
         let disk_rows: Vec<Value> = std::fs::read_to_string(fixture_dir.join("session.jsonl"))
             .expect("first input must already be in the physical transcript")
             .lines()
@@ -643,6 +665,14 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
         .await
         .expect("the gated runner never exited")
         .expect("the gated runner panicked");
+    if matches!(boundary, UserRowBoundary::AfterFirstPanic) {
+        let core = worker
+            .core
+            .lock()
+            .expect("an engine panic outside the callback must not poison the core");
+        assert!(core.shutdown_requested && core.abort_requested);
+        assert!(!core.busy, "the panicked engine must settle its actual turn");
+    }
     // Recover from the files, not the picked batch or the old in-memory store.
     // Either durable user rows or pending queue rows may retain the input;
     // this oracle does not prescribe which persistence boundary owns it.
@@ -675,7 +705,32 @@ async fn shutdown_preserves_picked_batch(boundary: UserRowBoundary) {
     )
     .unwrap()
     .expect("shutdown queue snapshot");
-    let recovered_payloads = if matches!(boundary, UserRowBoundary::AfterFirst) {
+    if matches!(boundary, UserRowBoundary::AfterFirstPanic) {
+        let pending: Vec<Value> = steering
+            .iter()
+            .chain(&follow_up)
+            .filter(|item| item.message != crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT)
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+        assert_eq!(
+            pending,
+            vec![json!({
+                "message": "batched second",
+                "priority": "human",
+                "preview": "preview batched second",
+                "queue_key": "key:batched second",
+                "queue_visible": true,
+                "policy": "queued",
+                "forced_batch": false,
+                "images": [{ "data": "REVG", "mimeType": "image/png" }],
+            })],
+            "panic must not replay the physically accepted primary alongside its unaccepted tail"
+        );
+    }
+    let recovered_payloads = if matches!(
+        boundary,
+        UserRowBoundary::AfterFirst | UserRowBoundary::AfterFirstPanic
+    ) {
         let mut payloads: Vec<Value> = transcript
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
