@@ -22,7 +22,8 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
             {
                 "text": "busy-turn",
                 "toolCalls": [
-                    { "toolCallId": "call-1", "toolName": "bash", "args": {}, "result": "listed", "delayMs": 5_000 }
+                    { "toolCallId": "call-1", "toolName": "bash", "args": {}, "result": "listed", "delayMs": 5_000 },
+                    { "toolCallId": "call-2", "toolName": "bash", "args": {}, "result": "unfinished" }
                 ]
             },
             { "text": "continued-turn", "delayMs": 10 },
@@ -218,25 +219,26 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
             "message": "go",
         }),
     );
-    let ack = client.read_response("p1");
+    let (ack, mut busy_lines) = client.read_response_and_lines("p1");
     assert_eq!(ack["success"], true, "busy prompt failed: {ack}");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let turn_started = std::fs::read_to_string(&busy_session_file)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|entry| entry["message"]["role"].as_str() == Some("assistant"));
-        if turn_started {
+        let line = client.next_line_of_type(&mut busy_lines, "session_event");
+        if line["activeSessionId"] == busy_session
+            && line["event"]["type"] == "tool_execution_start"
+            && line["event"]["toolCallId"] == "call-1"
+        {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the busy turn never started: {}",
-            std::fs::read_to_string(&busy_session_file).unwrap_or_default()
+            "the first busy tool never reached its actual execution-start event"
         );
-        std::thread::sleep(Duration::from_millis(50));
     }
+    // The first scripted tool's delay is intentionally not abortable. Its
+    // terminal tool frames can still settle after shutdown requests an abort.
+    // A second tool remains unfinished: its start is rejected by the abort
+    // gate, so the engine reports cancellation instead of Done(Ok).
 
     // The durable turn's stream was observed above; check the in-memory
     // worker again immediately before the stop so a slow runner cannot turn
@@ -256,6 +258,24 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
         assert!(Instant::now() < deadline, "supervisor never exited");
         std::thread::sleep(Duration::from_millis(50));
     }
+
+    let finished_tools: Vec<String> = std::fs::read_to_string(&busy_session_file)
+        .expect("interrupted transcript")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("transcript row"))
+        .filter(|entry| entry["message"]["role"] == "toolResult")
+        .map(|entry| {
+            entry["message"]["toolCallId"]
+                .as_str()
+                .expect("tool result id")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        finished_tools,
+        vec!["call-1".to_string()],
+        "shutdown must leave the second declared tool unfinished before restart"
+    );
 
     let restart_before = pa_daemon::util::now_iso();
     let mut daemon2 = spawn_supervisor(&socket, &agent_dir);
