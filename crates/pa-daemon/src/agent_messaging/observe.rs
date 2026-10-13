@@ -154,11 +154,16 @@ impl AgentObserveController for LinkAgentObserveController {
         let agent = find_target(self.family_summaries().await?, target)
             .ok_or_else(|| anyhow::anyhow!("agent {target} is not reachable"))?;
         // A family member with no live session (a passivated child) has no
-        // worker to read; TS hydrates it first, the roster walk errors.
+        // worker to read; TS hydrates it first, the roster walk errors. A
+        // live member whose `get_state` degraded shows the offline stub
+        // (empty sessionId, no activeSessionId — classified Inactive): its
+        // row still carries the session id, so read the transcript through
+        // it instead of refusing a session that is live, just slow.
+        let degraded_stub = agent.session_id.is_empty();
         let Some(live_session_id) = agent
             .active_session_id
             .as_deref()
-            .filter(|_| agent.status != AgentFamilyStatus::Inactive)
+            .filter(|_| degraded_stub || agent.status != AgentFamilyStatus::Inactive)
         else {
             anyhow::bail!("agent {target} has no live session");
         };
