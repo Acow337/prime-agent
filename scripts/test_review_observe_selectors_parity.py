@@ -36,19 +36,22 @@ class SelectorReceiptTests(unittest.TestCase):
     def test_correct_transcript_and_both_actual_ids_required(self):
         agent = {'activeSessionId': 'actual-a', 'sessionId': 'durable-a'}
         row = {'get': {'value': {'agent': agent}}, 'recent': {'value': {
-            'agent': agent, 'messages': [{'role': 'assistant', 'text': 'TRANSCRIPT_SEED_A'}]}}}
+            'agent': agent, 'messages': [{'role': 'custom', 'customType': 'agent_message', 'text': '[task from parent]\n\nOBSERVE_TASK_A'}]}}}
         expected = {'active': 'actual-a', 'durable': 'durable-a'}
-        self.assertEqual(fixture.selected(row, expected, 'TRANSCRIPT_SEED_A'), {
-            'selection': 'child-a', 'transcript_marker': 'TRANSCRIPT_SEED_A'})
-        row['recent']['value']['messages'][0]['text'] = 'TRANSCRIPT_SEED_B'
+        self.assertEqual(fixture.selected(row, expected, 'OBSERVE_TASK_A'), {
+            'selection': 'child-a', 'transcript_marker': 'OBSERVE_TASK_A'})
+        row['recent']['value']['messages'].append({'role': 'custom', 'customType': 'agent_message', 'text': '[task from parent]\n\nOBSERVE_TASK_B'})
         with self.assertRaises(AssertionError):
-            fixture.selected(row, expected, 'TRANSCRIPT_SEED_A')
+            fixture.selected(row, expected, 'OBSERVE_TASK_A')
+        row['recent']['value']['messages'] = [{'role': 'custom', 'customType': 'agent_message', 'text': '[task from parent]\n\nOBSERVE_TASK_B'}]
+        with self.assertRaises(AssertionError):
+            fixture.selected(row, expected, 'OBSERVE_TASK_A')
         row['get']['value']['agent'] = {'activeSessionId': 'actual-a', 'sessionId': 'wrong-durable'}
         with self.assertRaises(AssertionError):
-            fixture.selected(row, expected, 'TRANSCRIPT_SEED_A')
+            fixture.selected(row, expected, 'OBSERVE_TASK_A')
 
     def test_foreign_error_and_ambiguity_cannot_be_success_or_other_error(self):
-        for label, error in (('ts', 'Agent reach is limited to parent, siblings, and children'),
+        for label, error in (('ts', 'Unknown active session: FFF-123'),
                              ('rust', 'agent suffix is not reachable')):
             row = {'get': {'error': error}, 'recent': {'error': error}}
             self.assertEqual(fixture.rejected(row, 'foreign-family', label), {'rejection': 'foreign-family'})
@@ -60,6 +63,13 @@ class SelectorReceiptTests(unittest.TestCase):
             fixture.rejected(row, 'ambiguous', 'rust')
         row = {operation: {'error': 'Ambiguous active session: matches a,b'} for operation in ('get', 'recent')}
         self.assertEqual(fixture.rejected(row, 'ambiguous', 'ts'), {'rejection': 'ambiguous'})
+
+    def test_child_hold_matches_current_task_not_root_digest_or_history(self):
+        self.assertEqual(fixture.child_task({'messages': [{'role': 'user', 'content': '[task from parent]\n\nOBSERVE_TASK_A'}]}), 'OBSERVE_TASK_A')
+        self.assertIsNone(fixture.child_task({'messages': [
+            {'role': 'user', 'content': 'digest includes OBSERVE_TASK_A'},
+            {'role': 'user', 'content': 'Run parent selector baseline.'}]}))
+        self.assertIsNone(fixture.child_task({'messages': [{'role': 'assistant', 'content': 'OBSERVE_TASK_A'}]}))
 
     def test_identical_cell_uses_actual_skill_functions(self):
         code = fixture.cell({'exact': 'actual-a', 'foreign_suffix': 'FFF-123'})

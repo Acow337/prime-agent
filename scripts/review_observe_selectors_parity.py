@@ -80,6 +80,17 @@ class Provider(http.server.ThreadingHTTPServer):
         super().__init__(('127.0.0.1', 0), Handler)
         self.phase, self.code = None, None
         self.requests = {}
+        self.child_requests = {}
+        self.children_arrived = threading.Condition()
+        self.release_children = threading.Event()
+        self.child_reply_timeout = False
+
+
+def child_task(body):
+    users = [message for message in body.get('messages', []) if message.get('role') == 'user']
+    text = '\n'.join(texts(users[-1].get('content'))).strip() if users else ''
+    tasks = {f'[task from parent]\n\n{task}': task for task in ('OBSERVE_TASK_A', 'OBSERVE_TASK_B')}
+    return tasks.get(text)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -91,17 +102,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        phase = self.server.phase
-        requests = self.server.requests.setdefault(phase, [])
-        requests.append(body)
-        if self.server.code is not None and len(requests) == 1:
+        task = child_task(body)
+        if task:
+            with self.server.children_arrived:
+                self.server.child_requests.setdefault(task, []).append(body)
+                self.server.children_arrived.notify_all()
+            # Keep the actual spawned child live; no settle/passive hydration is exercised.
+            if not self.server.release_children.wait(300):
+                self.server.child_reply_timeout = True
+            phase, requests = task, self.server.child_requests[task]
+            code = None
+        else:
+            phase = self.server.phase
+            requests = self.server.requests.setdefault(phase, [])
+            requests.append(body)
+            code = self.server.code
+        if code is not None and len(requests) == 1:
             offered = {tool.get('function', {}).get('name') for tool in body.get('tools', [])}
             name = next((name for name in ('python_repl', 'ipython') if name in offered), None)
             if name is None:
                 self.send_error(422, 'no actual REPL tool offered')
                 return
             delta = {'tool_calls': [{'index': 0, 'id': 'observe_' + phase, 'type': 'function',
-                'function': {'name': name, 'arguments': json.dumps({'code': self.server.code})}}]}
+                'function': {'name': name, 'arguments': json.dumps({'code': code})}}]}
             reason = 'tool_calls'
         else:
             delta, reason = {'content': 'TRANSCRIPT_' + phase.upper()}, 'stop'
@@ -114,7 +137,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream')
         self.send_header('Content-Length', str(len(wire.encode())))
         self.end_headers()
-        self.wfile.write(wire.encode())
+        try:
+            self.wfile.write(wire.encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # Actual shutdown interrupts the held child's connection.
 
 
 def current_probe(requests, phase):
@@ -149,8 +175,11 @@ def selected(row, expected, marker):
         assert value['agent']['activeSessionId'] == expected['active'], value
         assert value['agent']['sessionId'] == expected['durable'], value
     messages = row['recent']['value']['messages']
-    assert any(message.get('role') == 'assistant' and message.get('text') == marker for message in messages), messages
-    assert not any('TRANSCRIPT_SEED_FOREIGN' in message.get('text', '') for message in messages), messages
+    task_texts = [message.get('text') for message in messages
+                  if message.get('role') == 'custom' and message.get('customType') == 'agent_message']
+    assert task_texts == ['[task from parent]\n\n' + marker], messages
+    assert not any('OBSERVE_TASK_B' in message.get('text', '') for message in messages), messages
+    assert not any('SEED_FOREIGN' in message.get('text', '') for message in messages), messages
     return {'selection': 'child-a', 'transcript_marker': marker}
 
 
@@ -160,7 +189,7 @@ def rejected(row, kind, label):
     if kind == 'ambiguous':
         assert all('Ambiguous active session' in error for error in errors), errors
     else:
-        expected = ('Agent reach is limited to parent, siblings, and children' if label == 'ts'
+        expected = ('Unknown active session:' if label == 'ts'
                     else 'is not reachable')
         assert all(expected in error for error in errors), errors
     return {'rejection': kind}
@@ -217,13 +246,8 @@ def run_case(binary, label, root, observation):
                   'sessionDir': str(root / 'sessions'), 'provider': 'fixture', 'model': 'observe-fixture',
                   'noExtensions': True, 'noContextFiles': True, 'telemetryDisabled': True}
         created = observation['created'] = {}
-        def create(name, parent=None):
+        def create(name):
             options = {'config': dict(config), 'name': name, 'lifecycle': 'resident'}
-            if parent:
-                options['config'].update(rlmDepth=1, parentSessionPath=parent['file'])
-                options['runtimeMetadata'] = {'kind': 'subagent', 'rlmDepth': 1,
-                    'rlmChildId': name, 'parentActiveSessionId': parent['active'],
-                    'parentSessionId': parent['durable'], 'parentSessionFile': parent['file']}
             value = client.call('create', **options)
             row = {'active': value.get('activeSessionId') or value.get('id'),
                    'durable': value['sessionId'], 'file': value['sessionFile'], 'raw': value}
@@ -250,13 +274,30 @@ def run_case(binary, label, root, observation):
                 threading.Event().wait(0.025)
             return row
         parent = create('observe-parent')
-        a = create('observe-child-a', parent)
-        b = create('observe-child-b', parent)
         foreign = create('observe-foreign')
-        for name, row in (('seed_a', a), ('seed_b', b), ('seed_foreign', foreign)):
-            provider.phase, provider.code = name, None
-            client.call('prompt_and_wait', timeout_seconds=90, activeSessionId=row['active'], message=name)
-            assert len(provider.requests[name]) == 1, 'seed did not finish in one real model turn'
+        provider.phase, provider.code = 'seed_foreign', None
+        client.call('prompt_and_wait', timeout_seconds=90, activeSessionId=foreign['active'], message='SEED_FOREIGN')
+        assert len(provider.requests['seed_foreign']) == 1, 'foreign seed did not finish'
+        provider.phase = 'spawn_setup'
+        provider.code = """import json, dataclasses
+await rlm.spawn('OBSERVE_TASK_A', name='observe-child-a', model='fixture/observe-fixture')
+await rlm.spawn('OBSERVE_TASK_B', name='observe-child-b', model='fixture/observe-fixture')
+print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(row) for row in await rlm.list_subagents()]}, default=str))
+"""
+        client.call('prompt_and_wait', timeout_seconds=90, activeSessionId=parent['active'], message='Run actual resident selector spawn setup.')
+        setup = current_probe(provider.requests['spawn_setup'], 'spawn_setup')
+        observation['spawn_setup'] = setup
+        with provider.children_arrived:
+            assert provider.children_arrived.wait_for(lambda: set(provider.child_requests) == {'OBSERVE_TASK_A', 'OBSERVE_TASK_B'},
+                timeout=LIMIT), 'spawned children never reached their actual model requests'
+        rows = {row['session_name']: row for row in setup['children']}
+        def child(name):
+            row = rows[name]
+            value = {'active': row['active_session_id'], 'durable': row['session_id'], 'raw': row}
+            assert value['active'] and value['durable'], 'live spawn omitted actual IDs'
+            created[name] = value
+            return value
+        a, b = child('observe-child-a'), child('observe-child-b')
         ids = [row[key] for row in created.values() for key in ('active', 'durable')]
         probes = observation['probes'] = {}
         contract = observation['contract'] = {}
@@ -276,17 +317,22 @@ def run_case(binary, label, root, observation):
             'durable_suffix': suffix(a['durable'], ids), 'name': 'observe-child-a',
             'foreign_suffix': suffix(foreign['active'], ids)})
         for name in ('exact', 'active_suffix', 'durable_suffix', 'name'):
-            contract[name] = selected(basic[name], a, 'TRANSCRIPT_SEED_A')
+            contract[name] = selected(basic[name], a, 'OBSERVE_TASK_A')
         contract['foreign_suffix'] = rejected(basic['foreign_suffix'], 'foreign-family', label)
         client.call('rename', activeSessionId=b['active'], name=a['active'])
         collision = probe('collision', {'exact_id_over_name': a['active']})
-        contract['exact_id_over_name'] = selected(collision['exact_id_over_name'], a, 'TRANSCRIPT_SEED_A')
-        for row in (a, b):
-            client.call('rename', activeSessionId=row['active'], name='observe-duplicate')
-        ambiguous = probe('ambiguity', {'duplicate_name': 'observe-duplicate'})
+        contract['exact_id_over_name'] = selected(collision['exact_id_over_name'], a, 'OBSERVE_TASK_A')
+        client.call('rename', activeSessionId=b['active'], name='observe-child-b')
+        # Same-depth siblings cannot share a name in TS. Parent and child belong
+        # to distinct name namespaces, but both are reachable from the parent.
+        client.call('rename', activeSessionId=parent['active'], name='observe-child-a')
+        ambiguous = probe('ambiguity', {'duplicate_name': 'observe-child-a'})
         contract['duplicate_name'] = rejected(ambiguous['duplicate_name'], 'ambiguous', label)
         # Selection is proven only for resident rows; no hydration or full summary equality.
-        assert len(observation['worker_identities']) == 4, 'missing fixture worker proof'
+        assert len(observation['worker_identities']) == 2, 'missing owned root-worker proof'
+        assert set(provider.child_requests) == {'OBSERVE_TASK_A', 'OBSERVE_TASK_B'}, 'missing live spawned-child proof'
+        assert all(len(requests) == 1 for requests in provider.child_requests.values()), 'child retried/finished during selection'
+        assert not provider.child_reply_timeout, 'held child completed before selector proof'
         observation['summary_field_presence'] = {
             phase: {name: {operation: sorted(row[operation]['value']['agent'])
                 for operation in ('get', 'recent') if 'value' in row[operation]}
@@ -301,8 +347,12 @@ def run_case(binary, label, root, observation):
         done.set()
         if tracker.ident is not None:
             tracker.join(timeout=2)
+        # Shutdown must interrupt the held child turns before provider teardown.
         finish(scope, client, process, observation)
+        provider.release_children.set()
         observation['requests'] = provider.requests
+        observation['held_child_requests'] = provider.child_requests
+        observation['child_reply_timeout'] = provider.child_reply_timeout
         observation['sent_wire'] = client.sent if client else []
         observation['received_wire'] = client.wire if client else []
         observation['tracker_errors'] = tracker_errors
@@ -325,9 +375,9 @@ def main():
     receipt = {'verified': False, 'runs': {}, 'scope': 'Resident agent_observe.get/recent/list: exact active ID, '
         'normalized active/durable ID suffix, exact name, exact ID/name precedence, ambiguous name, foreign family rejection.',
         'not_verified': ['Passive child hydration', 'Transient progress-note event retention',
-            'latestMessage/full summary field parity', 'Tool/image/bash preview fidelity', 'TUI/ACP presentation', 'RLM spawn/settle policy'],
+            'latestMessage/full summary field parity', 'Tool/image/bash preview fidelity', 'TUI/ACP presentation', 'RLM spawn/settle policy equivalence (real spawn is fixture setup only)'],
         'normalization': 'Dynamic IDs verified exactly inside each run, then compared by selected fixture identity. '
-            'Foreign denial text differs (TS family-reach error vs Rust unreachable); raw errors are retained. '
+            'Foreign denial text differs (TS worker-local unknown selector vs Rust family-filtered unreachable); raw errors are retained. '
             'All summary/preview objects remain raw and are not claimed equal.',
         'ownership': 'pa-daemon internal family resolver; existing pa-core host bridge and Python skill unchanged; no new pub API/dependencies.'}
     try:
