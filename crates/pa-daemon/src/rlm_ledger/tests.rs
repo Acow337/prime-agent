@@ -401,9 +401,15 @@ fn the_artifact_index_updates_after_a_new_partition() {
     spawn("sub-2", "/gone-root/sess-2.jsonl");
     let edges = ledger.live_edges().unwrap();
     assert_eq!(edges.len(), 2, "{edges:?}");
-    assert!(
-        edges.iter().any(|edge| edge.child
-            == canonical_session_path(&second).to_string_lossy().to_string()),
+    let appended = edges
+        .iter()
+        .find(|edge| edge.child_id == "sub-2")
+        .expect("the appended edge");
+    assert_eq!(
+        appended.child,
+        canonical_session_path(&second)
+            .to_string_lossy()
+            .to_string(),
         "the new partition resolves after its append: {edges:?}"
     );
 }
@@ -486,7 +492,11 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
     );
 
     let state = ledger.replay_of_parent(&parent).unwrap();
-    let mut resolver = LivePathResolver::new(agent_dir.clone(), sessions_dir.clone());
+    let mut resolver = LivePathResolver::new(
+        agent_dir.clone(),
+        sessions_dir.clone(),
+        &state.artifact_index,
+    );
     let scoped = resolve_live_edges(&state, &mut resolver);
     assert_eq!(scoped.len(), 2, "{scoped:?}");
     assert_eq!(
@@ -496,14 +506,50 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
         resolver.resolved.keys().collect::<Vec<_>>()
     );
     assert!(
-        resolver.artifact_index.is_none(),
+        state.artifact_index.get().is_none(),
         "no foreign miss walks the artifacts tree"
     );
     let full = ledger.replay_cached().unwrap();
-    let mut unscoped = LivePathResolver::new(agent_dir, sessions_dir);
+    let mut unscoped = LivePathResolver::new(agent_dir, sessions_dir, &full.artifact_index);
     assert_eq!(resolve_live_edges(&full, &mut unscoped).len(), 2);
-    assert!(unscoped.artifact_index.is_some());
+    assert!(full.artifact_index.get().is_some());
     assert_eq!(unscoped.resolved.len(), 103);
+}
+
+#[test]
+fn a_dead_endpoint_under_an_archived_parent_resolves_without_a_tree_walk() {
+    let agent_dir = temp_dir("archive-dead");
+    let sessions_dir = agent_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let ledger = ledger_over(&agent_dir, &sessions_dir);
+    let child = sessions_dir.join("sess-c.jsonl");
+    fs::write(&child, "{}").unwrap();
+    let archived = crate::session_archive::archive_dir(&agent_dir)
+        .join(crate::session_store::session_file_name("sess-p"));
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::write(&archived, "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-1".into(),
+            parent: "/old-root/sessions/sess-p.jsonl".into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "w".into(),
+        })
+        .unwrap();
+    assert!(
+        ledger.live_edges().unwrap().is_empty(),
+        "an archived parent is a dead endpoint"
+    );
+    assert!(
+        ledger
+            .replay_cached()
+            .unwrap()
+            .artifact_index
+            .get()
+            .is_none(),
+        "the archive stat answers without the artifacts walk"
+    );
 }
 
 /// A parent that moved (recorded path gone, same stem under the sessions

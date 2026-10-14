@@ -20,7 +20,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -481,15 +481,26 @@ impl RlmSpawnLedger {
     pub fn deleted_descendant_usage_by_parent(
         &self,
     ) -> Result<HashMap<String, crate::session_usage::SessionUsageSummary>> {
+        self.seed_once()?;
+        let state = self.replay_cached()?;
+        Ok(state
+            .deleted_bucket
+            .get_or_init(|| self.fold_deleted_descendant_usage(&state.edges))
+            .clone())
+    }
+
+    fn fold_deleted_descendant_usage(
+        &self,
+        edges: &[RlmLedgerEdge],
+    ) -> HashMap<String, crate::session_usage::SessionUsageSummary> {
         use crate::session_usage::SessionUsageSummary;
-        let edges = self.edges(true)?;
         let canonical = |path: &str| {
             canonical_session_path(Path::new(path))
                 .to_string_lossy()
                 .to_string()
         };
         let mut live_paths: HashSet<String> = HashSet::new();
-        for edge in &edges {
+        for edge in edges {
             if edge.deleted.is_none() {
                 live_paths.insert(canonical(&edge.child));
             }
@@ -498,7 +509,7 @@ impl RlmSpawnLedger {
         // the child (and its snapshot) for its parent.
         let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
         let mut snapshot_by_path: HashMap<String, Option<SessionUsageSummary>> = HashMap::new();
-        for edge in &edges {
+        for edge in edges {
             if edge.deleted.is_none() {
                 continue;
             }
@@ -612,7 +623,7 @@ impl RlmSpawnLedger {
                 usage_by_parent.insert(parent.clone(), total);
             }
         }
-        Ok(usage_by_parent)
+        usage_by_parent
     }
 
     /// Replay edges without liveness reconciliation. Deleted edges are
@@ -644,8 +655,11 @@ impl RlmSpawnLedger {
     pub fn live_edges(&self) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
-        let mut resolver =
-            LivePathResolver::new(self.agent_dir.clone(), self.canonical_sessions_dir.clone());
+        let mut resolver = LivePathResolver::new(
+            self.agent_dir.clone(),
+            self.canonical_sessions_dir.clone(),
+            &state.artifact_index,
+        );
         Ok(resolve_live_edges(&state, &mut resolver))
     }
 
@@ -664,8 +678,11 @@ impl RlmSpawnLedger {
         self.seed_once()?;
         let parent_file = canonical_session_path(parent_file);
         let state = self.replay_of_parent(&parent_file)?;
-        let mut resolver =
-            LivePathResolver::new(self.agent_dir.clone(), self.canonical_sessions_dir.clone());
+        let mut resolver = LivePathResolver::new(
+            self.agent_dir.clone(),
+            self.canonical_sessions_dir.clone(),
+            &state.artifact_index,
+        );
         let mut edges = resolve_live_edges(&state, &mut resolver);
         edges.retain(|edge| canonical_session_path(Path::new(&edge.parent)) == parent_file);
         Ok(edges)

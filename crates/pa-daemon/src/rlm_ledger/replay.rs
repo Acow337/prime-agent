@@ -5,7 +5,7 @@
 use anyhow::Context as _;
 
 use super::{
-    bail, canonical_session_path, fs, json, Arc, HashMap, Path, PathBuf, Result,
+    bail, canonical_session_path, fs, json, Arc, HashMap, OnceLock, Path, PathBuf, Result,
     RlmLedgerDeleteReason, RlmLedgerEdge, Value,
 };
 
@@ -156,6 +156,8 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
 pub(super) struct ReplayState {
     pub(super) edges: Vec<RlmLedgerEdge>,
     pub(super) index: HashMap<String, usize>,
+    pub(super) artifact_index: OnceLock<HashMap<String, PathBuf>>,
+    pub(super) deleted_bucket: OnceLock<HashMap<String, crate::session_usage::SessionUsageSummary>>,
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {
@@ -167,22 +169,25 @@ pub(super) fn edge_key(child_id: &str, child: &str) -> String {
 
 /// One `live_edges` liveness pass: a recorded path that stats resolves
 /// as itself; a moved file resolves through its durable session id (the
-/// file-name stem) against the sessions dir and the artifacts tree. The
-/// per-pass cache keeps the artifact walk to one pass per read.
-pub(super) struct LivePathResolver {
+/// file-name stem) against the sessions dir and the artifacts tree.
+pub(super) struct LivePathResolver<'a> {
     agent_dir: PathBuf,
     sessions_dir: PathBuf,
     pub(super) resolved: HashMap<String, Option<PathBuf>>,
-    pub(super) artifact_index: Option<HashMap<String, PathBuf>>,
+    artifact_index: &'a OnceLock<HashMap<String, PathBuf>>,
 }
 
-impl LivePathResolver {
-    pub(super) fn new(agent_dir: PathBuf, sessions_dir: PathBuf) -> Self {
+impl<'a> LivePathResolver<'a> {
+    pub(super) fn new(
+        agent_dir: PathBuf,
+        sessions_dir: PathBuf,
+        artifact_index: &'a OnceLock<HashMap<String, PathBuf>>,
+    ) -> Self {
         LivePathResolver {
             agent_dir,
             sessions_dir,
             resolved: HashMap::new(),
-            artifact_index: None,
+            artifact_index,
         }
     }
 
@@ -210,10 +215,16 @@ impl LivePathResolver {
         if is_file(&sessions_candidate) {
             return Some(sessions_candidate);
         }
-        let index = self
-            .artifact_index
-            .get_or_insert_with(|| artifact_session_index(&self.agent_dir));
-        index.get(&id).cloned()
+        if is_file(
+            &crate::session_archive::archive_dir(&self.agent_dir)
+                .join(crate::session_store::session_file_name(&id)),
+        ) {
+            return None;
+        }
+        self.artifact_index
+            .get_or_init(|| artifact_session_index(&self.agent_dir))
+            .get(&id)
+            .cloned()
     }
 }
 
