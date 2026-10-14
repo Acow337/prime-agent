@@ -117,15 +117,23 @@ impl Editor {
                 if before.chars().count() <= 1 || prev == Some(' ') || prev == Some('\t') {
                     self.request_autocomplete(false, false);
                 }
-            } else if c.is_ascii_alphanumeric() || ".-_".contains(c) {
-                let current_line = &self.lines[self.cursor_line];
-                let before = char_prefix(current_line, self.cursor_col);
-                if slash_ctx.is_some() || ends_with_symbol_token(&before) {
-                    self.request_autocomplete(false, false);
-                }
+            } else if slash_ctx.is_some() && (c.is_ascii_alphanumeric() || ".-_".contains(c)) {
+                self.request_autocomplete(false, false);
+            } else {
+                self.request_autocomplete_in_symbol_token();
             }
         } else {
             self.refresh_autocomplete_after_edit(false);
+        }
+    }
+
+    /// Request suggestions when the cursor ends an `@`/`#` token: any edit
+    /// inside it — a `/` too, and a completion that keeps it open (an
+    /// applied directory, `@src/`) — lists what the token now matches.
+    pub(crate) fn request_autocomplete_in_symbol_token(&mut self) {
+        let before = char_prefix(&self.lines[self.cursor_line], self.cursor_col);
+        if ends_with_symbol_token(&before) {
+            self.request_autocomplete(false, false);
         }
     }
 
@@ -238,6 +246,7 @@ impl Editor {
             self.lines = result.lines;
             self.cursor_line = result.cursor_line;
             self.set_cursor_col(result.cursor_col);
+            self.request_autocomplete_in_symbol_token();
             self.emit(EditorEvent::Changed(self.get_text()));
             return;
         }

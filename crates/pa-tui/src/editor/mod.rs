@@ -893,6 +893,83 @@ mod tests {
         );
     }
 
+    /// An editor completing `@` tokens over a base holding the
+    /// `prime-agent/` directory with two children beside an unrelated file.
+    fn at_editor() -> (tempfile::TempDir, Editor) {
+        let base = tempfile::TempDir::new().expect("temp dir");
+        std::fs::create_dir_all(base.path().join("prime-agent")).expect("mkdir");
+        std::fs::write(base.path().join("prime-agent/a.rs"), "x").expect("write");
+        std::fs::write(base.path().join("prime-agent/b.rs"), "x").expect("write");
+        std::fs::write(base.path().join("other.md"), "x").expect("write");
+        let mut e = Editor::new();
+        e.set_autocomplete_provider(Box::new(
+            crate::autocomplete::CombinedAutocompleteProvider::from_registry(
+                base.path().to_path_buf(),
+            ),
+        ));
+        (base, e)
+    }
+
+    /// The host loop's idle ticks until no request is parked and no
+    /// background search runs; the open menu's item values, if any.
+    fn settled_menu(e: &mut Editor) -> Option<Vec<String>> {
+        while e.has_pending_autocomplete() {
+            e.materialize_autocomplete();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        e.autocomplete_state()
+            .map(|state| state.items.iter().map(|item| item.value.clone()).collect())
+    }
+
+    #[test]
+    fn applying_a_directory_completion_lists_its_children() {
+        let children = Some(vec![
+            "@prime-agent/a.rs".to_string(),
+            "@prime-agent/b.rs".to_string(),
+        ]);
+        // Tab on the open menu applies the directory item.
+        let (_base, mut e) = at_editor();
+        for ch in "@prime-ag".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        assert_eq!(
+            settled_menu(&mut e),
+            Some(vec!["@prime-agent/".to_string()])
+        );
+        e.handle_input("tab");
+        assert_eq!(e.get_text(), "@prime-agent/");
+        assert_eq!(settled_menu(&mut e), children);
+        // Tab before the menu opens applies the single match inline.
+        let (_base, mut e) = at_editor();
+        for ch in "@prime-ag".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        e.handle_input("tab");
+        assert_eq!(settled_menu(&mut e), children);
+        assert_eq!(e.get_text(), "@prime-agent/");
+    }
+
+    #[test]
+    fn a_slash_typed_while_the_search_runs_lists_the_children() {
+        let (_base, mut e) = at_editor();
+        for ch in "@prime-agent".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        e.materialize_autocomplete();
+        assert!(
+            !e.is_showing_autocomplete() && e.has_pending_autocomplete(),
+            "the search runs in the background"
+        );
+        e.handle_input("/");
+        assert_eq!(
+            settled_menu(&mut e),
+            Some(vec![
+                "@prime-agent/a.rs".to_string(),
+                "@prime-agent/b.rs".to_string(),
+            ])
+        );
+    }
+
     #[test]
     fn history_navigation() {
         let mut e = ed();
