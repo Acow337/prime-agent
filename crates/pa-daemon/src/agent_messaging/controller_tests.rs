@@ -58,19 +58,28 @@ async fn spawn_fake_supervisor(
                             "list",
                             Some(json!({ "sessions": roster["sessions"] })),
                         ),
-                        // The observe controller's transcript read: a
-                        // fixed five-row tail.
-                        "get_messages" => response_success(
-                            Some(&id),
-                            "get_messages",
-                            Some(json!({ "messages": [
-                                { "role": "user", "content": "m0", "timestamp": 10 },
-                                { "role": "user", "content": "m1", "timestamp": 11 },
-                                { "role": "user", "content": "m2", "timestamp": 12 },
-                                { "role": "user", "content": "m3", "timestamp": 13 },
-                                { "role": "user", "content": "m4", "timestamp": 14 },
-                            ]})),
-                        ),
+                        // Target-specific transcripts let resolver regressions prove
+                        // which worker was read; older fixtures retain their five-row tail.
+                        "get_messages" => {
+                            let active = command["activeSessionId"].as_str().unwrap_or_default();
+                            let messages = roster["messagesByActiveSessionId"]
+                                .get(active)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    json!([
+                                        { "role": "user", "content": "m0", "timestamp": 10 },
+                                        { "role": "user", "content": "m1", "timestamp": 11 },
+                                        { "role": "user", "content": "m2", "timestamp": 12 },
+                                        { "role": "user", "content": "m3", "timestamp": 13 },
+                                        { "role": "user", "content": "m4", "timestamp": 14 },
+                                    ])
+                                });
+                            response_success(
+                                Some(&id),
+                                "get_messages",
+                                Some(json!({ "messages": messages })),
+                            )
+                        }
                         "get_worker_peer_transport" => match ticket_response.clone() {
                             Some(ticket) => {
                                 response_success(Some(&id), &command_type, Some(ticket))
@@ -1092,4 +1101,98 @@ fn summaries_carry_the_supervisor_row_facts() {
         .expect("the caller's own row");
     assert_eq!(current.cwd.as_deref(), Some("/w/agent"));
     assert_eq!(current.message_count, Some(12));
+}
+
+/// Normalized active-id and durable-id suffixes still resolve through the
+/// nuclear family to the correct worker transcript (the pre-PR registry contract).
+#[tokio::test]
+async fn observe_recent_suffixes_read_the_selected_family_transcript() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(socket.clone(), json!({
+        "sessions": [
+            { "activeSessionId": "aaa111", "sessionId": "sess-a" },
+            { "activeSessionId": "abcddd444", "sessionId": "deadbeef-112233",
+              "runtimeKind": "subagent", "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a" },
+        ],
+        "messagesByActiveSessionId": {
+            "aaa111": [{ "role": "user", "content": "wrong parent transcript", "timestamp": 1 }],
+            "abcddd444": [{ "role": "user", "content": "selected child transcript", "timestamp": 2 }],
+        },
+    }), None).await;
+    let observer = observe_controller(socket);
+    for selector in ["DD-D444", "11-2233"] {
+        let recent = observer.recent_messages(selector, 1, 80).await.unwrap();
+        assert_eq!(recent.agent.active_session_id.as_deref(), Some("abcddd444"));
+        assert_eq!(recent.messages[0].text, "selected child transcript");
+    }
+}
+
+/// Names may repeat across parent/child scopes. An ambiguous family name
+/// never authorizes whichever transcript happened to arrive first in the roster.
+#[tokio::test]
+async fn observe_recent_rejects_duplicate_family_names() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(socket.clone(), json!({ "sessions": [
+        { "activeSessionId": "aaa111", "sessionId": "sess-a", "sessionName": "reviewer" },
+        { "activeSessionId": "ddd444", "sessionId": "sess-d", "sessionName": "reviewer",
+          "runtimeKind": "subagent", "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a" },
+    ]}), None).await;
+    let error = observe_controller(socket)
+        .recent_messages("reviewer", 1, 80)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("Ambiguous active session"),
+        "{error}"
+    );
+}
+
+/// The exact active id outranks a different family member named after it,
+/// matching the registry's direct lookup before its suffix/name search.
+#[tokio::test]
+async fn observe_recent_exact_active_id_outranks_a_name_collision() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(socket.clone(), json!({
+        "sessions": [
+            { "activeSessionId": "aaa111", "sessionId": "sess-a" },
+            { "activeSessionId": "fff555", "sessionId": "sess-f", "sessionName": "ddd444" },
+            { "activeSessionId": "ddd444", "sessionId": "sess-d",
+              "runtimeKind": "subagent", "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a" },
+        ],
+        "messagesByActiveSessionId": {
+            "fff555": [{ "role": "user", "content": "wrong name collision", "timestamp": 1 }],
+            "ddd444": [{ "role": "user", "content": "exact active transcript", "timestamp": 2 }],
+        },
+    }), None).await;
+    let recent = observe_controller(socket)
+        .recent_messages("ddd444", 1, 80)
+        .await
+        .unwrap();
+    assert_eq!(recent.messages[0].text, "exact active transcript");
+}
+
+/// Suffix resolution must stay inside the nuclear family; a known foreign
+/// worker with a matching suffix never becomes readable.
+#[tokio::test]
+async fn observe_recent_suffix_does_not_read_a_foreign_transcript() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(socket.clone(), json!({
+        "sessions": [
+            { "activeSessionId": "aaa111", "sessionId": "sess-a" },
+            { "activeSessionId": "fffddd444", "sessionId": "foreign-id", "sessionName": "foreign",
+              "runtimeKind": "subagent", "parentActiveSessionId": "zzz999", "parentSessionId": "foreign-parent" },
+        ],
+        "messagesByActiveSessionId": {
+            "fffddd444": [{ "role": "user", "content": "foreign private transcript", "timestamp": 1 }],
+        },
+    }), None).await;
+    let error = observe_controller(socket)
+        .recent_messages("ddd444", 1, 80)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "agent ddd444 is not reachable");
 }
