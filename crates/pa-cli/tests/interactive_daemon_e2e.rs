@@ -2731,9 +2731,10 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
     );
     let last = outcome.frames.last().expect("a final frame");
     // The failed pick must hold the `model:effort` label (TS
-    // `getModelContextLabel`) with glm-5.3's effective level.
+    // `getModelContextLabel`) with glm-5.3's effective level: the open-weight
+    // default resolves to the model's wired max.
     assert!(
-        last.contains("z-ai/glm-5.3:high ·"),
+        last.contains("z-ai/glm-5.3:max ·"),
         "the footer label holds the resolved flagged model (the failed pick switched nothing):\n{last}"
     );
     drop(supervisor);

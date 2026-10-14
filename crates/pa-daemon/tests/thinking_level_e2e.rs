@@ -1,7 +1,9 @@
 //! E2e for thinking-level propagation on the interactive daemon path: the
 //! `create` config's `thinking` flag must clamp to the model's supported
 //! levels (`max` -> `high` for a reasoning model without xhigh/max maps),
-//! persist the effective level, and apply it to every provider request.
+//! persist the effective level, and apply it to every provider request. A
+//! session without any flag or setting starts at the model's own default
+//! (max for open-weight families, medium otherwise), clamped the same way.
 // Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
 // Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
@@ -268,8 +270,7 @@ impl Client {
     }
 }
 
-/// Shared harness: supervisor + a reasoning model behind the recording
-/// mock; no `thinkingLevelMap`, so `max` must clamp to `high`.
+/// Shared harness: supervisor + the given model behind the recording mock.
 struct Harness {
     #[allow(dead_code)]
     dir: tempfile::TempDir,
@@ -284,6 +285,23 @@ struct Harness {
 
 #[allow(clippy::zombie_processes)]
 fn setup(name: &str, thinking: Option<&str>) -> Harness {
+    setup_with_model(
+        name,
+        thinking,
+        &json!({
+            "id": "mock-1",
+            "name": "Mock 1",
+            "api": "openai-completions",
+            "reasoning": true,
+            "contextWindow": 128_000,
+            "maxTokens": 4096
+        }),
+        "mock-1",
+    )
+}
+
+#[allow(clippy::zombie_processes)]
+fn setup_with_model(name: &str, thinking: Option<&str>, model: &Value, model_id: &str) -> Harness {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -297,16 +315,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
                     "api": "openai-completions",
                     "baseUrl": mock.url(),
                     "apiKey": "sk-battery",
-                    "models": [
-                        {
-                            "id": "mock-1",
-                            "name": "Mock 1",
-                            "api": "openai-completions",
-                            "reasoning": true,
-                            "contextWindow": 128_000,
-                            "maxTokens": 4096
-                        }
-                    ]
+                    "models": [model]
                 }
             }
         })
@@ -320,7 +329,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
         "cwd": dir.path().to_string_lossy(),
         "sessionDir": session_dir.to_string_lossy(),
         "provider": "battery",
-        "model": "mock-1",
+        "model": model_id,
     });
     if let Some(thinking) = thinking {
         config["thinking"] = json!(thinking);
@@ -469,13 +478,45 @@ fn interactive_sessions_without_a_flag_default_to_medium() {
     let mut harness = setup("thinking-default", None);
     let done = harness.prompt("p1", "hi");
     assert_eq!(done["success"], true, "turn failed: {done}");
-    // The TS sdk default (settings default ?? DEFAULT_THINKING_LEVEL) is
-    // medium, clamped by the model.
+    // A closed-family model with no `thinkingLevelMap` keeps the medium
+    // default (the TS sdk's DEFAULT_THINKING_LEVEL), clamped by the model.
     assert_eq!(harness.persisted_thinking_level(), "medium");
     let bodies = harness.mock.request_bodies();
     assert!(!bodies.is_empty(), "the provider was called");
     for body in &bodies {
         assert_eq!(body["reasoning_effort"], "medium", "request effort: {body}");
+    }
+}
+
+#[test]
+fn interactive_open_weight_sessions_default_to_max_thinking() {
+    // The live glm-5.3 route shape (medium a declared null): with no flag and
+    // no setting, an open-weight model starts at its wired max instead of the
+    // medium default that clamps up to high.
+    let mut harness = setup_with_model(
+        "thinking-open-weight",
+        None,
+        &json!({
+            "id": "glm-mock",
+            "name": "GLM Mock",
+            "api": "openai-completions",
+            "reasoning": true,
+            "thinkingLevelMap": {
+                "off": null, "minimal": null, "low": "low",
+                "medium": null, "high": "high", "xhigh": null, "max": "max"
+            },
+            "contextWindow": 128_000,
+            "maxTokens": 4096
+        }),
+        "glm-mock",
+    );
+    let done = harness.prompt("p1", "hi");
+    assert_eq!(done["success"], true, "turn failed: {done}");
+    assert_eq!(harness.persisted_thinking_level(), "max");
+    let bodies = harness.mock.request_bodies();
+    assert!(!bodies.is_empty(), "the provider was called");
+    for body in &bodies {
+        assert_eq!(body["reasoning_effort"], "max", "request effort: {body}");
     }
 }
 

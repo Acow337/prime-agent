@@ -38,7 +38,8 @@ struct MockSession {
     fail_state_after_switch: bool,
 }
 
-/// A reasoning model at the default level (the engine's `medium`, TS `DEFAULT_THINKING_LEVEL`).
+/// A reasoning model at a served level (the tray label is under test, not the
+/// engine's default-level resolution).
 fn reasoning_session() -> MockSession {
     MockSession {
         model: json!({ "id": "glm-5.3", "name": "GLM 5.3", "provider": "zai", "reasoning": true }),

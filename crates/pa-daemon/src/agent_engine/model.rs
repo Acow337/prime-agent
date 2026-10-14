@@ -299,7 +299,8 @@ impl AgentSessionEngine {
     }
 
     /// The effective session thinking level: the create-config flag, then the
-    /// settings default, then "medium" — clamped to what the model supports; an
+    /// settings default, then the model's own default ("max" for open-weight
+    /// families, else "medium") — clamped to what the model supports; an
     /// unresolvable model degrades to "off". Resolved once and cached.
     pub(crate) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
         if let Some(level) = *self
@@ -348,8 +349,12 @@ impl AgentSessionEngine {
                     .get_default_thinking_level()
                     .map(pa_core::settings::ThinkingLevelSetting::model_level)
             })
-            // TS `DEFAULT_THINKING_LEVEL`.
-            .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
+            // No configured level: the model's own default (open-weight
+            // families start at their highest supported level).
+            .unwrap_or_else(|| match &model {
+                Ok(model) => pa_core::models::default_thinking_level_for_model(model),
+                Err(_) => pa_types::ai::ModelThinkingLevel::Medium,
+            });
         let resolved = match model {
             Ok(model) => pa_ai::models::clamp_thinking_level(&model, requested),
             Err(_) => pa_types::ai::ModelThinkingLevel::Off,

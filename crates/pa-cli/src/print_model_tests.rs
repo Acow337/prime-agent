@@ -228,3 +228,50 @@ async fn print_model_provider_only_settings_default_does_not_scope() {
         ("my-gateway", "my-group/my-model")
     );
 }
+
+fn thinking_test_model(id: &str, name: &str) -> pa_types::ai::Model {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "name": name, "api": "openai-completions", "provider": "prime-inference",
+        "baseUrl": "http://127.0.0.1:9/v1", "reasoning": true, "input": [], "cost": {
+            "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0
+        },
+        "contextWindow": 128_000, "maxTokens": 4096
+    }))
+    .unwrap()
+}
+
+#[test]
+fn print_thinking_defaults_to_max_for_open_weight_models() {
+    let (_dir, config, _registry) = fixture(&json!({}));
+    let mut glm = thinking_test_model("z-ai/glm-5.3", "GLM 5.3");
+    // The live glm-5.3 route shape: medium is a declared null, so only the
+    // max default lands on a wired level.
+    glm.thinking_level_map = Some(pa_types::ai::thinking_level_map(&[
+        (pa_types::ai::ModelThinkingLevel::Off, None),
+        (pa_types::ai::ModelThinkingLevel::Minimal, None),
+        (pa_types::ai::ModelThinkingLevel::Low, Some("low")),
+        (pa_types::ai::ModelThinkingLevel::Medium, None),
+        (pa_types::ai::ModelThinkingLevel::High, Some("high")),
+        (pa_types::ai::ModelThinkingLevel::Xhigh, None),
+        (pa_types::ai::ModelThinkingLevel::Max, Some("max")),
+    ]));
+    assert_eq!(
+        super::resolve_thinking_level(&config, &glm),
+        pa_agent::types::ThinkingLevel::Max
+    );
+    let closed = thinking_test_model("anthropic/claude-sonnet-4-5", "Sonnet");
+    assert_eq!(
+        super::resolve_thinking_level(&config, &closed),
+        pa_agent::types::ThinkingLevel::Medium
+    );
+}
+
+#[test]
+fn print_thinking_settings_default_beats_the_model_default() {
+    let (_dir, config, _registry) = fixture(&json!({"defaultThinkingLevel": "low"}));
+    let glm = thinking_test_model("z-ai/glm-5.3", "GLM 5.3");
+    assert_eq!(
+        super::resolve_thinking_level(&config, &glm),
+        pa_agent::types::ThinkingLevel::Low
+    );
+}

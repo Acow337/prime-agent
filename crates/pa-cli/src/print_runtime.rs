@@ -1093,12 +1093,12 @@ async fn select_model(
 }
 
 /// Resolve the session thinking level: the CLI flag, then the settings
-/// default, then "medium" — always clamped to what the model supports.
+/// default, then the model's own default ("max" for open-weight families,
+/// else "medium") — always clamped to what the model supports.
 fn resolve_thinking_level(
     config: &crate::mode::RuntimeConfig,
     model: &Model,
 ) -> pa_agent::types::ThinkingLevel {
-    use pa_types::ai::ModelThinkingLevel;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let requested = config
         .thinking
@@ -1107,7 +1107,7 @@ fn resolve_thinking_level(
                 .get_default_thinking_level()
                 .map(pa_core::settings::ThinkingLevelSetting::model_level)
         })
-        .unwrap_or(ModelThinkingLevel::Medium);
+        .unwrap_or_else(|| pa_core::models::default_thinking_level_for_model(model));
     let clamped = pa_ai::models::clamp_thinking_level(model, requested);
     map_thinking_level(clamped)
 }

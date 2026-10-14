@@ -1,7 +1,7 @@
 //! Model resolution, scoping, and CLI selection.
 
 use pa_agent::types::ThinkingLevel;
-use pa_types::ai::Model;
+use pa_types::ai::{Model, ModelThinkingLevel};
 
 use super::prime_inference::is_private_prime_inference_model;
 
@@ -174,6 +174,32 @@ fn wire_skeleton() -> Model {
         "contextWindow": 0, "maxTokens": 0
     }))
     .expect("skeleton model serializes")
+}
+
+/// Open-weight model families whose unconfigured default is the model's
+/// highest supported thinking level: medium is measurably weak for
+/// GLM-class models. The match is provider-agnostic and substring-based on
+/// the lowercased id and name, so private `internal/`/`dev/` routes and
+/// live catalog entries are covered without a per-model list. Ambiguous
+/// families (mistral) stay out.
+const OPEN_WEIGHT_FAMILIES: [&str; 10] = [
+    "glm", "z-ai", "zai", "qwen", "deepseek", "kimi", "moonshot", "minimax", "llama", "gpt-oss",
+];
+
+/// The unconfigured session thinking level: `max` for open-weight families,
+/// `medium` for everything else. Callers clamp the result to the model's
+/// supported levels, so models without a `max` route still start at their
+/// nearest level and non-reasoning models start off.
+#[must_use]
+pub fn default_thinking_level_for_model(model: &Model) -> ModelThinkingLevel {
+    let open_weight = OPEN_WEIGHT_FAMILIES.iter().any(|family| {
+        model.id.to_lowercase().contains(family) || model.name.to_lowercase().contains(family)
+    });
+    if open_weight {
+        ModelThinkingLevel::Max
+    } else {
+        ModelThinkingLevel::Medium
+    }
 }
 
 /// Preferred default: prime-inference glm-5.3 first, then per-provider defaults.
@@ -624,6 +650,7 @@ fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool 
 mod tests {
     use super::super::prime_inference::private_prime_inference_models;
     use super::*;
+    use pa_types::ai::clamp_thinking_level;
 
     fn model(provider: &str, id: &str, name: &str) -> Model {
         serde_json::from_value(serde_json::json!({
@@ -902,5 +929,70 @@ mod tests {
         let model = find_initial_model(&continued).expect("saved default resolves");
         assert_eq!(model.provider, "prime-inference");
         assert_eq!(model.id, "z-ai/glm-5.3");
+    }
+
+    #[test]
+    fn open_weight_families_default_to_max_thinking() {
+        for (provider, id, name) in [
+            ("prime-inference", "z-ai/glm-5.3", "GLM 5.3"),
+            (
+                "prime-inference",
+                "internal/glm-5.3-high-throughput",
+                "GLM 5.3 High Throughput",
+            ),
+            ("openrouter", "qwen/qwen3.8-max", "QWEN3.8 MAX"),
+            ("groq", "openai/gpt-oss-120b", "GPT OSS 120B"),
+        ] {
+            assert_eq!(
+                default_thinking_level_for_model(&model(provider, id, name)),
+                ModelThinkingLevel::Max,
+                "{id} is an open-weight family"
+            );
+        }
+    }
+
+    #[test]
+    fn closed_models_default_to_medium_thinking() {
+        for (provider, id, name) in [
+            ("anthropic", "claude-sonnet-4-5", "Sonnet"),
+            ("openai", "gpt-5.4", "GPT 5.4"),
+        ] {
+            assert_eq!(
+                default_thinking_level_for_model(&model(provider, id, name)),
+                ModelThinkingLevel::Medium,
+                "{id} is not an open-weight family"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_clamps_to_the_model_supported_levels() {
+        // The live glm-5.3 route shape: medium is a declared null, so the
+        // old medium default clamped up to high; the max default is wired.
+        let mut glm = model("prime-inference", "z-ai/glm-5.3", "GLM 5.3");
+        glm.thinking_level_map = Some(pa_types::ai::thinking_level_map(&[
+            (ModelThinkingLevel::Off, None),
+            (ModelThinkingLevel::Minimal, None),
+            (ModelThinkingLevel::Low, Some("low")),
+            (ModelThinkingLevel::Medium, None),
+            (ModelThinkingLevel::High, Some("high")),
+            (ModelThinkingLevel::Xhigh, None),
+            (ModelThinkingLevel::Max, Some("max")),
+        ]));
+        assert_eq!(
+            clamp_thinking_level(&glm, default_thinking_level_for_model(&glm)),
+            ModelThinkingLevel::Max
+        );
+        // A route without xhigh/max mappings clamps down to high.
+        let mut fast = model("prime-inference", "internal/glm-5.2-fast", "GLM 5.2 Fast");
+        fast.thinking_level_map = Some(pa_types::ai::thinking_level_map(&[
+            (ModelThinkingLevel::Low, Some("low")),
+            (ModelThinkingLevel::Medium, None),
+            (ModelThinkingLevel::High, Some("high")),
+        ]));
+        assert_eq!(
+            clamp_thinking_level(&fast, default_thinking_level_for_model(&fast)),
+            ModelThinkingLevel::High
+        );
     }
 }
