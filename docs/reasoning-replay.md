@@ -26,7 +26,7 @@ fallback. Structured Completions `reasoning_details` remains native within the
 same protocol. A supported input schema does not prove a deployed model consumes it.
 
 Claude-native Anthropic Messages and Bedrock Converse adapters retain signed thinking,
-including empty visible summaries, and map opaque/redacted blocks to their native
+including empty visible summaries and Bedrock application-profile ARNs, and map opaque/redacted blocks to their native
 representations without changing the payload bytes. Both adapters preserve same-model
 history and allow the documented Claude-native bridge across providers. Google Cloud
 Claude accessed through Anthropic Messages is part of that native representation;

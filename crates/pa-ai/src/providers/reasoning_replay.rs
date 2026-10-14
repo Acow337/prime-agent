@@ -12,11 +12,17 @@ pub(crate) const CLAUDE_BINDING_DIAGNOSTICS_BETA: &str = "thinking-binding-contr
 /// A Claude-native wire bridge; this does not assert model/account/prefix readability.
 /// Those bindings remain authoritative at the provider and must not be forged or relaxed.
 pub(crate) fn is_claude_bridge(source: &AssistantMessage, target: &Model) -> bool {
-    let source_is_claude = matches!(
-        source.api.as_str(),
-        "anthropic-messages" | "bedrock-converse-stream"
-    ) && (source.model.to_ascii_lowercase().contains("claude")
-        || source.api == "anthropic-messages" && source.provider == "anthropic");
+    // Bedrock application-profile ARNs omit the underlying model name. Native signed or
+    // redacted reasoning is the transferable representation; let the Claude provider
+    // validate its actual cryptographic/model/account binding instead of guessing the ID.
+    let native_bedrock_payload = source.api == "bedrock-converse-stream"
+        && source.content.iter().any(|block| {
+            matches!(block, AssistantContent::Thinking(thinking)
+            if thinking.redacted.unwrap_or(false)
+                || thinking.thinking_signature.as_deref().is_some_and(|signature|
+                    !signature.trim().is_empty() && !REASONING_FIELDS.contains(&signature)))
+        });
+    let source_is_claude = source.api == "anthropic-messages" || native_bedrock_payload;
     let target_is_claude = matches!(
         target.api.as_str(),
         "anthropic-messages" | "bedrock-converse-stream"

@@ -33,7 +33,12 @@ fn empty_signed_claude_reasoning_round_trips_across_native_adapters() {
         "amazon-bedrock",
         "anthropic.claude-sonnet-4-6-v1",
     );
-    for source in [&anthropic, &bedrock] {
+    let profile = model(
+        "bedrock-converse-stream",
+        "amazon-bedrock",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/synthetic",
+    );
+    for source in [&anthropic, &bedrock, &profile] {
         let context = history(
             source,
             &json!([
@@ -73,7 +78,12 @@ fn opaque_claude_payload_round_trips_without_rewriting_or_becoming_text() {
         "anthropic.claude-sonnet-4-6-v1",
     );
     let encoded = base64::engine::general_purpose::STANDARD.encode(b"SYNTHETIC_OPAQUE_BYTES");
-    for source in [&anthropic, &bedrock] {
+    let profile = model(
+        "bedrock-converse-stream",
+        "amazon-bedrock",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/synthetic",
+    );
+    for source in [&anthropic, &bedrock, &profile] {
         let context = history(
             source,
             &json!([
