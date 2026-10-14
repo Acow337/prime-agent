@@ -3,11 +3,13 @@ import errno
 from pathlib import Path
 import sys
 import tempfile
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from terminal import Terminal
+from terminal import Display, Terminal
 
 # Real process boundary: raw mode and labels must not count as an accepting editor.
 EDITOR = r'''
@@ -25,6 +27,38 @@ while True:
 
 
 class TerminalTests(unittest.TestCase):
+    def test_cleanup_acknowledges_stable_frame_after_pending_input_drains(self):
+        app = Terminal.__new__(Terminal)
+        app.started = time.perf_counter()
+        app.child = SimpleNamespace(child_fd=0)
+        app.display = Display(lambda _: None)
+        app._pending_input = b''
+        sent = []
+        app._send = sent.append
+        state = 0
+
+        def pump():
+            nonlocal state
+            if state == 0 and sent:
+                app.display.feed('\x1b[2;1H> ' + sent[-1])
+                state = 1
+                return True
+            if state == 1 and len(sent) == 2:
+                app.display.feed('\x1b[2;1H\x1b[2K> ')
+                app._pending_input = b'queued terminal reply'
+                state = 2
+                return True
+            if state == 2:
+                app._pending_input = b''
+                state = 3
+            return False
+
+        app.pump = pump
+        with patch('terminal.termios.tcgetattr', return_value=[0, 0, 0, 0]):
+            self.assertGreater(app.ready(1), 0)
+        self.assertEqual(state, 3)
+        self.assertEqual(app.display.screen.cursor.x, 2)
+
     def test_transcript_failure_still_closes_real_child_and_preserves_error(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

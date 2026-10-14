@@ -166,6 +166,8 @@ class Terminal:
         repairs = 0
         echo_index = None
         stage = "noncanonical, no-echo terminal input"
+        complete_frame = False
+        flags = None
         # Keep the ten-character input workload identical across benchmark revisions.
         erase = "\x7f" * 10
         try:
@@ -173,7 +175,8 @@ class Terminal:
                 updated = self.pump()
                 # pyte shifts DEC private modes by five bits. Do not inspect a partial
                 # synchronized TUI frame, especially while the editor row is cleared.
-                updated = updated and (2026 << 5) not in self.display.screen.mode
+                complete_frame = (2026 << 5) not in self.display.screen.mode
+                updated = updated and complete_frame
                 flags = termios.tcgetattr(self.child.child_fd)[3]
                 if flags & (termios.ICANON | termios.ECHO):
                     continue
@@ -183,7 +186,7 @@ class Terminal:
                     # A shortened marker is not a cleared editor. Verify the cursor
                     # returns to the insertion point, allowing any empty-editor placeholder.
                     if (
-                        updated
+                        complete_frame
                         and not self._pending_input
                         and (cursor.y, cursor.x) == origin
                         and not any(probe in self.display.text() for probe in probes)
@@ -236,7 +239,13 @@ class Terminal:
                     next_probe = now + .5
                 # Once any probe renders, stop retrying and acknowledge the newest one
                 # before clearing: older queued retries must not outlive cleanup.
-            raise TimeoutError(f"Timed out waiting for {stage}")
+            cursor = self.display.screen.cursor
+            raise TimeoutError(
+                f"Timed out waiting for {stage}; origin={origin}, "
+                f"cursor={(cursor.y, cursor.x)}, complete_frame={complete_frame}, "
+                f"pending_bytes={len(self._pending_input)}, termios_flags={flags}, "
+                f"visible_probes={sum(probe in self.display.text() for probe in probes)}"
+            )
         finally:
             if needs_clear:
                 try:
