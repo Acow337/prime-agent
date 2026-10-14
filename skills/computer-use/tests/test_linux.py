@@ -55,7 +55,7 @@ class ModuleSurfaceTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(_linux, name, None)))
 
     def test_require_linux_raises_off_linux(self) -> None:
-        with self.assertRaises(ComputerUseError) as caught:
+        with mock.patch.object(_compat, "_backend", lambda: None), self.assertRaises(ComputerUseError) as caught:
             _compat._require_linux()
         self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
         self.assertIn("xdotool", caught.exception.message)

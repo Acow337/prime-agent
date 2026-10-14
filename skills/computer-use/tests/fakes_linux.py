@@ -206,6 +206,7 @@ def fake_x11(script: X11Script | None = None, tools: tuple[str, ...] = TOOL_NAME
     script = script or X11Script()
     patchers = [
         mock.patch.object(_linux.subprocess, "run", script),
+        mock.patch.dict(_linux._TOOL_PATHS, {}, clear=True),
         mock.patch.object(
             _linux.shutil, "which", lambda name: f"/usr/bin/{name}" if name in tools else None
         ),
@@ -252,6 +253,7 @@ def linux_app_environment(
     settings_path = fakes.write_settings(settings_tmp.name, allowed=allowed, blocked=blocked)
     patchers = [
         mock.patch.object(_linux.subprocess, "run", script),
+        mock.patch.dict(_linux._TOOL_PATHS, {}, clear=True),
         mock.patch.object(_linux.shutil, "which", lambda name: f"/usr/bin/{name}"),
         mock.patch.dict(os.environ, {"DISPLAY": ":42"}),
         mock.patch.object(computer_use, "_backend", lambda: "linux"),
