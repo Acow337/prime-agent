@@ -115,7 +115,7 @@ pub fn retain_thought_signature(existing: Option<&str>, incoming: Option<&str>) 
 }
 
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
-fn is_valid_thought_signature(signature: Option<&str>) -> bool {
+pub(super) fn is_valid_thought_signature(signature: Option<&str>) -> bool {
     let Some(signature) = signature else {
         return false;
     };

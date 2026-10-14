@@ -33,6 +33,21 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
         )
         };
         for block in &assistant.content {
+            if let AssistantContent::Text(text) = block {
+                if matches!(
+                    assistant.api.as_str(),
+                    "google-generative-ai" | "google-vertex"
+                ) && text.text_signature.is_some()
+                    && (!same_model
+                        || !crate::providers::google_shared::is_valid_thought_signature(
+                            text.text_signature.as_deref(),
+                        ))
+                {
+                    return Err(limitation(
+                        "the Google adapter cannot retain this text block's source-bound thought signature",
+                    ));
+                }
+            }
             if let AssistantContent::ToolCall(call) = block {
                 if let Some(signature) = call.thought_signature.as_deref() {
                     if !same_protocol {
@@ -41,12 +56,9 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                     let supported = match model.api.as_str() {
                         "google-generative-ai" | "google-vertex" => {
                             same_model
-                                && signature.len() % 4 == 0
-                                && !signature.is_empty()
-                                && signature.bytes().all(|byte| {
-                                    byte.is_ascii_alphanumeric()
-                                        || matches!(byte, b'+' | b'/' | b'=')
-                                })
+                                && crate::providers::google_shared::is_valid_thought_signature(
+                                    Some(signature),
+                                )
                         }
                         "openai-completions" => {
                             serde_json::from_str::<serde_json::Value>(signature)
@@ -134,11 +146,9 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                     .thinking_signature
                     .as_deref()
                     .is_some_and(|signature| {
-                        signature.is_empty()
-                            || signature.len() % 4 != 0
-                            || !signature.bytes().all(|byte| {
-                                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
-                            })
+                        !crate::providers::google_shared::is_valid_thought_signature(Some(
+                            signature,
+                        ))
                     })
             {
                 return Err(limitation(
@@ -239,6 +249,30 @@ mod tests {
         // The Bedrock serializer recognizes Claude application profiles from their names too.
         model.name = "Claude application profile".into();
         let original = context.messages.clone();
+        assert_eq!(validate_reasoning_replay(&model, &context), Ok(()));
+        assert_eq!(context.messages, original);
+    }
+
+    #[test]
+    fn google_signed_text_is_replayable_only_where_the_adapter_retains_its_signature() {
+        let (mut model, mut context) = fixture("google-generative-ai", None);
+        let Message::Assistant(assistant) = &mut context.messages[0] else {
+            unreachable!()
+        };
+        assistant.content = vec![serde_json::from_value(json!({
+            "type": "text", "text": "Synthetic answer", "textSignature": "YWJj"
+        }))
+        .unwrap()];
+        let original = context.messages.clone();
+        for api in ["google-generative-ai", "openai-completions"] {
+            model.api = api.into();
+            let error = validate_reasoning_replay(&model, &context).unwrap_err();
+            assert!(error.contains("text block's source-bound thought signature"));
+            assert!(!error.contains("YWJj"));
+            assert_eq!(context.messages, original);
+        }
+        model.api = "google-generative-ai".into();
+        model.id = "source".into();
         assert_eq!(validate_reasoning_replay(&model, &context), Ok(()));
         assert_eq!(context.messages, original);
     }

@@ -34,7 +34,8 @@ unsigned Anthropic block, plaintext without a Responses reasoning item, a
 Completions route with no supported channel, a signed Claude block sent to a
 Bedrock destination whose serializer has no signature field, or a route requiring thinking as
 answer text. Google currently retains thoughts/signatures only for the same
-model, so a cross-model Google handoff reports that limitation. Its translation
+model, including thought signatures attached to answer-text blocks, so a
+cross-model Google handoff reports that limitation. Its translation
 policy and cross-adapter opaque-signature mappings require separate compatibility
 work; this PR does not invent them. Unsupported original history remains stored.
 
