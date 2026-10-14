@@ -110,14 +110,14 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
     // holder's current state before the process dies; a drain writer
     // racing the fold leaves a valid warm tail (the load re-checks the
     // generation and prefix).
-    if let Some(lease) = worker
+    let lease = worker
         .core
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap()
         .store
         .as_ref()
-        .and_then(|store| store.lease.clone())
-    {
+        .and_then(|store| store.lease.clone());
+    if let Some(lease) = lease {
         lease.write_sidecars();
     }
     // Retain the lease through process exit: kernel disposal has a bounded
