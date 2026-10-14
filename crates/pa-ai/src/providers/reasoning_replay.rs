@@ -135,9 +135,19 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                 return Err(limitation(
                     "the original Google thought signature is not valid base64",
                 ));
+            } else if model.api == "bedrock-converse-stream"
+                && !crate::providers::bedrock::is_anthropic_claude_model(model)
+                && thinking
+                    .thinking_signature
+                    .as_deref()
+                    .is_some_and(|signature| !REASONING_FIELDS.contains(&signature))
+            {
+                return Err(limitation(
+                    "the Bedrock adapter cannot replay this reasoning signature for the destination model",
+                ));
             } else if (model.api == "anthropic-messages"
                 || model.api == "bedrock-converse-stream"
-                    && model.id.to_ascii_lowercase().contains("claude"))
+                    && crate::providers::bedrock::is_anthropic_claude_model(model))
                 && thinking
                     .thinking_signature
                     .as_deref()
@@ -210,6 +220,17 @@ mod tests {
     }
 
     #[test]
+    fn bedrock_claude_profile_keeps_its_original_signature_without_model_id_guessing() {
+        let (mut model, context) =
+            fixture("bedrock-converse-stream", Some("NATIVE_CLAUDE_SIGNATURE"));
+        // The Bedrock serializer recognizes Claude application profiles from their names too.
+        model.name = "Claude application profile".into();
+        let original = context.messages.clone();
+        assert_eq!(validate_reasoning_replay(&model, &context), Ok(()));
+        assert_eq!(context.messages, original);
+    }
+
+    #[test]
     fn incompatible_representations_fail_without_losing_original_reasoning() {
         for (api, signature, expected) in [
             (
@@ -231,6 +252,11 @@ mod tests {
                 "openai-completions",
                 Some("BOUND_SIGNATURE"),
                 "cannot replay this source-bound signature",
+            ),
+            (
+                "bedrock-converse-stream",
+                Some("NATIVE_CLAUDE_SIGNATURE"),
+                "cannot replay this reasoning signature",
             ),
         ] {
             let (model, context) = fixture(api, signature);
