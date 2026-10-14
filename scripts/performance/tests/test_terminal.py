@@ -27,6 +27,30 @@ while True:
 
 
 class TerminalTests(unittest.TestCase):
+    def test_keyboard_protocol_pops_do_not_paint_across_split_chunks(self):
+        replies = []
+        display = Display(replies.append)
+        display.feed('\x1b[2;1H> ')
+        before = display.text()
+        for char in '\x1b[<u' * 3 + '\x1b[>7u':
+            display.feed(char)
+        self.assertEqual(display.text(), before)
+        self.assertEqual((display.screen.cursor.y, display.screen.cursor.x), (1, 2))
+        self.assertEqual(replies, [])
+        self.assertEqual(display.pending, '')
+
+    def test_editor_cleanup_survives_real_pty_keyboard_protocol_pops(self):
+        editor = EDITOR + "\n    if char == '\\x7f' and not text:\n        os.write(1, b'\\x1b[<u' * 3 + b'\\x1b[>7u')\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = Terminal([sys.executable, '-c', editor], root, os.environ.copy(), root / 'pops')
+            try:
+                self.assertGreater(app.ready(3), 0)
+                self.assertEqual(app.display.screen.cursor.x, 2)
+                self.assertIn('\x1b[<u' * 3, ''.join(app.raw))
+            finally:
+                app.close()
+
     def test_cleanup_acknowledges_stable_frame_after_pending_input_drains(self):
         app = Terminal.__new__(Terminal)
         app.started = time.perf_counter()

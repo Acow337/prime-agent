@@ -15,6 +15,9 @@ PROBE_INTERVAL = 0.02
 MAX_PENDING_INPUT = 65_536
 
 QUERIES = {
+    # pyte does not recognize Kitty's bare stack pop and paints its final 'u'.
+    # This is a terminal control, with no display effect and no response.
+    "\x1b[<u": "",
     "\x1b[6n": "\x1b[1;1R",
     "\x1b[?6n": "\x1b[?1;1R",
     "\x1b[c": "\x1b[?1;2c",
@@ -47,7 +50,8 @@ class Display:
                 break
             position, query = min(matches)
             self.stream.feed(self.pending[:position])
-            self.reply(QUERIES[query])
+            if QUERIES[query]:
+                self.reply(QUERIES[query])
             self.pending = self.pending[position + len(query) :]
         keep = max(
             (
