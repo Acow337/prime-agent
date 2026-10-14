@@ -34,6 +34,7 @@ pub struct McpOAuthConfig {
     pub url: String,
     /// Pre-registered client id (servers without dynamic registration).
     pub client_id: Option<String>,
+    pub callback_port: Option<u16>,
     /// Requested scopes; defaults to the server's advertised scopes.
     pub scopes: Option<String>,
 }
@@ -182,7 +183,7 @@ pub async fn mcp_login(
     // `state` is independent of the PKCE verifier: the verifier is the
     // token-exchange secret, `state` is echoed on the redirect URL.
     let state = random_state();
-    let callback = Arc::new(CallbackServer::start(&config.label).await?);
+    let callback = Arc::new(CallbackServer::start(&config.label, config.callback_port).await?);
     let redirect_uri = callback.redirect_uri();
     let mut auth_params: Vec<(String, String)> = vec![
         ("client_id".to_string(), client_id.clone()),
@@ -667,6 +668,7 @@ mod tests {
             label: server.to_string(),
             url: url.to_string(),
             client_id: None,
+            callback_port: None,
             scopes: None,
         }
     }
@@ -1269,7 +1271,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_registered_client_skips_registration() {
+    async fn pre_registered_client_skips_registration_and_pins_the_redirect() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 404, None, ""),
             (
@@ -1289,6 +1294,7 @@ mod tests {
         let ui = test_ui();
         let mut login_config = config("root", ORIGIN_URL);
         login_config.client_id = Some("root-client".to_string());
+        login_config.callback_port = Some(port);
         let credentials = mcp_login(&http, &login_config, &ui).await.unwrap();
         match &credentials {
             AuthCredential::Oauth {
@@ -1307,6 +1313,27 @@ mod tests {
             .map(|(url, _)| url.clone())
             .collect();
         assert!(!urls.contains(&ORIGIN_REGISTER.to_string()));
+        let redirect_uri = format!("http://localhost:{port}/callback");
+        let auth_url = Url::parse(&ui.auth_url.lock().unwrap()).unwrap();
+        let redirect = auth_url
+            .query_pairs()
+            .find(|(key, _)| key == "redirect_uri")
+            .map(|(_, value)| value.to_string())
+            .unwrap();
+        assert_eq!(redirect, redirect_uri);
+        let token_request = http
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(url, _)| url == ORIGIN_TOKEN)
+            .cloned()
+            .unwrap();
+        let body = token_request.1.unwrap();
+        let encoded_redirect = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("redirect_uri", &redirect_uri)
+            .finish();
+        assert!(body.contains(&encoded_redirect));
     }
 
     /// The Vercel shape (TS parity): a root endpoint whose declared

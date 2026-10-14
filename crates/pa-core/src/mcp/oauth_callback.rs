@@ -71,11 +71,18 @@ pub struct CallbackServer {
 impl CallbackServer {
     /// Bind the first free candidate port. All candidates busy is a hard
     /// error (the TS wording).
-    pub async fn start(label: &str) -> Result<Self> {
+    pub async fn start(label: &str, callback_port: Option<u16>) -> Result<Self> {
         let host = callback_host();
         let mut last_error: Option<String> = None;
-        for offset in 0..CALLBACK_PORT_COUNT {
-            let port = CALLBACK_PORT_BASE + offset;
+        let ports: Vec<u16> = callback_port.map_or_else(
+            || {
+                (0..CALLBACK_PORT_COUNT)
+                    .map(|offset| CALLBACK_PORT_BASE + offset)
+                    .collect()
+            },
+            |port| vec![port],
+        );
+        for port in ports {
             let listener = match TcpListener::bind((host.as_str(), port)).await {
                 Ok(listener) => listener,
                 Err(error) => {
@@ -98,12 +105,19 @@ impl CallbackServer {
             });
             return Ok(CallbackServer { shared, port });
         }
-        Err(anyhow!(
-            "Could not start the OAuth callback server: ports {CALLBACK_PORT_BASE}-{} are all in use. \
-             Close other login attempts and retry. ({label}; {})",
-            CALLBACK_PORT_BASE + CALLBACK_PORT_COUNT - 1,
-            last_error.unwrap_or_else(|| "no candidate port bound".to_string()),
-        ))
+        match callback_port {
+            Some(port) => Err(anyhow!(
+                "Could not start the OAuth callback server: port {port} is in use. \
+                 Close the process holding it and retry. ({label}; {})",
+                last_error.unwrap_or_else(|| "port not bound".to_string()),
+            )),
+            None => Err(anyhow!(
+                "Could not start the OAuth callback server: ports {CALLBACK_PORT_BASE}-{} are all in use. \
+                 Close other login attempts and retry. ({label}; {})",
+                CALLBACK_PORT_BASE + CALLBACK_PORT_COUNT - 1,
+                last_error.unwrap_or_else(|| "no candidate port bound".to_string()),
+            )),
+        }
     }
 
     /// The local URL the authorization redirect must land on.
@@ -319,10 +333,21 @@ mod tests {
         let Ok(blocker) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT_BASE)) else {
             return;
         };
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", None).await.unwrap();
         assert_ne!(server.redirect_uri(), redirect_uri_for(CALLBACK_PORT_BASE));
         assert!(server.redirect_uri().starts_with("http://localhost:5370"));
         drop(blocker);
+    }
+
+    #[tokio::test]
+    async fn configured_busy_port_fails_without_fallback() {
+        let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = blocker.local_addr().unwrap().port();
+        let error = CallbackServer::start("Linear", Some(port))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("port {port} is in use")), "{error}");
     }
 
     #[tokio::test]
@@ -337,7 +362,7 @@ mod tests {
             // invariant on this machine.
             return;
         }
-        let error = CallbackServer::start("Linear")
+        let error = CallbackServer::start("Linear", None)
             .await
             .unwrap_err()
             .to_string();
@@ -346,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_flow_settles_code_and_state() {
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", None).await.unwrap();
         let response = reqwest::Client::new()
             .get(format!(
                 "http://127.0.0.1:{}/callback?code=the-code&state=the-state",
@@ -367,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_callback_settles_none() {
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", None).await.unwrap();
         let response = reqwest::Client::new()
             .get(format!(
                 "http://127.0.0.1:{}/callback?error=access_denied",
@@ -382,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_route_is_404_without_settling() {
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", None).await.unwrap();
         let response = reqwest::Client::new()
             .get(format!("http://127.0.0.1:{}/other", server.port))
             .send()
