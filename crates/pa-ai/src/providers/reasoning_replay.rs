@@ -70,7 +70,11 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                 .filter(|field| REASONING_FIELDS.contains(field));
             if !same_protocol
                 && (thinking.redacted.unwrap_or(false)
-                    || thinking.thinking_signature.is_some() && channel_marker.is_none())
+                    || thinking
+                        .thinking_signature
+                        .as_deref()
+                        .is_some_and(|signature| !signature.trim().is_empty())
+                        && channel_marker.is_none())
             {
                 return Err(limitation("the reasoning carries a source-bound signature or opaque payload that cannot be translated into plaintext reasoning"));
             }
@@ -83,7 +87,10 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                 }
                 let structured_same_protocol = same_protocol
                     && decode_reasoning_details(thinking.thinking_signature.as_deref()).is_some();
-                if thinking.thinking_signature.is_some()
+                if thinking
+                    .thinking_signature
+                    .as_deref()
+                    .is_some_and(|signature| !signature.trim().is_empty())
                     && channel_marker.is_none()
                     && !structured_same_protocol
                 {
@@ -115,7 +122,9 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                 && thinking
                     .thinking_signature
                     .as_deref()
-                    .is_some_and(|signature| !REASONING_FIELDS.contains(&signature))
+                    .is_some_and(|signature| {
+                        !signature.trim().is_empty() && !REASONING_FIELDS.contains(&signature)
+                    })
             {
                 return Err(limitation(
                     "the Mistral adapter has no thought-signature replay field",
@@ -140,7 +149,9 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                 && thinking
                     .thinking_signature
                     .as_deref()
-                    .is_some_and(|signature| !REASONING_FIELDS.contains(&signature))
+                    .is_some_and(|signature| {
+                        !signature.trim().is_empty() && !REASONING_FIELDS.contains(&signature)
+                    })
             {
                 return Err(limitation(
                     "the Bedrock adapter cannot replay this reasoning signature for the destination model",
@@ -210,6 +221,8 @@ mod tests {
                 Some(r#"{"type":"reasoning","encrypted_content":"SYNTHETIC_OPAQUE"}"#),
             ),
             ("mistral-conversations", None),
+            // Bedrock initializes unsigned reasoning with an empty signature placeholder.
+            ("bedrock-converse-stream", Some("")),
             ("openai-completions", Some("reasoning_content")),
         ] {
             let (model, context) = fixture(api, signature);
