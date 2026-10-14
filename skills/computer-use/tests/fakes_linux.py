@@ -115,6 +115,7 @@ class X11Script:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.rules: list[dict[str, Any]] = []
+        self.windows: list[Any] = []
 
     def on(
         self,
@@ -162,10 +163,24 @@ class X11Script:
             return types.SimpleNamespace(
                 returncode=rule["returncode"], stdout=rule["stdout"], stderr=rule["stderr"]
             )
+        from computer_use import _linux
+
+        if tail[:1] == ("search",):
+            output = "".join(f"{window.window_id}\n" for window in self.windows)
+            return types.SimpleNamespace(returncode=0, stdout=output.encode(), stderr=b"")
+        if tail[:1] in (("getwindowname",), ("getwindowclassname",)):
+            window = next((window for window in self.windows if str(window.window_id) == tail[1]), None)
+            if window is None:
+                return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"no such window")
+            value = window.title if tail[0] == "getwindowname" else window.wm_class
+            return types.SimpleNamespace(returncode=0, stdout=((value or "") + "\n").encode(), stderr=b"")
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     def xwininfo_tree(self, output: str) -> None:
         """Serve one xwininfo root-tree output; a later call replaces the served tree."""
+        from computer_use import _linux
+
+        self.windows = _linux._parse_tree(output)
         self.rules.insert(
             0,
             {

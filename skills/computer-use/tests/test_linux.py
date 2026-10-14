@@ -167,7 +167,7 @@ class ObserveTests(unittest.TestCase):
         with fake_x11(script):
             _linux._observe(104)
         self.assertEqual(
-            script.calls,
+            script.tool_calls("xwininfo"),
             [["/usr/bin/xwininfo", "-root", "-tree", "-int"]],
         )
 
@@ -291,7 +291,7 @@ class InputArgvTests(unittest.TestCase):
             script.calls,
             [
                 ["/usr/bin/xdotool", "mousemove", "--window", "220", "11", "20"],
-                ["/usr/bin/xdotool", "click", "1"],
+                ["/usr/bin/xdotool", "click", "--window", "220", "1"],
             ],
         )
 
@@ -305,11 +305,11 @@ class InputArgvTests(unittest.TestCase):
             script.calls,
             [
                 ["/usr/bin/xdotool", "mousemove", "--window", "220", "1", "2"],
-                ["/usr/bin/xdotool", "click", "--repeat", "3", "1"],
+                ["/usr/bin/xdotool", "click", "--window", "220", "--repeat", "3", "1"],
                 ["/usr/bin/xdotool", "mousemove", "--window", "220", "1", "2"],
-                ["/usr/bin/xdotool", "click", "2"],
+                ["/usr/bin/xdotool", "click", "--window", "220", "2"],
                 ["/usr/bin/xdotool", "mousemove", "--window", "220", "1", "2"],
-                ["/usr/bin/xdotool", "click", "--repeat", "2", "3"],
+                ["/usr/bin/xdotool", "click", "--window", "220", "--repeat", "2", "3"],
             ],
         )
 
@@ -328,19 +328,14 @@ class InputArgvTests(unittest.TestCase):
                         _linux._click(220, kwargs.get("point", (1, 2)), button=kwargs.get("button", "left"), count=kwargs.get("count", 1))
                 self.assertEqual(caught.exception.code, "INVALID_ARGUMENT")
 
-    def test_drag_presses_moves_and_releases(self) -> None:
+    def test_drag_refuses_before_posting_unscoped_motion(self) -> None:
         script = X11Script()
         with fake_x11(script):
-            _linux._drag(220, (1, 2), (30.6, 40.7))
-        self.assertEqual(
-            script.calls,
-            [
-                ["/usr/bin/xdotool", "mousemove", "--window", "220", "1", "2"],
-                ["/usr/bin/xdotool", "mousedown", "1"],
-                ["/usr/bin/xdotool", "mousemove", "--window", "220", "31", "41"],
-                ["/usr/bin/xdotool", "mouseup", "1"],
-            ],
-        )
+            with self.assertRaises(ComputerUseError) as caught:
+                _linux._drag(220, (1, 2), (30.6, 40.7))
+        self.assertEqual(caught.exception.code, "ACTION_UNSUPPORTED")
+        self.assertEqual(script.calls, [])
+
 
     def test_scroll_moves_then_repeats_wheel_clicks(self) -> None:
         script = X11Script()
@@ -350,6 +345,8 @@ class InputArgvTests(unittest.TestCase):
         expected_click = [
             "/usr/bin/xdotool",
             "click",
+            "--window",
+            "220",
             "--repeat",
             str(2 * _linux._WHEEL_CLICKS_PER_PAGE),
             "--delay",
@@ -364,6 +361,8 @@ class InputArgvTests(unittest.TestCase):
                 [
                     "/usr/bin/xdotool",
                     "click",
+                    "--window",
+                    "220",
                     "--repeat",
                     str(_linux._WHEEL_CLICKS_PER_PAGE),
                     "--delay",
@@ -435,6 +434,7 @@ class InputArgvTests(unittest.TestCase):
                     "220",
                     "--delay",
                     str(_linux._TYPE_DELAY_MS),
+                    "--",
                     "h\u00e9llo",
                 ]
             ],
@@ -545,25 +545,25 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(result["height"], 480)
         self.assertEqual(result, {"path": argv[3], "width": 640, "height": 480})
 
-    def test_maim_failure_falls_back_to_scrot(self) -> None:
+    def test_maim_failure_never_falls_back_to_the_focused_window(self) -> None:
         script = X11Script()
         script.on("-i", returncode=1, stderr=b"maim: failed to take screenshot")
         script.on("-u", png=(400, 300))
-        with fake_x11(script):
-            result = _linux._screenshot_window(220)
-        self.assertEqual(script.calls[0][:2], ["/usr/bin/maim", "-i"])
-        self.assertEqual(script.calls[1][:3], ["/usr/bin/scrot", "-u", "-o"])
-        self.assertEqual(result["width"], 400)
-        self.assertEqual(result["height"], 300)
+        with fake_x11(script), self.assertRaises(ComputerUseError) as caught:
+            _linux._screenshot_window(220)
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertEqual(script.tool_calls("scrot"), [])
 
-    def test_missing_maim_uses_scrot_directly(self) -> None:
+
+    def test_missing_maim_refuses_the_unscoped_fallback(self) -> None:
         script = X11Script()
         script.on("-u", png=(100, 100))
         with fake_x11(script, tools=("xdotool", "xwininfo", "scrot")):
-            result = _linux._screenshot_window(220)
-        self.assertEqual(len(script.calls), 1)
-        self.assertEqual(script.calls[0][:3], ["/usr/bin/scrot", "-u", "-o"])
-        self.assertEqual(result["width"], 100)
+            with self.assertRaises(ComputerUseError) as caught:
+                _linux._screenshot_window(220)
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertEqual(script.calls, [])
+
 
     def test_both_capture_tools_missing_raises(self) -> None:
         with fake_x11(X11Script(), tools=("xdotool", "xwininfo")):
@@ -571,7 +571,6 @@ class CaptureTests(unittest.TestCase):
                 _linux._screenshot_window(220)
         self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
         self.assertIn("maim", caught.exception.message)
-        self.assertIn("scrot", caught.exception.message)
 
     def test_every_attempt_failing_raises_with_the_reasons(self) -> None:
         script = X11Script()
@@ -582,7 +581,7 @@ class CaptureTests(unittest.TestCase):
                 _linux._screenshot_window(220)
         self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
         self.assertIn("maim failed with exit code 1", caught.exception.message)
-        self.assertIn("scrot failed with exit code 1", caught.exception.message)
+        self.assertEqual(script.tool_calls("scrot"), [])
 
     def test_invalid_png_output_falls_back_then_raises(self) -> None:
         script = X11Script()
@@ -689,11 +688,10 @@ class AppLinuxDispatchTests(unittest.TestCase):
             app = self.bind_notes(script)
             asyncio.run(app.click(0))
         self.assertEqual(
-            script.tool_calls("xdotool"),
+            [argv for argv in script.tool_calls("xdotool") if argv[1] in ("mousemove", "click")],
             [
-                ["/usr/bin/xdotool", "getwindowname", "105"],
                 ["/usr/bin/xdotool", "mousemove", "--window", "104", "360", "280"],
-                ["/usr/bin/xdotool", "click", "1"],
+                ["/usr/bin/xdotool", "click", "--window", "104", "1"],
             ],
         )
 
@@ -706,10 +704,10 @@ class AppLinuxDispatchTests(unittest.TestCase):
             app = self.bind_notes(script)
             asyncio.run(app.click((10, 20), button="right", count=2))
         self.assertEqual(
-            script.tool_calls("xdotool"),
+            [argv for argv in script.tool_calls("xdotool") if argv[1] in ("mousemove", "click")],
             [
                 ["/usr/bin/xdotool", "mousemove", "--window", "104", "10", "20"],
-                ["/usr/bin/xdotool", "click", "--repeat", "2", "3"],
+                ["/usr/bin/xdotool", "click", "--window", "104", "--repeat", "2", "3"],
             ],
         )
 
@@ -725,31 +723,18 @@ class AppLinuxDispatchTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "INVALID_ARGUMENT")
         self.assertIn("outside the observed window", caught.exception.message)
 
-    def test_drag_scroll_keys_and_type_dispatch_to_linux(self) -> None:
+    def test_scroll_dispatches_and_unverifiable_input_refuses(self) -> None:
         import asyncio
-
-        import computer_use
-
         with fakes_linux.linux_app_environment() as script:
             app = self.bind_notes(script)
-            asyncio.run(app.drag((1, 2), (3, 4)))
             asyncio.run(app.scroll(0, "down", pages=2))
-            asyncio.run(app.press_key("cmd+s"))
-            asyncio.run(app.type_text("hello there"))
-        self.assertEqual(
-            script.tool_calls("xdotool"),
-            [
-                ["/usr/bin/xdotool", "mousemove", "--window", "104", "1", "2"],
-                ["/usr/bin/xdotool", "mousedown", "1"],
-                ["/usr/bin/xdotool", "mousemove", "--window", "104", "3", "4"],
-                ["/usr/bin/xdotool", "mouseup", "1"],
-                ["/usr/bin/xdotool", "getwindowname", "105"],
-                ["/usr/bin/xdotool", "mousemove", "--window", "104", "360", "280"],
-                ["/usr/bin/xdotool", "click", "--repeat", "20", "--delay", "50", "5"],
-                ["/usr/bin/xdotool", "key", "--window", "104", "super+s"],
-                ["/usr/bin/xdotool", "type", "--window", "104", "--delay", "12", "hello there"],
-            ],
-        )
+            for call in (lambda: app.drag((1, 2), (3, 4)), lambda: app.press_key("cmd+s"), lambda: app.type_text("hello")):
+                with self.assertRaises(ComputerUseError) as caught:
+                    asyncio.run(call())
+                self.assertEqual(caught.exception.code, "ACTION_UNSUPPORTED")
+        self.assertEqual(script.argvs("click"), [["/usr/bin/xdotool", "click", "--window", "104", "--repeat", "20", "--delay", "50", "5"]])
+        self.assertEqual(script.argvs("key") + script.argvs("type") + script.argvs("mousedown"), [])
+
 
     def test_element_stale_when_the_live_title_changes(self) -> None:
         import asyncio
@@ -758,7 +743,7 @@ class AppLinuxDispatchTests(unittest.TestCase):
 
         with fakes_linux.linux_app_environment() as script:
             app = self.bind_notes(script)
-            script.on("getwindowname", stdout=b"renamed\n")
+            script.on("getwindowname", "105", stdout=b"renamed\n")
             with self.assertRaises(ComputerUseError) as caught:
                 asyncio.run(app.click(0))
         self.assertEqual(caught.exception.code, "ELEMENT_STALE")
@@ -814,7 +799,7 @@ class AppLinuxDispatchTests(unittest.TestCase):
                         with self.assertRaises(ComputerUseError) as caught:
                             asyncio.run(call(app))
                         self.assertEqual(caught.exception.code, "ACTION_UNSUPPORTED")
-                        self.assertIn("not available on the Linux X11 backend", caught.exception.message)
+                        self.assertIn("Linux", caught.exception.message)
                         self.assert_action_event(
                             recorder.events[-1],
                             {"action": action, "outcome": "error", "error_code": "ACTION_UNSUPPORTED"},

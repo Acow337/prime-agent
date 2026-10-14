@@ -17,25 +17,14 @@ absolute position - comes from its own line in the root tree; window_rect is
 that absolute (x, y, width, height) and element positions are absolute
 root-window coordinates, matching the mac App layer's screen-space contract.
 
-Input goes through xdotool, window-bound without activation where supported:
-`xdotool key --window <id> <chords>` and `xdotool type --window <id> --delay
-<ms> <text>` deliver synthetic (XSendEvent) keyboard input to the bound
-window, and `xdotool mousemove --window <id> <x> <y>` moves the pointer with
-WINDOW-RELATIVE coordinates (input seams take window-relative points, unlike
-the mac inject's screen-space points) followed by a plain XTest click at the
-moved pointer. Apps that ignore synthetic events make the plain forms (which
-deliver to the focused window or the real pointer) the documented fallback;
-this module never retries with them because a plain retry can deliver input to
-whatever app currently holds focus, which breaks app scoping.
+Button events explicitly address the bound window through xdotool's
+XSendEvent path; no global button fallback is allowed. Dragging is refused
+because motion events cannot be scoped. Keyboard delivery seams remain
+window-addressed, but App refuses keyboard entry while the secure-focus
+probe is unknown. X11 does not provide that probe.
 
-Capture prefers `maim -i <window_id>` and falls back to `scrot -u -o <path>`
-(capture of the FOCUSED window, not the bound one - documented divergence
-when maim fails or is absent); the file management, retention sweep, and PNG
-dimension verification are reused from computer_use.capture.
-
-X11 window metadata exposes no secure-input role (no AXSecureTextField
-equivalent), so type_text on Linux cannot refuse password fields; the gap is
-documented in _focused_is_secure.
+Capture requires `maim -i <window_id>`; missing or failed maim is an error.
+The screenshot management and PNG checks are shared with the mac backend.
 
 Errors follow the shared ComputerUseError taxonomy, model-facing:
 TRANSPORT_ERROR says the backend is broken (missing tools, a missing DISPLAY,
@@ -59,6 +48,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, NamedTuple
 from uuid import uuid4
@@ -83,7 +73,6 @@ _TOOL_PATHS: dict[str, str] = {
     "xdotool": "/usr/bin/xdotool",
     "xwininfo": "/usr/bin/xwininfo",
     "maim": "/usr/bin/maim",
-    "scrot": "/usr/bin/scrot",
 }
 
 _BUTTON_NUMBERS: dict[str, int] = {"left": 1, "middle": 2, "right": 3}
@@ -136,13 +125,13 @@ _ID_RE = re.compile(r"^(?P<indent>[ ]+)(?P<id>\d+)(?: \(the root window\))?(?P<n
 _COUNT_RE = re.compile(r"^[ ]+\d+ (child|children)[:.]$")
 
 
-def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+def _run(argv: list[str], *, timeout_seconds: float = _TIMEOUT_SECONDS) -> subprocess.CompletedProcess[bytes]:
     """Run one X11 tool, raising TRANSPORT_ERROR for an unrunnable tool or a timeout."""
     try:
-        return subprocess.run(argv, capture_output=True, timeout=_TIMEOUT_SECONDS)
+        return subprocess.run(argv, capture_output=True, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as error:
         raise ComputerUseError(
-            "TRANSPORT_ERROR", f"{Path(argv[0]).name} timed out after {int(_TIMEOUT_SECONDS)} seconds"
+            "TRANSPORT_ERROR", f"{Path(argv[0]).name} timed out after {timeout_seconds:g} seconds"
         ) from error
     except OSError as error:
         raise ComputerUseError(
@@ -184,14 +173,14 @@ def _tool(name: str) -> str:
     return found
 
 
-def _run_checked(argv: list[str], action: str) -> None:
+def _run_checked(argv: list[str], action: str, *, timeout_seconds: float = _TIMEOUT_SECONDS) -> None:
     """Run one xdotool input command, raising INJECTION_FAILED with its capped stderr on failure.
 
     A nonzero exit means the action failed to deliver (INJECTION_FAILED, so
     the model retries); an unrunnable or hung run raises TRANSPORT_ERROR from
     _run because the backend itself is broken.
     """
-    finished = _run(argv)
+    finished = _run(argv, timeout_seconds=timeout_seconds)
     if finished.returncode != 0:
         reason = _capped_output(finished)
         raise ComputerUseError(
@@ -290,7 +279,13 @@ def _window_name(namepart: str | None) -> str | None:
 
 
 def _root_windows() -> list[_Window]:
-    """Read the whole root window tree through xwininfo, in depth-first order."""
+    """Read visible tree rows corroborated by separate window identity queries.
+
+    Titles are raw, untrusted text in xwininfo. A parsed id, title, and
+    WM_CLASS must all match independent X11 queries before the row can
+    participate in discovery, binding, or observation. Multiline titles
+    that cannot be represented unambiguously are omitted.
+    """
     _require_display()
     finished = _run([_tool("xwininfo"), "-root", "-tree", "-int"])
     if finished.returncode != 0:
@@ -299,7 +294,33 @@ def _root_windows() -> list[_Window]:
             "TRANSPORT_ERROR",
             f"xwininfo failed with exit code {finished.returncode}: {reason}",
         )
-    return _parse_tree(finished.stdout.decode("utf-8", "replace"))
+    # A raw window title can inject apparent rows into xwininfo's output.
+    # Enumerate visible ids independently, then verify the name and class
+    # through separate X11 requests before trusting a parsed row.
+    visible = set(_search_windows(".*", by="name"))
+    deadline = time.monotonic() + _TIMEOUT_SECONDS
+    verified: list[_Window] = []
+    seen: set[int] = set()
+    xdotool = _tool("xdotool")
+    for window in _parse_tree(finished.stdout.decode("utf-8", "replace")):
+        if window.window_id not in visible or window.window_id in seen:
+            continue
+        identity: list[subprocess.CompletedProcess[bytes]] = []
+        for command in ("getwindowname", "getwindowclassname"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ComputerUseError("TRANSPORT_ERROR", "window identity verification exceeded its total budget")
+            identity.append(_run([xdotool, command, str(window.window_id)], timeout_seconds=remaining))
+        name, klass = identity
+        if name.returncode != 0 or klass.returncode != 0:
+            continue
+        title = name.stdout.decode("utf-8", "replace").removesuffix("\n") or None
+        wm_class = klass.stdout.decode("utf-8", "replace").removesuffix("\n") or None
+        if window.title != title or window.wm_class != wm_class:
+            continue
+        seen.add(window.window_id)
+        verified.append(window)
+    return verified
 
 
 def _search_windows(pattern: str, *, by: str = "class", only_visible: bool = True) -> list[int]:
@@ -497,13 +518,9 @@ def _live_fingerprint(window_id: int) -> tuple[str | None, str | None]:
 
 
 def _focused_is_secure(window_id: int) -> bool | None:
-    """Report whether the window's focused element is a secure field; always None on X11.
+    """Report unknown: X11 metadata has no secure-field role.
 
-    X11 window metadata has no secure-input role (no AXSecureTextField
-    equivalent), so this backend cannot detect password fields: type_text on
-    Linux cannot refuse a focused password field the way the mac backend
-    does, and callers read None as "unknown" while the skill documents the
-    gap to the user.
+    The App layer must refuse keyboard entry when this probe is unknown.
     """
     _window_id(window_id)
     return None
@@ -523,17 +540,10 @@ def _chord_keysym(chord: ParsedChord) -> str:
 
 
 def _click(window_id: int, point: tuple[float, float], button: str = "left", count: int = 1) -> None:
-    """Click at one window-relative point through `xdotool mousemove --window` plus a click.
+    """Send button events to the bound window at a window-relative point.
 
-    mousemove takes WINDOW-RELATIVE coordinates with --window and positions
-    the pointer inside the bound window without activating it; the click
-    follows as a plain XTest click (button 1 left, 2 middle, 3 right) at the
-    moved pointer, which lands on whatever window is topmost there - the
-    bound window unless it is occluded at that point. count>1 passes
-    --repeat to xdotool click for multi-click cycles. Raises
-    ComputerUseError INVALID_ARGUMENT for a bad id, point, button, or count,
-    TRANSPORT_ERROR for a missing display, tool, or hung run, and
-    INJECTION_FAILED when the xdotool run exits nonzero.
+    The pointer is moved before an explicitly window-addressed XSendEvent
+    click. Apps may ignore synthetic events; never retry with global input.
     """
     window_id = _window_id(window_id)
     if button not in _BUTTON_NUMBERS:
@@ -551,7 +561,7 @@ def _click(window_id: int, point: tuple[float, float], button: str = "left", cou
         [xdotool, "mousemove", "--window", str(window_id), _coord(x), _coord(y)],
         "mousemove",
     )
-    argv = [xdotool, "click"]
+    argv = [xdotool, "click", "--window", str(window_id)]
     if count > 1:
         argv += ["--repeat", str(count)]
     argv.append(str(_BUTTON_NUMBERS[button]))
@@ -559,44 +569,26 @@ def _click(window_id: int, point: tuple[float, float], button: str = "left", cou
 
 
 def _drag(window_id: int, start: tuple[float, float], end: tuple[float, float]) -> None:
-    """Drag with the left button between two window-relative points.
+    """Refuse a drag because xdotool cannot scope its motion events.
 
-    The pointer jumps: mousemove --window to start, plain XTest mousedown 1,
-    mousemove --window to end, plain mouseup 1. xdotool moves the pointer in
-    one step, so applications that want intermediate motion along the drag
-    path see none. Raises ComputerUseError INVALID_ARGUMENT for bad ids or
-    points, TRANSPORT_ERROR like _click (missing display or tool, hung run),
-    and INJECTION_FAILED when a run exits nonzero.
+    Even window-addressed button events cannot make global pointer motion
+    a window-bound drag. Validate arguments before the explicit refusal.
     """
     window_id = _window_id(window_id)
-    start_x, start_y = _point(start, "start")
-    end_x, end_y = _point(end, "end")
-    _require_display()
-    xdotool = _tool("xdotool")
-    _run_checked(
-        [xdotool, "mousemove", "--window", str(window_id), _coord(start_x), _coord(start_y)],
-        "mousemove",
+    _point(start, "start")
+    _point(end, "end")
+    raise ComputerUseError(
+        "ACTION_UNSUPPORTED",
+        "Linux dragging cannot scope motion events to the bound window; ask the user to drag",
+        {"window_id": window_id},
     )
-    _run_checked([xdotool, "mousedown", "1"], "mousedown")
-    _run_checked(
-        [xdotool, "mousemove", "--window", str(window_id), _coord(end_x), _coord(end_y)],
-        "mousemove",
-    )
-    _run_checked([xdotool, "mouseup", "1"], "mouseup")
 
 
 def _scroll(window_id: int, direction: str, pages: int = 1, point: tuple[float, float] | None = None) -> None:
-    """Scroll one direction at one window-relative point via wheel clicks.
+    """Send window-addressed wheel clicks, optionally at a relative point.
 
-    direction is up (button 4), down (5), left (6), or right (7); one page is
-    _WHEEL_CLICKS_PER_PAGE wheel clicks per direction, matching the mac
-    backend's roughly-800-pixel page scale - X11 wheel clicks carry no pixel
-    deltas, so the page size is an approximation. With a point the pointer
-    moves into the bound window first (window-relative, no activation);
-    without one the wheel clicks land on whatever window is under the
-    pointer. Raises ComputerUseError INVALID_ARGUMENT for a bad direction,
-    page count, or point, TRANSPORT_ERROR like _click (missing display
-    or tool, hung run), and INJECTION_FAILED when a run exits nonzero.
+    Each page is approximately ten wheel clicks. Synthetic events may be
+    ignored; no global input fallback is permitted.
     """
     window_id = _window_id(window_id)
     if direction not in _SCROLL_BUTTONS:
@@ -618,6 +610,8 @@ def _scroll(window_id: int, direction: str, pages: int = 1, point: tuple[float, 
     argv = [
         xdotool,
         "click",
+        "--window",
+        str(window_id),
         "--repeat",
         str(pages * _WHEEL_CLICKS_PER_PAGE),
         "--delay",
@@ -648,16 +642,11 @@ def _press_key(window_id: int, key: str) -> None:
 
 
 def _type_text(window_id: int, text: str) -> None:
-    """Type literal text into the bound window without activating it.
+    """Deliver literal text through a window-addressed keyboard seam.
 
-    Delivered as `xdotool type --window <id> --delay <ms> <text>` synthetic
-    input with the inter-keystroke delay in _TYPE_DELAY_MS; an empty string
-    is a no-op. X11 window metadata has no secure-input role, so unlike the
-    mac backend this cannot refuse a focused password field - the gap is
-    documented in _focused_is_secure. Raises ComputerUseError
-    INVALID_ARGUMENT for non-string text, TRANSPORT_ERROR like _click
-    (missing display or tool, hung run), and INJECTION_FAILED when a run
-    exits nonzero.
+    The App layer checks secure focus before calling this seam. An option
+    terminator protects option-shaped text, and the timeout includes the
+    configured per-character delay so long strings are not truncated.
     """
     window_id = _window_id(window_id)
     if not isinstance(text, str):
@@ -668,25 +657,18 @@ def _type_text(window_id: int, text: str) -> None:
         return
     _require_display()
     _run_checked(
-        [_tool("xdotool"), "type", "--window", str(window_id), "--delay", str(_TYPE_DELAY_MS), text],
+        [_tool("xdotool"), "type", "--window", str(window_id), "--delay", str(_TYPE_DELAY_MS), "--", text],
         "type",
+        timeout_seconds=_TIMEOUT_SECONDS + len(text) * _TYPE_DELAY_MS / 1000,
     )
 
 
 def _screenshot_window(window_id: int) -> dict[str, str | int]:
-    """Capture the bound window to a PNG: maim preferred, scrot as the documented fallback.
+    """Capture only the bound window through maim.
 
-    maim scopes the capture to one window with `maim -i <window_id>`, so
-    occluding content is never included; when maim is missing or its run
-    fails, the fallback is `scrot -u -o <path>`, which captures the currently
-    FOCUSED window instead of the bound one - a documented divergence that
-    only matches when the bound window holds focus. The screenshot lands in
-    the same managed directory as the mac backend (mode 0700, files 0600,
-    retention sweep, symlink refusal, IHDR dimension verification are reused
-    from computer_use.capture); the returned width and height are the written
-    PNG's actual IHDR dimensions. Raises ComputerUseError INVALID_ARGUMENT
-    for a bad id, TRANSPORT_ERROR when both tools are missing or every
-    attempt fails (capped stderr in the message).
+    Missing or failing maim is an error. Capturing the focused window would
+    cross the binding boundary. Reuse the managed screenshot directory,
+    retention sweep, symlink checks, and PNG dimension verification.
     """
     window_id = _window_id(window_id)
     _require_display()
@@ -706,17 +688,14 @@ def _screenshot_window(window_id: int) -> dict[str, str | int]:
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise ComputerUseError("TRANSPORT_ERROR", f"screenshot target path is not a regular file: {path.name}")
     maim = _optional_tool("maim")
-    scrot = _optional_tool("scrot")
-    if maim is None and scrot is None:
+    if maim is None:
         raise ComputerUseError(
             "TRANSPORT_ERROR",
-            "computer use backend unavailable: the Linux backend needs maim (preferred) or scrot on PATH for screenshots",
+            "computer use backend unavailable: the Linux backend needs maim on PATH for window-scoped screenshots",
         )
     attempts: list[tuple[str, list[str]]] = []
     if maim is not None:
         attempts.append(("maim", [maim, "-i", str(window_id), str(path)]))
-    if scrot is not None:
-        attempts.append(("scrot", [scrot, "-u", "-o", str(path)]))
     reasons: list[str] = []
     for name, argv in attempts:
         finished = _run(argv)

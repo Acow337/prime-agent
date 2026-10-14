@@ -727,14 +727,19 @@ class App:
         The live focus wins: a post-snapshot focus change onto a secure field
         is still refused. When the live focus cannot be read, the last
         snapshot's focused index decides. On Linux this cannot refuse
-        anything: X11 window metadata has no secure-input role, so the linux
-        probe always reads unknown and linux observations never mark secure
-        fields - a documented platform gap.
+        anything. X11 window metadata has no secure-input role, so an unknown
+        Linux probe refuses keyboard input and hands entry to the user.
         """
         linux = _linux_backend()
         focused_secure = (
             linux._focused_is_secure(self._pid) if linux is not None else ax._focused_is_secure(self._pid)
         )
+        if linux is not None and focused_secure is None:
+            raise ComputerUseError(
+                "ACTION_UNSUPPORTED",
+                "Linux cannot verify whether the focused element is secure; ask the user to enter keyboard input",
+                {"live": False},
+            )
         if focused_secure is None:
             observation = self._observation
             if observation is None or observation.focused_index is None:
@@ -872,7 +877,8 @@ class App:
         format is one of text, md, or html. Refuses when the focused
         element is a secure field (secrets are the user's to paste).
         """
-        self._refuse_secure_focus()
+        if _linux_backend() is None:
+            self._refuse_secure_focus()
         if format not in _PASTE_FORMATS:
             raise ComputerUseError(
                 "INVALID_ARGUMENT",
