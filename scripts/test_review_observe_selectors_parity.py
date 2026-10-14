@@ -122,6 +122,26 @@ class SelectorReceiptTests(unittest.TestCase):
             with self.assertRaises(AssertionError, msg=key):
                 fixture.ready_children(snapshot, expected)
 
+    def test_partial_publication_rejects_malformed_ids_before_any_poll(self):
+        for key in ('active_session_id', 'session_id'):
+            for value in (123, '', False, []):
+                snapshot = self.children(False)
+                snapshot['children'][0][key] = value
+                def forbidden(*_args):
+                    self.fail('malformed publication must fail before a readiness poll')
+                with self.assertRaisesRegex(AssertionError, 'invalid published'):
+                    fixture.await_child_identities(snapshot, forbidden, {}, clock=lambda: 100)
+
+    def test_partial_publication_rejects_duplicates_before_any_poll(self):
+        for duplicate_key, missing_key in (('active_session_id', 'session_id'), ('session_id', 'active_session_id')):
+            snapshot = self.children()
+            snapshot['children'][1][duplicate_key] = snapshot['children'][0][duplicate_key]
+            snapshot['children'][1][missing_key] = None
+            def forbidden(*_args):
+                self.fail('duplicate publication must fail before a readiness poll')
+            with self.assertRaisesRegex(AssertionError, 'duplicate published'):
+                fixture.await_child_identities(snapshot, forbidden, {}, clock=lambda: 100)
+
     def test_identical_cell_uses_actual_skill_functions(self):
         code = fixture.cell({'exact': 'actual-a', 'foreign_suffix': 'FFF-123'})
         tree = ast.parse(code)

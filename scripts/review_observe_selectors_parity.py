@@ -184,12 +184,16 @@ def ready_children(snapshot, expected_child_ids):
         assert row['rlm_child_id'] == expected_child_ids[name], 'spawned child identity changed'
         assert row['status'] == 'running', 'spawned child settled before identity proof'
         assert row.get('label') == task, 'spawned child task/name mismatch'
-    if not all(row.get('active_session_id') and row.get('session_id') for row in children):
-        return None  # Admission can precede asynchronous live-ID publication in TS.
+    complete = True
     for key in ('active_session_id', 'session_id'):
         ids = [row[key] for row in children]
-        assert all(isinstance(value, str) for value in ids) and len(set(ids)) == 2, 'duplicate/invalid live child IDs'
-    return rows
+        published = [value for value in ids if value is not None]
+        assert all(isinstance(value, str) and value for value in published), 'invalid published live child ID'
+        assert len(set(published)) == len(published), 'duplicate published live child IDs'
+        complete = complete and len(published) == 2
+    # Only explicit None is a transient admission/publication state. Validate
+    # every present ID first, even if another field has not been published.
+    return rows if complete else None
 
 
 def await_child_identities(first, read_snapshot, observation, clock=time.monotonic, budget=LIMIT):
