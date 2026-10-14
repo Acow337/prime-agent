@@ -494,7 +494,7 @@ jobs:
             --out "$RUNNER_TEMP/performance-export" \
             --cargo-records "$RUNNER_TEMP/compiler-artifacts.jsonl" --cargo-metadata "$RUNNER_TEMP/cargo-metadata.json" \
             --sha "$SOURCE_SHA" --builder-sha "$BUILDER_SHA" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
-            --repository "$GITHUB_REPOSITORY" --workflow-ref "$WORKFLOW_REF" \
+            --repository "$GITHUB_REPOSITORY" --source-repository "$SOURCE_REPOSITORY" --workflow-ref "$WORKFLOW_REF" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --pr "$PR_NUMBER" --side "$SIDE"
       - name: Upload bounded build payload and receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

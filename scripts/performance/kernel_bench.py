@@ -25,7 +25,8 @@ def measure(runtime: Path, evidence: Path) -> dict:
         (root / "home").mkdir()
         subprocess.run(["git", "init", "-q", str(root / "work")], check=True)
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root / "home"),
-               "TMPDIR": str(root), "UV_OFFLINE": "1"}
+               "TMPDIR": str(root), "UV_OFFLINE": "1", "OPENBLAS_NUM_THREADS": "1",
+               "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
         command = [str(runtime), "-m", "rlm.repl"]
         kernel = Kernel(command, root / "work", env, evidence / "kernel")
         try:
@@ -67,6 +68,7 @@ def main():
     for side in ("base", "head"):
         parser.add_argument(f"--{side}-runtime", type=Path, required=True)
         parser.add_argument(f"--{side}-sha", required=True)
+        parser.add_argument(f"--{side}-runtime-manifest", type=Path)
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
@@ -80,8 +82,8 @@ def main():
               "dependency_lock_sha256": hashlib.sha256(Path(__file__).with_name("requirements.lock").read_bytes()).hexdigest(), "sides": {}}
     for side in ("base", "head"):
         runtime = getattr(args, f"{side}_runtime").absolute()
-        report["sides"][side] = {"interpreter_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
-                                  "runtime_inventory_attested": False,
+        report["sides"][side] = {"runtime_command_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+                                  "runtime_manifest_sha256": hashlib.sha256(getattr(args, f'{side}_runtime_manifest').read_bytes()).hexdigest() if getattr(args, f'{side}_runtime_manifest') else None,
                                   "samples": {"kernel": []}}
     try:
         for trial in range(args.trials):

@@ -88,6 +88,7 @@ class Terminal:
         self.transcript = transcript
         self.raw: list[str] = []
         self.bytes = 0
+        self.peers: list[Terminal] = []
 
     def _send(self, text: str) -> None:
         data = text.encode("utf-8")
@@ -107,6 +108,11 @@ class Terminal:
         self._pending_input = self._pending_input[written:]
 
     def pump(self) -> bool:
+        for peer in self.peers:
+            peer._pump()
+        return self._pump()
+
+    def _pump(self) -> bool:
         self._flush_input()
         try:
             chunk = self.child.read_nonblocking(65536, timeout=0.005)
@@ -242,16 +248,26 @@ class Terminal:
 
     def close(self) -> None:
         raw, snapshot = "".join(self.raw), self.display.text()
-        self.transcript.with_suffix(".raw").write_text(raw)
-        self.transcript.with_suffix(".txt").write_text(snapshot)
+        write_error = None
         try:
-            if self.child.isalive():
-                self._pending_input = b""
-                self._send("\x03")
-                time.sleep(0.15)
+            self.transcript.with_suffix(".raw").write_text(raw)
+            self.transcript.with_suffix(".txt").write_text(snapshot)
+        except Exception as error:
+            write_error = error
+        try:
+            try:
                 if self.child.isalive():
+                    self._pending_input = b""
                     self._send("\x03")
-        except (OSError, pexpect.EOF):
-            pass
-        finally:
-            self.child.close(force=True)
+                    time.sleep(0.15)
+                    if self.child.isalive():
+                        self._send("\x03")
+            except (OSError, pexpect.EOF):
+                pass
+            finally:
+                self.child.close(force=True)
+        except Exception:
+            if write_error is None:
+                raise
+        if write_error is not None:
+            raise write_error

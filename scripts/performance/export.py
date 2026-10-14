@@ -94,7 +94,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('source', 'tooling', 'out', 'cargo-records', 'cargo-metadata'):
         parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('sha', 'builder-sha', 'base-sha', 'head-sha', 'repository', 'workflow-ref'):
+    for name in ('sha', 'builder-sha', 'base-sha', 'head-sha', 'repository', 'source-repository', 'workflow-ref'):
         parser.add_argument('--' + name, required=True)
     for name in ('run-id', 'run-attempt', 'pr'):
         parser.add_argument('--' + name, type=int, required=True)
@@ -103,6 +103,8 @@ def main() -> None:
     validate_identity(args.sha, args.builder_sha, args.base_sha, args.head_sha, args.side)
     if args.repository != 'PrimeIntellect-ai/prime-agent' or min(args.run_id, args.run_attempt, args.pr) <= 0:
         parser.error('invalid GitHub receipt identity')
+    if not re.fullmatch(r'[A-Za-z0-9-]+/[A-Za-z0-9_.-]+', args.source_repository):
+        parser.error('invalid source repository')
     source, tooling = args.source.resolve(strict=True), args.tooling.resolve(strict=True)
     for root, expected in ((source, args.sha), (tooling, args.builder_sha)):
         if subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip() != expected:
@@ -138,6 +140,7 @@ def main() -> None:
     shutil.rmtree(test_dir)
     payloads = payload_inventory(out)
     receipt = {'schema': 1, 'repository': args.repository, 'pr': args.pr,
+               'source_repository': args.source_repository,
                'run_id': args.run_id, 'run_attempt': args.run_attempt, 'workflow_ref': args.workflow_ref,
                'builder_sha': args.builder_sha, 'side': args.side, 'source_sha': args.sha,
                'harness_sha256': harness_sha256(),

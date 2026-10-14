@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline Rust PR session workloads; see docs/pr-performance-ci.md."""
+"""Offline Rust PR session workloads; see README.md."""
 from __future__ import annotations
 
 import argparse
@@ -19,6 +19,7 @@ import uuid
 from terminal import Terminal
 from resources import process_tree_rss
 from provenance import harness_sha256
+from runtime import wait_listener
 
 SCENARIOS = {
     "small": (0, 0, False),
@@ -28,6 +29,25 @@ SCENARIOS = {
 }
 METRICS = ("cold_first_paint_ms", "cold_tail_ms", "cold_ready_ms", "agents_ms", "open_tail_ms", "open_ready_ms",
            "reopen_tail_ms", "reopen_ready_ms", "tree_rss_after_cold_bytes", "tree_rss_after_reopen_bytes")
+
+
+def stop_daemon(daemon) -> None:
+    # Only an unreaped owned leader anchors this process-group identity. A poll
+    # that already reaped it invalidates any later signal by its former PID.
+    if daemon.returncode is not None:
+        return
+    try:
+        os.killpg(daemon.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        daemon.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(daemon.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        daemon.wait(timeout=5)
 
 
 def fixture(root: Path, size_mb: int, catalog: int) -> tuple[Path, Path]:
@@ -79,7 +99,8 @@ def measure(binary: Path, runtime: Path, scenario: str, evidence: Path) -> dict:
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root / "home"),
                "TMPDIR": str(root / "tmp"), "TERM": "xterm-256color",
                "PRIME_AGENT_CODING_AGENT_DIR": str(agent), "PRIME_AGENT_TELEMETRY": "0",
-               "PRIME_AGENT_KERNEL_PYTHON": str(runtime), "UV_OFFLINE": "1"}
+               "PRIME_AGENT_KERNEL_PYTHON": str(runtime), "UV_OFFLINE": "1",
+               "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
         socket = str(root / "d.sock")
         argv = [str(binary), "--daemon-socket", socket, "--offline", "--provider", "prime-inference",
                 "--model", "mock-1", "--resume", str(target)]
@@ -90,10 +111,7 @@ def measure(binary: Path, runtime: Path, scenario: str, evidence: Path) -> dict:
             daemon = subprocess.Popen([str(binary), "--mode", "daemon", "--daemon-socket", socket, "--offline"],
                                       env=env, cwd=root, stdout=log, stderr=log, start_new_session=True)
             try:
-                while not Path(socket).exists():
-                    if daemon.poll() is not None or time.perf_counter() - started > 30:
-                        raise RuntimeError("benchmark daemon did not start")
-                    time.sleep(0.005)
+                wait_listener(socket, daemon)
                 app = Terminal(argv, root, env, evidence / "main")
                 apps.append(app)
                 app.until(lambda display: bool(display.text().strip()), 60)
@@ -137,6 +155,9 @@ def measure(binary: Path, runtime: Path, scenario: str, evidence: Path) -> dict:
                         background = Terminal(argv[:-1] + [str(other)], root, env,
                                               evidence / f"background-{iteration}")
                         apps.append(background)
+                        background.until(lambda display: 'TAIL-1' in display.text(), 60)
+                        background.ready(60)
+                        app.peers.append(background)
                     t0 = time.perf_counter()
                     app._send("\r")
                     app.until(lambda display: "TAIL-0" in display.text() and
@@ -147,8 +168,7 @@ def measure(binary: Path, runtime: Path, scenario: str, evidence: Path) -> dict:
                     result[f"{prefix}_ready_ms"] = (app.ready(60) - (t0 - app.started)) * 1000
                     readiness[prefix] = dict(app.last_ready)
                     if concurrent:
-                        background.until(lambda display: "TAIL-1" in display.text(), 60)
-                        background.ready(60)
+                        app.peers.remove(background)
                         background.close()
                         apps.remove(background)
                 resources["after_reopen_ready"] = process_tree_rss([daemon.pid, app.child.pid])
@@ -163,19 +183,7 @@ def measure(binary: Path, runtime: Path, scenario: str, evidence: Path) -> dict:
                         app.close()
                     except Exception as error:
                         close_errors.append(str(error))
-                try:
-                    os.killpg(daemon.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    daemon.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-                try:
-                    os.killpg(daemon.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                daemon.wait()
+                stop_daemon(daemon)
                 if (agent / "logs").exists():
                     shutil.copytree(agent / "logs", evidence / "logs")
                 if close_errors:
@@ -188,6 +196,7 @@ def main() -> None:
         parser.add_argument(f"--{side}-bin", type=Path, required=True)
         parser.add_argument(f"--{side}-sha", required=True)
         parser.add_argument(f"--{side}-runtime", type=Path, required=True)
+        parser.add_argument(f"--{side}-runtime-manifest", type=Path)
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
     parser.add_argument("--out", type=Path, required=True)
@@ -197,18 +206,21 @@ def main() -> None:
     if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (args.base_sha, args.head_sha)):
         parser.error("baseline and head revisions must be full lowercase commit SHAs")
     args.out.mkdir(parents=True, exist_ok=False)
+    scenarios = tuple(dict.fromkeys(args.scenario or SCENARIOS))
     report = {"schema": 1, "base_sha": args.base_sha, "head_sha": args.head_sha,
               "harness_sha256": harness_sha256(),
               "dependency_lock_sha256": hashlib.sha256(Path(__file__).with_name("requirements.lock").read_bytes()).hexdigest(),
-              "fixture_version": 1, "scenario_config": SCENARIOS,
+              "fixture_version": 2, "scenario_config": SCENARIOS,
               "trials": args.trials, "host": {"os": platform.platform(), "cpu": platform.processor(),
                                              "cores": os.cpu_count()}, "sides": {}}
     for side in ("base", "head"):
         binary = getattr(args, f"{side}_bin").resolve(strict=True)
         report["sides"][side] = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                                  "samples": {name: [] for name in args.scenario or SCENARIOS}}
+                                  "runtime_command_sha256": hashlib.sha256(getattr(args, f'{side}_runtime').read_bytes()).hexdigest(),
+                                  "runtime_manifest_sha256": hashlib.sha256(getattr(args, f'{side}_runtime_manifest').read_bytes()).hexdigest() if getattr(args, f'{side}_runtime_manifest') else None,
+                                  "samples": {name: [] for name in scenarios}}
     try:
-        for scenario in args.scenario or SCENARIOS:
+        for scenario in scenarios:
             for trial in range(args.trials):
                 # ABBA over adjacent trials, baseline and head share a host.
                 for side in (("base", "head") if trial % 2 == 0 else ("head", "base")):
