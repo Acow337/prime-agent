@@ -17,6 +17,7 @@ const OPENAI_COMPLETIONS_KEYS: &[&str] = &[
     "requiresAssistantAfterToolResult",
     "requiresThinkingAsText",
     "requiresReasoningContentOnAssistantMessages",
+    "reasoningReplayField",
     "thinkingFormat",
     "cacheControlFormat",
     "openRouterRouting",
@@ -81,6 +82,10 @@ fn field_valid(api: &str, key: &str, value: &Value) -> bool {
     match key {
         "maxTokensField" => matches!(value.as_str(), Some("max_completion_tokens" | "max_tokens")),
         "thinkingFormat" => THINKING_FORMATS.contains(&value.as_str().unwrap_or_default()),
+        "reasoningReplayField" => matches!(
+            value.as_str(),
+            Some("reasoning_content" | "reasoning" | "reasoning_text")
+        ),
         "cacheControlFormat" => value.as_str() == Some("anthropic"),
         "openRouterRouting" => open_router_routing_valid(value),
         "vercelGatewayRouting" => vercel_gateway_routing_valid(value),
@@ -229,6 +234,22 @@ mod tests {
             "openai-responses",
             Some(&compat(json!({"sendSessionIdHeader": "no"})))
         ));
+    }
+
+    #[test]
+    fn plaintext_reasoning_replay_channels_are_validated() {
+        for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+            assert!(is_model_compat(
+                "openai-completions",
+                Some(&compat(json!({"reasoningReplayField": field})))
+            ));
+        }
+        for value in [json!("content"), json!(true), json!(["reasoning_content"])] {
+            assert!(!is_model_compat(
+                "openai-completions",
+                Some(&compat(json!({"reasoningReplayField": value})))
+            ));
+        }
     }
 
     #[test]

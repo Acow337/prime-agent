@@ -213,38 +213,37 @@ pub fn convert_messages(
                             }));
                         }
                         AssistantContent::Thinking(thinking) => {
-                            if thinking.thinking.trim().is_empty() {
+                            if thinking.redacted.unwrap_or(false) {
+                                // AWS JSON encodes blob members as base64, matching the stored
+                                // Anthropic redacted payload. Keep its bytes and block position.
+                                content_blocks.push(json!({
+                                    "reasoningContent": {
+                                        "redactedContent": thinking.thinking_signature.as_deref().unwrap_or_default(),
+                                    }
+                                }));
+                                continue;
+                            }
+                            let signature = thinking
+                                .thinking_signature
+                                .as_deref()
+                                .filter(|signature| !signature.trim().is_empty());
+                            if thinking.thinking.trim().is_empty() && signature.is_none() {
                                 continue;
                             }
                             // Only Anthropic models support the signature field in reasoningText.
                             // For other models we omit it to avoid: "This model doesn't support the
                             // reasoningContent.reasoningText.signature field".
                             if supports_thinking_signature(model) {
-                                // Signatures arrive after thinking deltas. If a partial or
-                                // externally persisted message lacks a signature, Bedrock rejects
-                                // the replayed reasoning block. Fall back to plain text, matching
-                                // Anthropic.
-                                let signature = thinking
-                                    .thinking_signature
-                                    .as_deref()
-                                    .filter(|signature| !signature.trim().is_empty());
-                                match signature {
-                                    None => {
-                                        content_blocks.push(json!({
-                                            "text": sanitize_surrogates(&thinking.thinking)
-                                        }));
-                                    }
-                                    Some(signature) => {
-                                        content_blocks.push(json!({
+                                // Preflight reports missing signatures; never lower unsigned
+                                // reasoning into answer text even for direct serializer callers.
+                                content_blocks.push(json!({
                                             "reasoningContent": {
                                                 "reasoningText": {
                                                     "text": sanitize_surrogates(&thinking.thinking),
-                                                    "signature": signature,
+                                                    "signature": signature.unwrap_or_default(),
                                                 }
                                             }
-                                        }));
-                                    }
-                                }
+                                }));
                             } else {
                                 content_blocks.push(json!({
                                     "reasoningContent": {

@@ -158,8 +158,8 @@ pub fn convert_messages(
                         .map(|block| sanitize_surrogates(&block.thinking))
                         .collect::<String>();
                     let field = compat
-                        .requires_reasoning_content_on_assistant_messages
-                        .then_some("reasoning_content")
+                        .reasoning_replay_field
+                        .as_deref()
                         .or(plaintext_thinking_blocks[0].thinking_signature.as_deref())
                         .filter(|field| {
                             crate::providers::openai_completions::REASONING_FIELDS.contains(field)

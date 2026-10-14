@@ -4,7 +4,54 @@
 use crate::providers::openai_completions::{
     decode_reasoning_details, get_compat, REASONING_FIELDS,
 };
-use crate::types::{AssistantContent, Context, Message, Model, StopReason};
+use crate::types::{AssistantContent, AssistantMessage, Context, Message, Model, StopReason};
+use base64::Engine as _;
+
+pub(crate) const CLAUDE_BINDING_DIAGNOSTICS_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+/// A Claude-native wire bridge; this does not assert model/account/prefix readability.
+/// Those bindings remain authoritative at the provider and must not be forged or relaxed.
+pub(crate) fn is_claude_bridge(source: &AssistantMessage, target: &Model) -> bool {
+    let source_is_claude = matches!(
+        source.api.as_str(),
+        "anthropic-messages" | "bedrock-converse-stream"
+    ) && (source.model.to_ascii_lowercase().contains("claude")
+        || source.api == "anthropic-messages" && source.provider == "anthropic");
+    let target_is_claude = matches!(
+        target.api.as_str(),
+        "anthropic-messages" | "bedrock-converse-stream"
+    ) && crate::providers::bedrock::is_anthropic_claude_model(target);
+    source_is_claude
+        && target_is_claude
+        && (source.provider != target.provider || source.api != target.api)
+}
+
+/// Report native binding drops without including reasoning or opaque payloads in errors.
+pub(crate) fn validate_input_transformations(
+    value: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("thinking_dropped")
+            })
+        })
+    {
+        return Err("The provider dropped replayed reasoning because its native model, account, or conversation binding was not satisfied. Original session history is unchanged.".into());
+    }
+    Ok(())
+}
+
+/// Request native binding diagnostics for signed Claude history, including account changes
+/// invisible to provider/model identifiers. This never selects a drop/relaxation policy.
+pub(crate) fn has_claude_reasoning_replay(model: &Model, context: &Context) -> bool {
+    matches!(model.api.as_str(), "anthropic-messages" | "bedrock-converse-stream")
+        && crate::providers::bedrock::is_anthropic_claude_model(model)
+        && context.messages.iter().any(|message| matches!(message, Message::Assistant(source)
+            if !matches!(source.stop_reason, StopReason::Error | StopReason::Aborted)
+                && source.content.iter().any(|block| matches!(block, AssistantContent::Thinking(_)))))
+}
 
 /// Check destination channels and signature bindings without modifying source history.
 ///
@@ -26,6 +73,7 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
         }
         let same_protocol = assistant.provider == model.provider && assistant.api == model.api;
         let same_model = same_protocol && assistant.model == model.id;
+        let claude_bridge = is_claude_bridge(assistant, model);
         let limitation = |detail: &str| {
             format!(
             "Cannot replay reasoning from {}/{} to {}/{}: {detail}. Original session history is unchanged.",
@@ -81,6 +129,7 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                 .as_deref()
                 .filter(|field| REASONING_FIELDS.contains(field));
             if !same_protocol
+                && !claude_bridge
                 && (thinking.redacted.unwrap_or(false)
                     || thinking
                         .thinking_signature
@@ -115,7 +164,14 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                         "this route cannot replay the opaque reasoning payload",
                     ));
                 }
-                if !compat.requires_reasoning_content_on_assistant_messages
+                if compat
+                    .reasoning_replay_field
+                    .as_deref()
+                    .is_some_and(|field| !REASONING_FIELDS.contains(&field))
+                {
+                    return Err(limitation("the destination reasoning replay field is not a supported reasoning channel"));
+                }
+                if compat.reasoning_replay_field.is_none()
                     // A field-name marker is protocol metadata, not a model-bound signature.
                     && !((same_model || same_protocol && model.reasoning) && channel_marker.is_some())
                     && !structured_same_protocol
@@ -127,9 +183,20 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
             {
                 return Err(limitation("the Google adapter cannot retain reasoning and thought signatures across this model switch"));
             } else if model.api == "bedrock-converse-stream" && thinking.redacted.unwrap_or(false) {
-                return Err(limitation(
-                    "the Bedrock adapter cannot replay this opaque reasoning payload",
-                ));
+                if !crate::providers::bedrock::is_anthropic_claude_model(model)
+                    || thinking
+                        .thinking_signature
+                        .as_deref()
+                        .is_none_or(|payload| {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(payload)
+                                .is_err()
+                        })
+                {
+                    return Err(limitation(
+                        "the Bedrock destination cannot replay this opaque reasoning payload",
+                    ));
+                }
             } else if model.api == "mistral-conversations"
                 && thinking
                     .thinking_signature
@@ -315,3 +382,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod wire_tests;

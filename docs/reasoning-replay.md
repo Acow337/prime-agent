@@ -17,27 +17,38 @@ Original persisted messages and signatures are not edited.
 
 ## Scope and compatibility
 
-The existing source channel marker is protocol metadata. For a reasoning target
-on the same provider/API it can survive a model switch; no model-ID mapping or
-new catalog capability is needed. Existing DeepSeek compatibility flags also
-select `reasoning_content`. Structured Completions `reasoning_details` remains
-native within the same protocol.
+Plaintext reasoning replay selects the destination's supported input field, independent
+of source identity. Direct DeepSeek, Z.AI, and reasoning models behind Prime's
+Completions adapter accept `reasoning_content`; other Completions destinations can
+explicitly declare `compat.reasoningReplayField` as `reasoning_content`, `reasoning`,
+or `reasoning_text`. A same-protocol source channel marker remains a compatibility
+fallback. Structured Completions `reasoning_details` remains native within the
+same protocol. A supported input schema does not prove a deployed model consumes it.
 
-There is no blanket rejection for different model IDs. Anthropic and Responses
-history uses the original native representation within the same provider/API;
-the provider remains responsible for signature bindings and model compatibility.
-Preserving a request does not establish that the destination consumes every part.
+Claude-native Anthropic Messages and Bedrock Converse adapters retain signed thinking,
+including empty visible summaries, and map opaque/redacted blocks to their native
+representations without changing the payload bytes. Both adapters preserve same-model
+history and allow the documented Claude-native bridge across providers. Google Cloud
+Claude accessed through Anthropic Messages is part of that native representation;
+the Gemini `google-vertex` adapter is a different protocol.
 
-An adapter limitation is explicit before requesting generation when replay would
-otherwise silently lose or mislabel reasoning: foreign opaque signatures, an
-unsigned Anthropic block, plaintext without a Responses reasoning item, a
-Completions route with no supported channel, a signed Claude block sent to a
-Bedrock destination whose serializer has no signature field, or a route requiring thinking as
-answer text. Google currently retains thoughts/signatures only for the same
-model, including thought signatures attached to answer-text blocks, so a
-cross-model Google handoff reports that limitation. Its translation
-policy and cross-adapter opaque-signature mappings require separate compatibility
-work; this PR does not invent them. Unsupported original history remains stored.
+These bridges preserve wire representations, not universal cryptographic readability.
+Claude's actual model, linked-account and unchanged-prefix checks remain authoritative.
+The request asks for native binding diagnostics and surfaces `thinking_dropped` as an
+explicit error, retaining the original history. It never forges signatures, chooses a
+prefix relaxation or silently converts unsupported blocks to answer text. An unsupported
+beta or signature produces the provider's error rather than an automatic fallback.
+See [Claude preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking)
+and [thinking encryption](https://platform.claude.com/docs/en/build-with-claude/thinking#thinking-encryption).
+No live cross-platform generation or account-link acceptance was tested.
+
+An adapter limitation is explicit before generation when replay would silently lose or
+mislabel reasoning: unrelated foreign opaque signatures, unsigned Claude blocks,
+plaintext without a Responses reasoning item, a Completions route with no supported
+channel, signed Claude reasoning sent to a non-Claude Bedrock model, malformed opaque
+payloads, or a route requiring thinking as answer text. Google currently retains
+thoughts/signatures only for the same model, including signatures attached to answer
+text. Unsupported history remains stored.
 
 ## Internal route evidence
 
@@ -59,8 +70,12 @@ no generation request or alternative access was attempted.
 Regression tests cover channel separation across a model switch, thinking-only
 turns, original-history equality, reasoning with matched/missing tool results,
 fragment preservation, and native/unsupported signature representations.
-Existing stream tests distinguish `delta.content` from `reasoning_content`;
-this PR does not change stream parsing or rendering.
+Existing stream tests distinguish `delta.content` from `reasoning_content`.
+New synthetic regressions cover empty signed Claude blocks and opaque payloads across
+both native serializers, byte accumulation at Bedrock stop/EOF, malformed blobs,
+destination-selected plaintext channels, and native binding-drop errors including
+an Anthropic SSE replay that checks the diagnostic beta. Bedrock stream parsing now
+retains opaque bytes; answer rendering is unchanged.
 
 Before the final scope revision, an exact-source lightweight harness passed 28
 focused tests. A control replacing only normalization with HEAD failed seven

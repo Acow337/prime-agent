@@ -24,6 +24,9 @@ pub struct OpenAiCompletionsCompat {
     pub requires_thinking_as_text: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_reasoning_content_on_assistant_messages: Option<bool>,
+    /// Destination assistant-message field accepted for plaintext reasoning replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_replay_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<ThinkingFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
