@@ -106,11 +106,11 @@ impl Editor {
         if self.autocomplete.is_none() {
             let slash_ctx = self.current_slash_command_context();
             let c = ch.chars().next().unwrap_or(' ');
-            if c == '/'
-                && matches!(&slash_ctx, Some(ctx) if ctx.kind == crate::autocomplete::SlashKind::Name)
-            {
-                self.request_autocomplete(false, false);
-            } else if slash_ctx.is_some() && (c.is_ascii_alphanumeric() || ".-_".contains(c)) {
+            let slash_name_slash = c == '/'
+                && matches!(&slash_ctx, Some(ctx) if ctx.kind == crate::autocomplete::SlashKind::Name);
+            let slash_word_char =
+                slash_ctx.is_some() && (c.is_ascii_alphanumeric() || ".-_".contains(c));
+            if slash_name_slash || slash_word_char {
                 self.request_autocomplete(false, false);
             } else {
                 self.request_autocomplete_in_symbol_token();
