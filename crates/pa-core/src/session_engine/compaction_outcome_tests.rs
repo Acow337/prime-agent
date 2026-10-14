@@ -1077,6 +1077,7 @@ async fn prepared_refinement_cannot_change_harness_during_an_active_run() {
     let model = session_ai_model();
     let ready = refine::prepare_refinement(
         &session.session,
+        /*agent_dir*/ None,
         refine::RefinementTranscript {
             messages: &[],
             refinement_history: &[],
@@ -1136,6 +1137,7 @@ async fn contended_harness_lock_does_not_reserve_the_next_provider_run() {
     };
     let ready = refine::prepare_refinement(
         &session.session,
+        /*agent_dir*/ None,
         refine::RefinementTranscript {
             messages: &[],
             refinement_history: &[],
@@ -1226,6 +1228,7 @@ async fn branch_change_discards_prepared_plan_but_allows_new_refinements() {
     };
     let ready = refine::prepare_refinement(
         &session.session,
+        /*agent_dir*/ None,
         refine::RefinementTranscript {
             messages: &[],
             refinement_history: &[],

@@ -313,6 +313,7 @@ pub async fn execute_refinement_with_rows(
 ) -> anyhow::Result<(RefinementResult, Vec<String>)> {
     let ready = prepare_refinement(
         session,
+        agent_dir,
         transcript,
         global_harness_dir,
         model,
@@ -356,6 +357,7 @@ pub(crate) async fn run_refinement(
             } = parts.await?;
             prepare_refinement(
                 &session,
+                agent_dir.as_deref(),
                 RefinementTranscript {
                     messages: &messages,
                     refinement_history: &refinement_history,
@@ -391,10 +393,12 @@ pub(crate) struct ReadyRefinement {
     target_scope: HarnessScope,
     target_dir: PathBuf,
     global_harness_dir: PathBuf,
+    settings: Option<crate::settings::SettingsManager>,
 }
 
 pub(crate) async fn prepare_refinement(
     session: &tokio::sync::Mutex<SessionManager>,
+    agent_dir: Option<&Path>,
     transcript: RefinementTranscript<'_>,
     global_harness_dir: &Path,
     model: &pa_types::ai::Model,
@@ -405,9 +409,32 @@ pub(crate) async fn prepare_refinement(
         messages,
         refinement_history,
     } = transcript;
-    let (local_harness_dir, has_session_dir) = {
+    let (local_harness_dir, has_session_dir, cwd) = {
         let session = session.lock().await;
-        (local_harness_state_dir(&session), session.has_session_dir())
+        (
+            local_harness_state_dir(&session),
+            session.has_session_dir(),
+            session.get_cwd().to_path_buf(),
+        )
+    };
+    // The live master gate decides before any harness load or plan request:
+    // a disabled session never plans. The one settings construction rides
+    // the ready refinement to the commit recheck; `enabled` reopens the
+    // store live on each read, and a session without a wired agent dir
+    // has no settings store to disable (mirrors the fail-open gate).
+    let settings = match agent_dir.map(Path::to_path_buf) {
+        Some(dir) => Some(
+            tokio::task::spawn_blocking(move || {
+                let settings = crate::settings::SettingsManager::create(&cwd, &dir);
+                anyhow::ensure!(
+                    super::refinement_gate::enabled(Some(&settings)),
+                    "Harness refinements are disabled in /settings"
+                );
+                Ok::<_, anyhow::Error>(settings)
+            })
+            .await??,
+        ),
+        None => None,
     };
     let core_options = CoreRefineOptions {
         global: options.global,
@@ -474,6 +501,7 @@ pub(crate) async fn prepare_refinement(
         target_scope,
         target_dir,
         global_harness_dir: global_harness_dir.to_path_buf(),
+        settings,
     })
 }
 
@@ -557,6 +585,7 @@ pub(crate) async fn commit_refinement(
         target_scope,
         target_dir,
         global_harness_dir,
+        settings,
     } = ready;
     let (_admission, _flight, mut session, lock) = pa_agent::abort::race_with_abort(
         reserve_refinement_commit(session, agent, &target_dir, compaction_flight),
@@ -584,6 +613,13 @@ pub(crate) async fn commit_refinement(
         None => false,
     };
     let (mut result, state_path) = tokio::task::spawn_blocking(move || {
+        // The apply-time recheck: a toggle-off during the (slow) planning
+        // request discards the plan here — after the lock, before any load,
+        // apply, or save, so nothing persists and no rows append.
+        anyhow::ensure!(
+            super::refinement_gate::enabled(settings.as_ref()),
+            "Harness refinements were disabled during planning; the result was discarded"
+        );
         let mut state = load_harness_state(&target_dir, target_scope);
         let result = apply_refinement_plan(
             &mut state,
@@ -754,6 +790,9 @@ impl AgentSession {
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> anyhow::Result<Option<AutoRefineReview>> {
+        if !self.harness_refinements_enabled() {
+            return Ok(None);
+        }
         pa_agent::abort::race_with_abort(
             review_compact_refinement(
                 &self.session,
@@ -1008,6 +1047,64 @@ mod tests {
             timestamp: 0,
             rest: serde_json::Map::default(),
         })
+    }
+
+    #[tokio::test]
+    async fn disabling_refinements_blocks_planning_and_discards_in_flight_results() {
+        let dir = TempDir::new().unwrap();
+        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let global_dir = dir.path().join("harness");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let settings = agent_dir.join("settings.json");
+        std::fs::write(&settings, r#"{"harnessRefinements":false}"#).unwrap();
+        let entries_before = session.lock().await.retained_entries().to_vec();
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            Box::new(|_, _, _| panic!("disabled refinement must not call the planner")),
+            Some(&agent_dir),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("disabled"));
+        std::fs::write(&settings, r#"{"harnessRefinements":true}"#).unwrap();
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[user_message("remember this")],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::SelfRefine,
+            flip_seam(
+                &settings,
+                r#"{"harnessRefinements":false}"#,
+                r#"{"summary":"memory","edits":[{"action":"create","kind":"memory","id":"note","title":"Note","content":"Remember this"}]}"#,
+            ),
+            Some(&agent_dir),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("discarded"));
+        let session = session.lock().await;
+        assert_eq!(session.retained_entries(), entries_before.as_slice());
+        assert!(!local_harness_state_dir(&session)
+            .join("harness_state.json")
+            .exists());
+        assert!(!global_dir.exists());
     }
 
     #[test]
