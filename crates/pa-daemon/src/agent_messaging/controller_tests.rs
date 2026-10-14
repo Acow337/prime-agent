@@ -1158,7 +1158,8 @@ async fn observe_recent_exact_active_id_outranks_a_name_collision() {
     spawn_fake_supervisor(socket.clone(), json!({
         "sessions": [
             { "activeSessionId": "aaa111", "sessionId": "sess-a" },
-            { "activeSessionId": "fff555", "sessionId": "sess-f", "sessionName": "ddd444" },
+            { "activeSessionId": "fff555", "sessionId": "sess-f", "sessionName": "ddd444",
+              "runtimeKind": "subagent", "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a" },
             { "activeSessionId": "ddd444", "sessionId": "sess-d",
               "runtimeKind": "subagent", "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a" },
         ],
