@@ -111,12 +111,15 @@ fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut St
 ///
 /// # Errors
 ///
-/// Returns `Err` when no API provider is registered for `model.api`.
+/// Returns `Err` when no API provider is registered for `model.api` or reasoning replay
+/// cannot preserve its representation for the destination.
 pub fn stream(
     model: &Model,
     context: &Context,
     options: Option<StreamOptions>,
 ) -> Result<AssistantMessageEventStream, ProviderError> {
+    crate::providers::reasoning_replay::validate_reasoning_replay(model, context)
+        .map_err(ProviderError::Message)?;
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
     clamp_output_budget(model, context, options.as_mut());
@@ -127,7 +130,8 @@ pub fn stream(
 ///
 /// # Errors
 ///
-/// Returns `Err` when no API provider is registered for `model.api`.
+/// Returns `Err` when no API provider is registered for `model.api` or reasoning replay
+/// cannot preserve its representation for the destination.
 pub async fn complete(
     model: &Model,
     context: &Context,
@@ -141,12 +145,15 @@ pub async fn complete(
 ///
 /// # Errors
 ///
-/// Returns `Err` when no API provider is registered for `model.api`.
+/// Returns `Err` when no API provider is registered for `model.api` or reasoning replay
+/// cannot preserve its representation for the destination.
 pub fn stream_simple(
     model: &Model,
     context: &Context,
     options: Option<SimpleStreamOptions>,
 ) -> Result<AssistantMessageEventStream, ProviderError> {
+    crate::providers::reasoning_replay::validate_reasoning_replay(model, context)
+        .map_err(ProviderError::Message)?;
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
     // A `None` caller still gets the default output budget downstream
@@ -163,7 +170,8 @@ pub fn stream_simple(
 ///
 /// # Errors
 ///
-/// Returns `Err` when no API provider is registered for `model.api`.
+/// Returns `Err` when no API provider is registered for `model.api` or reasoning replay
+/// cannot preserve its representation for the destination.
 pub async fn complete_simple(
     model: &Model,
     context: &Context,
