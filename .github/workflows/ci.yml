@@ -474,6 +474,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           targets: x86_64-unknown-linux-gnu
+      - name: Validate bounded artifact input preparation
+        run: python3 -m unittest discover -s tooling/scripts/performance/tests -p 'test_inputs.py' -v
       - name: Build exact release and pa-core library tests
         working-directory: source
         run: |

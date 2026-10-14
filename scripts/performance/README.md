@@ -40,6 +40,16 @@ wheels using the reviewed hash lock. Install PTY tooling from `bootstrap.lock` a
 `requirements.lock` using Python 3.12.13 before timing. Run inside a fresh, networkless,
 resource-bounded environment; the harness itself does not provide confinement:
 
+Before running `run.py`, pass the downloaded, safely unpacked artifact directories to
+`inputs.py` with the independently verified full base/head/event-head/builder SHAs,
+source repository, PR, workflow reference, run and attempt; the target repository is
+fixed to `PrimeIntellect-ai/prime-agent`. This validates bounded regular-file
+payloads and executable hashes, then unpacks both the release and `runtime-wheels.tar.gz`
+into `--out/base` and `--out/head`. `run.py --inputs` consumes that prepared directory;
+it must not be pointed at the raw upload-artifact download. Directory permissions are
+normalized for the confined read-only user even when the operator uses umask077.
+The preparer executes no candidate code and makes no network calls.
+
 ```sh
 python scripts/performance/session_bench.py --base-bin /base/prime-agent --head-bin /head/prime-agent --base-runtime /base/venv/bin/python --head-runtime /head/venv/bin/python --base-sha FULL_BASE_SHA --head-sha FULL_HEAD_SHA --out comparison
 python scripts/performance/kernel_bench.py --base-runtime /base/venv/bin/python --head-runtime /head/venv/bin/python --base-sha FULL_BASE_SHA --head-sha FULL_HEAD_SHA --out kernel-comparison
