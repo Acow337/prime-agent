@@ -125,7 +125,10 @@ fn plaintext_source_identity_does_not_override_destination_support() {
     assert_eq!(
         crate::providers::openai_completions::convert_messages(&destination, &context, &compat)
             .unwrap(),
-        vec![json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN" })]
+        vec![
+            json!({ "role": "system", "content": "Synthetic shared prefix" }),
+            json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN" })
+        ]
     );
     for field in ["reasoning", "reasoning_text"] {
         let mut configured = model("openai-completions", "configured-destination", "fixture");
@@ -135,7 +138,10 @@ fn plaintext_source_identity_does_not_override_destination_support() {
         assert_eq!(
             crate::providers::openai_completions::convert_messages(&configured, &context, &compat)
                 .unwrap(),
-            vec![json!({ "role": "assistant", "content": "", field: "SYNTHETIC_PLAN" })]
+            vec![
+                json!({ "role": "developer", "content": "Synthetic shared prefix" }),
+                json!({ "role": "assistant", "content": "", field: "SYNTHETIC_PLAN" })
+            ]
         );
     }
     assert_eq!(context.messages, original);
