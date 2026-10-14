@@ -175,6 +175,7 @@ pub async fn mcp_login(
             registration_endpoint,
             &config.label,
             (!scope.is_empty()).then_some(scope.as_str()),
+            config.callback_port,
         )
         .await?
     };
@@ -1334,6 +1335,59 @@ mod tests {
             .append_pair("redirect_uri", &redirect_uri)
             .finish();
         assert!(body.contains(&encoded_redirect));
+    }
+
+    #[tokio::test]
+    async fn dynamic_registration_advertises_the_pinned_redirect() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let http = ScriptedHttp::new(vec![
+            (ORIGIN_URL, 404, None, ""),
+            (
+                "https://srv.test/.well-known/oauth-protected-resource/mcp",
+                404,
+                None,
+                "",
+            ),
+            (ORIGIN_META_URL, 200, None, &json_response(&origin_meta())),
+            (
+                ORIGIN_REGISTER,
+                200,
+                None,
+                &json_response(&serde_json::json!({ "client_id": "range-client" })),
+            ),
+            (
+                ORIGIN_TOKEN,
+                200,
+                None,
+                &json_response(&serde_json::json!({ "access_token": "range-access" })),
+            ),
+        ]);
+        let ui = test_ui();
+        let mut login_config = config("origin", ORIGIN_URL);
+        login_config.callback_port = Some(port);
+        let credentials = mcp_login(&http, &login_config, &ui).await.unwrap();
+        match &credentials {
+            AuthCredential::Oauth { access, .. } => assert_eq!(access, "range-access"),
+            other => panic!("oauth credential expected, got {other:?}"),
+        }
+        let registration_request = http
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(url, _)| url == ORIGIN_REGISTER)
+            .cloned()
+            .unwrap();
+        let registration_body =
+            serde_json::from_str::<serde_json::Value>(&registration_request.1.unwrap()).unwrap();
+        assert_eq!(
+            registration_body.get("redirect_uris"),
+            Some(&serde_json::json!([format!(
+                "http://localhost:{port}/callback"
+            )]))
+        );
     }
 
     /// The Vercel shape (TS parity): a root endpoint whose declared

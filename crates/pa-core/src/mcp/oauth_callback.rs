@@ -23,11 +23,21 @@ fn redirect_uri_for(port: u16) -> String {
     format!("http://localhost:{port}{CALLBACK_PATH}")
 }
 
+fn candidate_ports(callback_port: Option<u16>) -> Vec<u16> {
+    match callback_port {
+        Some(port) => vec![port],
+        None => (0..CALLBACK_PORT_COUNT)
+            .map(|offset| CALLBACK_PORT_BASE + offset)
+            .collect(),
+    }
+}
+
 /// Every redirect URI a login registers (dynamic client registration
 /// offers them all).
-pub fn all_redirect_uris() -> Vec<String> {
-    (0..CALLBACK_PORT_COUNT)
-        .map(|offset| redirect_uri_for(CALLBACK_PORT_BASE + offset))
+pub fn redirect_uris(callback_port: Option<u16>) -> Vec<String> {
+    candidate_ports(callback_port)
+        .into_iter()
+        .map(redirect_uri_for)
         .collect()
 }
 
@@ -66,6 +76,7 @@ impl CallbackShared {
 pub struct CallbackServer {
     shared: Arc<CallbackShared>,
     port: u16,
+    accept_task: tokio::task::AbortHandle,
 }
 
 impl CallbackServer {
@@ -74,15 +85,7 @@ impl CallbackServer {
     pub async fn start(label: &str, callback_port: Option<u16>) -> Result<Self> {
         let host = callback_host();
         let mut last_error: Option<String> = None;
-        let ports: Vec<u16> = callback_port.map_or_else(
-            || {
-                (0..CALLBACK_PORT_COUNT)
-                    .map(|offset| CALLBACK_PORT_BASE + offset)
-                    .collect()
-            },
-            |port| vec![port],
-        );
-        for port in ports {
+        for port in candidate_ports(callback_port) {
             let listener = match TcpListener::bind((host.as_str(), port)).await {
                 Ok(listener) => listener,
                 Err(error) => {
@@ -92,7 +95,7 @@ impl CallbackServer {
             };
             let shared = Arc::new(CallbackShared::default());
             let task_shared = Arc::clone(&shared);
-            tokio::spawn(async move {
+            let accept_task = tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
                         break;
@@ -102,8 +105,13 @@ impl CallbackServer {
                         serve_callback(stream, &shared).await;
                     });
                 }
+            })
+            .abort_handle();
+            return Ok(CallbackServer {
+                shared,
+                port,
+                accept_task,
             });
-            return Ok(CallbackServer { shared, port });
         }
         match callback_port {
             Some(port) => Err(anyhow!(
@@ -139,6 +147,12 @@ impl CallbackServer {
     /// only because the caller chose to stop waiting.
     pub async fn cancel(&self) {
         self.shared.settle(None).await;
+    }
+}
+
+impl Drop for CallbackServer {
+    fn drop(&mut self) {
+        self.accept_task.abort();
     }
 }
 
@@ -337,6 +351,20 @@ mod tests {
         assert_ne!(server.redirect_uri(), redirect_uri_for(CALLBACK_PORT_BASE));
         assert!(server.redirect_uri().starts_with("http://localhost:5370"));
         drop(blocker);
+    }
+
+    #[tokio::test]
+    async fn pinned_port_rebinds_after_drop() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        {
+            let first = CallbackServer::start("Linear", Some(port)).await.unwrap();
+            assert_eq!(first.redirect_uri(), redirect_uri_for(port));
+        }
+        tokio::task::yield_now().await;
+        let second = CallbackServer::start("Linear", Some(port)).await.unwrap();
+        assert_eq!(second.redirect_uri(), redirect_uri_for(port));
     }
 
     #[tokio::test]
