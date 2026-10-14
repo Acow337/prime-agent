@@ -74,6 +74,15 @@ class InputTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         extract(archive, Path(directory), **limits)
 
+    def test_windows_path_syntax_and_devices_are_rejected_on_every_host(self):
+        for name in ('..\\..\\outside', 'C:/Windows/evil', 'C:relative',
+                     '\\\\server\\share\\outside', 'dir/.. /outside', 'dir/trailing./file',
+                     'NUL', 'CON.txt', 'dir/file:stream'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                with tarfile.open(fileobj=io.BytesIO(archive_bytes([member(name)])), mode='r:gz') as archive:
+                    with self.assertRaises(ValueError):
+                        extract(archive, Path(directory))
+
     def artifact(self):
         artifact = self.root / 'artifact'
         artifact.mkdir()
@@ -175,6 +184,21 @@ class InputTests(unittest.TestCase):
         manifest.symlink_to(artifact / 'original-manifest')
         with self.assertRaises(ValueError):
             prepare(artifact, self.root / 'payload', SHA, 123, 2)
+
+    def test_windows_payload_names_are_rejected_before_filesystem_access(self):
+        artifact, receipt = self.artifact()
+        original_is_file = Path.is_file
+        for name in ('extra:stream', 'CON.txt', 'trailing.'):
+            row = json.loads(json.dumps(receipt))
+            row['payloads'][name] = {'bytes': 1, 'sha256': '0' * 64}
+            (artifact / 'receipt.json').write_text(json.dumps(row))
+            def checked(path):
+                if path.name == name:
+                    raise AssertionError('unsafe payload reached filesystem inspection')
+                return original_is_file(path)
+            with self.subTest(name=name), patch.object(Path, 'is_file', checked):
+                with self.assertRaises(ValueError):
+                    prepare(artifact, self.root / 'payload', SHA, 123, 2)
 
 
 if __name__ == '__main__':

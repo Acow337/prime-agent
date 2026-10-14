@@ -3,7 +3,7 @@
 from __future__ import annotations
 import argparse
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import stat
 import tarfile
@@ -13,12 +13,21 @@ MAX_FILE = 512 * 1024 ** 2
 MAX_TOTAL = 1024 ** 3
 
 
+def portable_path(name: str) -> PurePosixPath:
+    path = PurePosixPath(name)
+    if (path.is_absolute() or '\\' in name
+            or any(part == '..' or ':' in part or part.endswith((' ', '.'))
+                   or PureWindowsPath(part).is_reserved() for part in path.parts)):
+        raise ValueError('unsafe portable artifact path')
+    return path
+
+
 def extract(archive: tarfile.TarFile, destination: Path, *, max_file=MAX_FILE, max_total=MAX_TOTAL) -> None:
     seen = set()
     total = 0
     for member in archive:
-        path = PurePosixPath(member.name)
-        if (path.is_absolute() or '..' in path.parts or str(path) in seen or len(seen) >= 10000
+        path = portable_path(member.name)
+        if (str(path) in seen or len(seen) >= 10000
                 or not (member.isdir() or member.isfile()) or not 0 <= member.size <= max_file):
             raise ValueError('unsafe or oversized artifact member')
         seen.add(str(path))
@@ -58,6 +67,7 @@ def prepare(artifact: Path, destination: Path, sha: str, run_id: int, attempt: i
     for name, item in payloads.items():
         if not isinstance(name, str) or Path(name).name != name:
             raise ValueError('unsafe payload name')
+        portable_path(name)
         path = artifact / name
         if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= MAX_FILE:
             raise ValueError('invalid payload file')
