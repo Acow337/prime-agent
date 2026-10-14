@@ -1021,6 +1021,7 @@ async fn closing_session_cancels_background_planning_without_committing() {
         session.session.clone(),
         session.agent.clone(),
         session.compaction_flight.clone(),
+        session.refinements_in_flight.clone(),
         session.refinement_signal(),
         None,
         refine::RefineOptions {
@@ -1065,6 +1066,7 @@ async fn disabled_background_refinement_refuses_before_planning() {
         session.session.clone(),
         session.agent.clone(),
         session.compaction_flight.clone(),
+        session.refinements_in_flight.clone(),
         session.refinement_signal(),
         Some(agent_dir),
         refine::RefineOptions {
