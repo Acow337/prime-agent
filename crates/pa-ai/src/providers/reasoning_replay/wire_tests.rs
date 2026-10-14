@@ -13,7 +13,7 @@ fn model(api: &str, provider: &str, id: &str) -> Model {
     .unwrap()
 }
 
-fn history(source: &Model, content: serde_json::Value) -> Context {
+fn history(source: &Model, content: &serde_json::Value) -> Context {
     Context {
         system_prompt: Some("Synthetic shared prefix".into()),
         messages: vec![serde_json::from_value(json!({
@@ -36,7 +36,7 @@ fn empty_signed_claude_reasoning_round_trips_across_native_adapters() {
     for source in [&anthropic, &bedrock] {
         let context = history(
             source,
-            json!([
+            &json!([
                 { "type": "thinking", "thinking": "", "thinkingSignature": "SYNTHETIC_SIGNATURE" },
                 { "type": "text", "text": "Synthetic answer" }
             ]),
@@ -76,7 +76,7 @@ fn opaque_claude_payload_round_trips_without_rewriting_or_becoming_text() {
     for source in [&anthropic, &bedrock] {
         let context = history(
             source,
-            json!([
+            &json!([
                 { "type": "thinking", "thinking": "[Reasoning redacted]", "thinkingSignature": encoded, "redacted": true }
             ]),
         );
@@ -111,7 +111,7 @@ fn plaintext_source_identity_does_not_override_destination_support() {
     );
     let context = history(
         &source,
-        json!([
+        &json!([
             { "type": "thinking", "thinking": "SYNTHETIC_PLAN", "thinkingSignature": "reasoning_content" }
         ]),
     );

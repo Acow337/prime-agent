@@ -716,9 +716,7 @@ async fn run_stream(
     .await;
 
     state.settle_partial_blocks(output);
-    if let Err(error) = stream_result {
-        return Err(error);
-    }
+    stream_result?;
 
     Ok(())
 }
