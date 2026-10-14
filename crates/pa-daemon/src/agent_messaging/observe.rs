@@ -102,14 +102,48 @@ impl LinkAgentObserveController {
     }
 }
 
-/// Find one summary by any of its selector forms (active id, session id,
-/// or name) — the resolution `get_agent` and `recent_messages` share.
-fn find_target(summaries: Vec<AgentObserveSummary>, target: &str) -> Option<AgentObserveSummary> {
-    summaries.into_iter().find(|summary| {
-        summary.active_session_id.as_deref() == Some(target)
-            || summary.session_id == target
-            || summary.session_name.as_deref() == Some(target)
-    })
+/// Resolve within the nuclear family using the registry's normalized id-suffix
+/// and exact-name contract. Exact active ids retain direct-lookup precedence.
+fn find_target(
+    mut summaries: Vec<AgentObserveSummary>,
+    target: &str,
+) -> anyhow::Result<Option<AgentObserveSummary>> {
+    if let Some(at) = summaries
+        .iter()
+        .position(|summary| summary.active_session_id.as_deref() == Some(target))
+    {
+        return Ok(Some(summaries.remove(at)));
+    }
+    let mut matches: Vec<_> = summaries
+        .into_iter()
+        .filter(|summary| {
+            summary
+                .active_session_id
+                .as_deref()
+                .is_some_and(|id| crate::registry::selector_matches(id, target))
+                || crate::registry::selector_matches(&summary.session_id, target)
+                || summary.session_name.as_deref() == Some(target)
+        })
+        .collect();
+    if matches.len() > 1 {
+        let rendered = matches
+            .iter()
+            .map(|summary| {
+                let id = summary
+                    .active_session_id
+                    .as_deref()
+                    .unwrap_or(&summary.session_id);
+                summary
+                    .session_name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .map_or_else(|| id.to_string(), |name| format!("{id} ({name})"))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!("Ambiguous active session \"{target}\": matches {rendered}");
+    }
+    Ok(matches.pop())
 }
 
 impl AgentObserveController for LinkAgentObserveController {
@@ -142,7 +176,7 @@ impl AgentObserveController for LinkAgentObserveController {
     }
 
     async fn get_agent(&self, target: &str) -> anyhow::Result<Option<AgentObserveSummary>> {
-        Ok(find_target(self.family_summaries().await?, target))
+        find_target(self.family_summaries().await?, target)
     }
 
     async fn recent_messages(
@@ -151,7 +185,7 @@ impl AgentObserveController for LinkAgentObserveController {
         limit: usize,
         max_chars: usize,
     ) -> anyhow::Result<AgentObserveRecentMessagesResult> {
-        let agent = find_target(self.family_summaries().await?, target)
+        let agent = find_target(self.family_summaries().await?, target)?
             .ok_or_else(|| anyhow::anyhow!("agent {target} is not reachable"))?;
         // A family member with no live session (a passivated child) has no
         // worker to read; TS hydrates it first, the roster walk errors. A
