@@ -102,8 +102,9 @@ pub(crate) type SettledKernelRelease =
 /// Transfers completion reporting to the worker without retaining its turn runner.
 pub(crate) type RefinementCompletionSink = std::sync::Arc<
     dyn Fn(
-            tokio::task::JoinHandle<anyhow::Result<pa_core::refinement::RefinementResult>>,
-            pa_core::session_engine::refine::RefinementSource,
+            tokio::task::JoinHandle<
+                anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+            >,
         ) + Send
         + Sync,
 >;

@@ -424,7 +424,7 @@ impl AgentSession {
         model: pa_types::ai::Model,
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
-    ) -> tokio::task::JoinHandle<anyhow::Result<crate::refinement::RefinementResult>> {
+    ) -> tokio::task::JoinHandle<anyhow::Result<refine::CommittedRefinement>> {
         tokio::spawn(refine::run_refinement(
             self.session.clone(),
             self.agent.clone(),
@@ -464,5 +464,6 @@ impl AgentSession {
             global_harness_dir,
         )
         .await
+        .map(|committed| committed.result)
     }
 }
