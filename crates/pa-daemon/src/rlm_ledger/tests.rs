@@ -356,6 +356,58 @@ fn moved_edge_paths_resolve_through_the_session_id() {
     assert_eq!(raw[0].child, recorded_child);
 }
 
+#[test]
+fn the_artifact_index_updates_after_a_new_partition() {
+    let agent_dir = temp_dir("index-partition");
+    let sessions_dir = agent_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let ledger = ledger_over(&agent_dir, &sessions_dir);
+
+    let parent = sessions_dir.join("sess-p.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let first = agent_dir
+        .join("session-artifacts")
+        .join("sess-p")
+        .join("sub-1")
+        .join("sess-1.jsonl");
+    fs::create_dir_all(first.parent().unwrap()).unwrap();
+    fs::write(&first, "{}").unwrap();
+    let spawn = |child_id: &str, child: &str| {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: child_id.into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+    };
+    spawn("sub-1", "/gone-root/sess-1.jsonl");
+    let edges = ledger.live_edges().unwrap();
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(
+        edges[0].child,
+        canonical_session_path(&first).to_string_lossy().to_string()
+    );
+
+    let second = agent_dir
+        .join("session-artifacts")
+        .join("sess-p")
+        .join("sub-2")
+        .join("sess-2.jsonl");
+    fs::create_dir_all(second.parent().unwrap()).unwrap();
+    fs::write(&second, "{}").unwrap();
+    spawn("sub-2", "/gone-root/sess-2.jsonl");
+    let edges = ledger.live_edges().unwrap();
+    assert_eq!(edges.len(), 2, "{edges:?}");
+    assert!(
+        edges.iter().any(|edge| edge.child
+            == canonical_session_path(&second).to_string_lossy().to_string()),
+        "the new partition resolves after its append: {edges:?}"
+    );
+}
+
 /// The parent-scoped live read bounds the liveness work to the opened
 /// parent's own edges: foreign edges with missing endpoints never
 /// resolve (no per-edge stats, no artifacts-tree walk), while the own
@@ -1253,4 +1305,62 @@ fn bucket_skips_recreated_live_paths() {
         .unwrap();
     let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
     assert!(bucket.is_empty(), "a live path never bills the bucket");
+}
+
+#[test]
+fn the_bucket_updates_after_an_append_on_the_same_ledger() {
+    let dir = temp_dir("bucket-append");
+    let ledger = ledger_for(&dir);
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("p.jsonl");
+    let child_1 = sessions.join("c1.jsonl");
+    let child_2 = sessions.join("c2.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&child_1, "{}").unwrap();
+    fs::write(&child_2, "{}").unwrap();
+    let parent_key = crate::lease::canonical_session_path(&parent)
+        .to_string_lossy()
+        .to_string();
+    let spawn_delete = |child_id: &str, child: &Path, cost: f64| {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: child_id.into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+        ledger
+            .append_delete_with_usage(
+                child_id,
+                &child.to_string_lossy(),
+                RlmLedgerDeleteReason::User,
+                &usage_summary(cost),
+            )
+            .unwrap();
+        fs::remove_file(child).unwrap();
+    };
+    spawn_delete("sub-1", &child_1, 0.25);
+    let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+    assert_eq!(
+        bucket,
+        HashMap::from([(parent_key.clone(), usage_summary(0.25))]),
+        "the first delete bills: {bucket:?}"
+    );
+    spawn_delete("sub-2", &child_2, 0.50);
+    let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+    assert_eq!(
+        bucket,
+        HashMap::from([(
+            parent_key,
+            SessionUsageSummary {
+                input_tokens: 2_000,
+                output_tokens: 200,
+                cost: 0.75,
+            }
+        )]),
+        "the appended delete bills on the same instance: {bucket:?}"
+    );
 }
