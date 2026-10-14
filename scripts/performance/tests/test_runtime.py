@@ -59,10 +59,13 @@ class RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             payload, environment = root / 'payload', root / 'venv'
-            packages = [payload / 'prime-agent-runtime', *(payload / 'skills' / name for name in SKILLS)]
+            wheel_dir = payload / 'runtime-wheels'
+            wheel_dir.mkdir(parents=True)
+            packages = [wheel_dir / (name.replace('-', '_') + '-0.1-py3-none-any.whl')
+                        for name in ('prime-agent-runtime', *SKILLS)]
             for path in packages:
-                path.mkdir(parents=True)
-                (path / 'pyproject.toml').write_text('[project]\nname="fixture"\n')
+                path.write_bytes(b'wheel fixture, never executed')
+            packages.sort()
             def fake_run(command, **kwargs):
                 if command[1:3] == ['-m', 'venv']:
                     site = environment / f'lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages'
@@ -73,7 +76,6 @@ class RuntimeTests(unittest.TestCase):
             commands = [call.args[0] for call in run.call_args_list]
             self.assertEqual(len(commands), 3)
             self.assertIn('--no-index', commands[1])
-            self.assertIn('--no-build-isolation', commands[1])
             self.assertIn('--no-deps', commands[1])
             self.assertEqual(commands[1][-len(packages):], list(map(str, packages)))
             self.assertEqual(commands[2][-1], 'check')

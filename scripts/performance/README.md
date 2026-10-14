@@ -12,16 +12,18 @@ this job alone does not guarantee an artifact for every intermediate commit.
 
 Each run-attempt/side/SHA artifact contains the existing release assembler's Linux
 x64 source bundle and split-debug decoder, a stripped release-profile pa-core
-library test executable, checksums and `receipt.json`. Both executables are gated
+library test executable, ten prebuilt runtime/skill wheels, checksums and `receipt.json`. Both executables are gated
 at GLIBC <=2.35 using objdump/readelf, without running them. The library test payload
 does not include workspace integration tests or their fixtures; tests that refer
 to compile-time source paths need separate fixture support. Catalogs are synthetic
 offline fixtures. Exported files are capped at 512 MiB each and 1 GiB total before
 the small receipt is added; compressed size limits do not bound extraction size.
-The release bundle
-contains Python runtime/skill **source**, not an installed offline venv. Offline
-wheel/environment preparation remains separate, with no candidate build hooks on
-the persistent measurement node.
+The release bundle contains Python runtime/skill source, while `runtime-wheels.tar.gz`
+contains matching pure Python wheels built only on the disposable hosted builder.
+The builder uses Python 3.12.13 and hash-pinned Hatchling dependencies from
+`wheel-build.lock`. Node preparation installs wheels offline into fresh environments,
+checks dependencies and imports all ten packages before timing. Candidate build hooks
+never run on the persistent measurement node; candidate imports remain confined.
 
 The exporter uses tooling checked out at the workflow's recorded SHA, which is
 PR-influenced merge workflow code on a pull_request run. An artifact
@@ -34,7 +36,7 @@ reporting credentials. The current manual node launcher accepts a hardcoded rele
 a reviewed manifest/input interface is still required for arbitrary candidate artifacts.
 
 For manual offline measurements, prepare two environments from the matching runtime
-sources using the reviewed hash lock. Install PTY tooling from `bootstrap.lock` and
+wheels using the reviewed hash lock. Install PTY tooling from `bootstrap.lock` and
 `requirements.lock` using Python 3.12.13 before timing. Run inside a fresh, networkless,
 resource-bounded environment; the harness itself does not provide confinement:
 
@@ -49,8 +51,8 @@ histories and a concurrent session. Warm navigation deliberately includes a one-
 idle workload cadence; it is not a readiness assertion. Kernel probes cover real
 protocol startup, cells, shell/git/output/file I/O, interrupt recovery and state restore.
 Neither suite calls a model provider. RSS is an immediate process-tree sample, not PSS
-or settled memory. Runtime interpreter hashes do not identify all installed packages;
-retain separate environment/source inventories before comparing normal installations.
+or settled memory. Retain the runtime inventories: interpreter hashes, installed package
+files, shared dependency files and dependency-lock identity accompany each comparison.
 
 Defaults are ten alternating pairs. Calibrate the identical baseline as A/A before
 interpreting deltas; retain failures and label rows inconclusive when median drift or

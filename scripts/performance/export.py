@@ -92,7 +92,7 @@ def payload_inventory(out: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('source', 'tooling', 'out', 'cargo-records', 'cargo-metadata'):
+    for name in ('source', 'tooling', 'out', 'cargo-records', 'cargo-metadata', 'wheel-python'):
         parser.add_argument('--' + name, type=Path, required=True)
     for name in ('sha', 'builder-sha', 'base-sha', 'head-sha', 'repository', 'source-repository', 'workflow-ref'):
         parser.add_argument('--' + name, required=True)
@@ -138,6 +138,22 @@ def main() -> None:
     (test_dir / 'pa-core-tests').chmod(0o755)
     pack_test(test_dir / 'pa-core-tests', out / 'pa-core-tests.tar.gz')
     shutil.rmtree(test_dir)
+    wheels = out / 'runtime-wheels'
+    wheels.mkdir()
+    packages = [source / 'prime-agent-runtime', *(source / 'skills' / name for name in
+                ('agent-message', 'agent-observe', 'attach-image', 'compact', 'edit',
+                 'goal', 'refine', 'rlm-heartbeat', 'websearch'))]
+    subprocess.run([str(args.wheel_python), '-m', 'pip', 'wheel', '--no-index', '--no-cache-dir',
+                    '--no-deps', '--no-build-isolation', '--wheel-dir', str(wheels),
+                    *(str(path) for path in packages)], check=True, timeout=180)
+    built = sorted(wheels.iterdir())
+    if len(built) != len(packages) or any(not p.name.endswith('-py3-none-any.whl') for p in built):
+        raise ValueError('unexpected bundled runtime wheels')
+    # Reuse the release packer's deterministic plain-file policy.
+    sys.path.insert(0, str(release))
+    from assemble_artifacts import pack_tarball
+    pack_tarball(wheels, out / 'runtime-wheels.tar.gz', [p.name for p in built])
+    shutil.rmtree(wheels)
     payloads = payload_inventory(out)
     receipt = {'schema': 1, 'repository': args.repository, 'pr': args.pr,
                'source_repository': args.source_repository,
@@ -148,7 +164,7 @@ def main() -> None:
                'rustc': subprocess.check_output(['rustc', '-vV'], text=True).strip(),
                'cargo_lock_sha256': digest(source / 'Cargo.lock'),
                'profile': 'release; locked; incremental=0; jobs=2; no shared cache',
-               'runtime_profile': 'bundled Python runtime/skill source; offline venv not included',
+               'runtime_profile': 'bundled source and prebuilt pure Python wheels; dependencies supplied by locked image',
                'catalog_profile': 'synthetic offline fixture catalogs',
                'test_scope': 'pa-core library tests; fixture-dependent tests may require source paths',
                'elf_requirements': requirements, 'payloads': payloads,

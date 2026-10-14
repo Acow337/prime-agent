@@ -20,7 +20,9 @@ class ProvenanceTests(unittest.TestCase):
                 helper_changed = provenance.harness_sha256()
                 (root / 'requirements.lock').write_text('changed lock')
                 lock_changed = provenance.harness_sha256()
-            self.assertEqual(len({original, helper_changed, lock_changed}), 3)
+                (root / 'wheel-build.lock').write_text('new build dependency lock')
+                wheel_lock_added = provenance.harness_sha256()
+            self.assertEqual(len({original, helper_changed, lock_changed, wheel_lock_added}), 4)
 
 
 if __name__ == '__main__':

@@ -38,12 +38,12 @@ def install(payload: Path, environment: Path, log: Path) -> Path:
     dependency_site = Path(sys.prefix) / f'lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages'
     (site / 'benchmark-dependencies.pth').write_text(str(dependency_site) + '\n')
     python = environment / 'bin/python'
-    packages = [payload / 'prime-agent-runtime', *(payload / 'skills' / name for name in SKILLS)]
-    if any(not (path / 'pyproject.toml').is_file() for path in packages):
-        raise ValueError('release lacks a required bundled Python package')
+    packages = sorted((payload / 'runtime-wheels').glob('*.whl'))
+    if len(packages) != len(SKILLS) + 1 or any(not p.name.endswith('-py3-none-any.whl') for p in packages):
+        raise ValueError('release lacks the prebuilt bundled runtime wheels')
     with log.open('wb') as stream:
         subprocess.run([str(python), '-m', 'pip', 'install', '--no-index', '--no-cache-dir',
-                        '--no-build-isolation', '--no-deps', *(str(path) for path in packages)],
+                        '--no-deps', *(str(path) for path in packages)],
                        stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=180)
         subprocess.run([str(python), '-m', 'pip', 'check'], stdout=stream,
                        stderr=subprocess.STDOUT, check=True, timeout=30)
