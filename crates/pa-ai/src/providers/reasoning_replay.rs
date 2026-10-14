@@ -176,7 +176,7 @@ mod tests {
             "id": "destination", "name": "fixture", "api": api, "provider": "fixture-provider",
             "baseUrl": "http://localhost", "reasoning": true, "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128000, "maxTokens": 8192
+            "contextWindow": 128_000, "maxTokens": 8192
         }))
         .unwrap();
         let context = Context {
