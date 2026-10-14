@@ -142,6 +142,57 @@ class SelectorReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'duplicate published'):
                 fixture.await_child_identities(snapshot, forbidden, {}, clock=lambda: 100)
 
+    def test_foreign_topology_requires_real_other_parent_edges_not_a_sibling_root(self):
+        parent = {'active': 'main-a', 'durable': 'main-s'}
+        other = {'active': 'other-a', 'durable': 'other-s'}
+        foreign = {'active': 'foreign-a', 'durable': 'foreign-s'}
+        agent = {'activeSessionId': 'foreign-a', 'sessionId': 'foreign-s', 'runtimeKind': 'subagent',
+                 'parentActiveSessionId': 'other-a', 'parentSessionId': 'other-s'}
+        fixture.validate_foreign_agent(agent, foreign, other, parent)
+        for key, value in (('runtimeKind', 'top-level'), ('parentActiveSessionId', 'main-a'), ('parentSessionId', 'main-s')):
+            with self.assertRaises(AssertionError):
+                fixture.validate_foreign_agent({**agent, key: value}, foreign, other, parent)
+        with self.assertRaises(AssertionError):
+            fixture.validate_foreign_agent(agent, foreign, parent, parent)
+
+    def test_roster_retains_valid_root_sibling_but_rejects_its_child(self):
+        parent, other, a, b, foreign = [{'active': name} for name in ('parent', 'other', 'a', 'b', 'foreign')]
+        roster = {'current': {'activeSessionId': 'parent'}, 'agents': [
+            {'activeSessionId': 'other', 'relationship': 'sibling'},
+            {'activeSessionId': 'a', 'relationship': 'child'}, {'activeSessionId': 'b', 'relationship': 'child'}]}
+        fixture.validate_roster(roster, parent, other, a, b, foreign)
+        for extra in ({'activeSessionId': 'foreign', 'relationship': 'child'}, {'activeSessionId': 'foreign', 'relationship': 'sibling'}):
+            with self.assertRaises(AssertionError):
+                fixture.validate_roster({**roster, 'agents': roster['agents'] + [extra]}, parent, other, a, b, foreign)
+        with self.assertRaises(AssertionError):
+            fixture.validate_roster({**roster, 'agents': roster['agents'][1:]}, parent, other, a, b, foreign)
+
+    def test_captured_custom_kickoff_shape_and_mixed_foreign_preview_guard(self):
+        agent = {'activeSessionId': 'actual-a', 'sessionId': 'durable-a'}
+        messages = [{'role': 'custom', 'customType': 'harness_digest', 'text': '[harness-digest]'},
+                    {'role': 'custom', 'customType': 'agent_message', 'text': '[task from parent]\n\nOBSERVE_TASK_A'}]
+        row = {'get': {'value': {'agent': agent}}, 'recent': {'value': {'agent': agent, 'messages': messages}}}
+        expected = {'active': 'actual-a', 'durable': 'durable-a'}
+        fixture.selected(row, expected, 'OBSERVE_TASK_A')
+        messages.append({'role': 'custom', 'customType': 'agent_message', 'text': '[task from parent]\n\nOBSERVE_TASK_FOREIGN'})
+        with self.assertRaises(AssertionError):
+            fixture.selected(row, expected, 'OBSERVE_TASK_A')
+        messages[:] = [{'role': 'user', 'text': '[task from parent]\n\nOBSERVE_TASK_A'}]
+        with self.assertRaises(AssertionError):
+            fixture.selected(row, expected, 'OBSERVE_TASK_A')
+
+    def test_single_foreign_child_uses_same_strict_identity_readiness_guards(self):
+        snapshot = {'children': [{'session_name': 'observe-foreign-child', 'rlm_child_id': 'foreign-child',
+            'label': 'OBSERVE_TASK_FOREIGN', 'status': 'running', 'active_session_id': 'foreign-a', 'session_id': 'foreign-s'}]}
+        rows = fixture.await_child_identities(snapshot, lambda *_args: self.fail('already ready'), {},
+                                              expected_tasks=fixture.FOREIGN_CHILD_TASKS, clock=lambda: 100)
+        self.assertEqual(rows['observe-foreign-child']['active_session_id'], 'foreign-a')
+        snapshot['children'][0]['active_session_id'] = 123
+        snapshot['children'][0]['session_id'] = None
+        with self.assertRaises(AssertionError):
+            fixture.await_child_identities(snapshot, lambda *_args: self.fail('malformed publication'), {},
+                                           expected_tasks=fixture.FOREIGN_CHILD_TASKS, clock=lambda: 100)
+
     def test_identical_cell_uses_actual_skill_functions(self):
         code = fixture.cell({'exact': 'actual-a', 'foreign_suffix': 'FFF-123'})
         tree = ast.parse(code)

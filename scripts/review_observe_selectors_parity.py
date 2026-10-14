@@ -23,6 +23,9 @@ from review_restore_notice_parity import texts
 
 MARKER = 'OBSERVE_SELECTORS_PARITY='
 LIMIT = 35
+MAIN_CHILD_TASKS = {'observe-child-a': 'OBSERVE_TASK_A', 'observe-child-b': 'OBSERVE_TASK_B'}
+FOREIGN_CHILD_TASKS = {'observe-foreign-child': 'OBSERVE_TASK_FOREIGN'}
+ALL_TASKS = set(MAIN_CHILD_TASKS.values()) | set(FOREIGN_CHILD_TASKS.values())
 
 
 class ObserveClient(Client):
@@ -89,7 +92,7 @@ class Provider(http.server.ThreadingHTTPServer):
 def child_task(body):
     users = [message for message in body.get('messages', []) if message.get('role') == 'user']
     text = '\n'.join(texts(users[-1].get('content'))).strip() if users else ''
-    tasks = {f'[task from parent]\n\n{task}': task for task in ('OBSERVE_TASK_A', 'OBSERVE_TASK_B')}
+    tasks = {f'[task from parent]\n\n{task}': task for task in ALL_TASKS}
     return tasks.get(text)
 
 
@@ -174,12 +177,12 @@ print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(
 """
 
 
-def ready_children(snapshot, expected_child_ids):
+def ready_children(snapshot, expected_child_ids, expected_tasks=MAIN_CHILD_TASKS):
     children = snapshot['children']
-    assert len(children) == 2, 'unexpected spawned-child roster size'
+    assert len(children) == len(expected_tasks), 'unexpected spawned-child roster size'
     rows = {row['session_name']: row for row in children}
-    assert set(rows) == {'observe-child-a', 'observe-child-b'}, 'unexpected/duplicate child names'
-    for name, task in (('observe-child-a', 'OBSERVE_TASK_A'), ('observe-child-b', 'OBSERVE_TASK_B')):
+    assert set(rows) == set(expected_tasks), 'unexpected/duplicate child names'
+    for name, task in expected_tasks.items():
         row = rows[name]
         assert row['rlm_child_id'] == expected_child_ids[name], 'spawned child identity changed'
         assert row['status'] == 'running', 'spawned child settled before identity proof'
@@ -190,19 +193,19 @@ def ready_children(snapshot, expected_child_ids):
         published = [value for value in ids if value is not None]
         assert all(isinstance(value, str) and value for value in published), 'invalid published live child ID'
         assert len(set(published)) == len(published), 'duplicate published live child IDs'
-        complete = complete and len(published) == 2
+        complete = complete and len(published) == len(expected_tasks)
     # Only explicit None is a transient admission/publication state. Validate
     # every present ID first, even if another field has not been published.
     return rows if complete else None
 
 
-def await_child_identities(first, read_snapshot, observation, clock=time.monotonic, budget=LIMIT):
+def await_child_identities(first, read_snapshot, observation, clock=time.monotonic, budget=LIMIT, expected_tasks=MAIN_CHILD_TASKS):
     expected = {row['session_name']: row['rlm_child_id'] for row in first['children']}
     assert all(isinstance(value, str) and value for value in expected.values()), 'invalid spawned child handles'
-    assert len(set(expected.values())) == 2, 'duplicate spawned child handles'
+    assert len(set(expected.values())) == len(expected_tasks), 'duplicate spawned child handles'
     deadline = clock() + budget
     observation['identity_polls'] = []
-    rows = ready_children(first, expected)
+    rows = ready_children(first, expected, expected_tasks)
     while rows is None:
         remaining = deadline - clock()
         assert remaining > 0, 'spawned children did not publish live IDs before deadline'
@@ -211,8 +214,27 @@ def await_child_identities(first, read_snapshot, observation, clock=time.monoton
         snapshot = read_snapshot(len(observation['identity_polls']) + 1, remaining)
         observation['identity_polls'].append(snapshot)
         assert clock() < deadline, 'spawned child identity observation exceeded deadline'
-        rows = ready_children(snapshot, expected)
+        rows = ready_children(snapshot, expected, expected_tasks)
     return rows
+
+
+def validate_foreign_agent(agent, foreign, other_parent, parent):
+    assert other_parent['active'] != parent['active'] and other_parent['durable'] != parent['durable'], 'foreign parent aliases main parent'
+    assert agent['activeSessionId'] == foreign['active'] and agent['sessionId'] == foreign['durable'], agent
+    assert agent['runtimeKind'] == 'subagent', agent
+    assert agent['parentSessionId'] == other_parent['durable'], agent
+    assert agent['parentActiveSessionId'] == other_parent['active'], agent
+
+
+def validate_roster(roster, parent, other_parent, a, b, foreign):
+    family = [roster['current']] + roster['agents']
+    family_ids = {row.get('activeSessionId') for row in family}
+    assert family_ids == {parent['active'], other_parent['active'], a['active'], b['active']}, roster
+    assert foreign['active'] not in family_ids, roster
+    expected = {other_parent['active']: 'sibling', a['active']: 'child', b['active']: 'child'}
+    for active, relationship in expected.items():
+        assert any(row.get('activeSessionId') == active and row.get('relationship') == relationship
+                   for row in roster['agents']), roster
 
 
 def selected(row, expected, marker):
@@ -225,7 +247,7 @@ def selected(row, expected, marker):
                   if message.get('role') == 'custom' and message.get('customType') == 'agent_message']
     assert task_texts == ['[task from parent]\n\n' + marker], messages
     assert not any('OBSERVE_TASK_B' in message.get('text', '') for message in messages), messages
-    assert not any('SEED_FOREIGN' in message.get('text', '') for message in messages), messages
+    assert not any('OBSERVE_TASK_FOREIGN' in message.get('text', '') for message in messages), messages
     return {'selection': 'child-a', 'transcript_marker': marker}
 
 
@@ -320,10 +342,41 @@ def run_case(binary, label, root, observation):
                 threading.Event().wait(0.025)
             return row
         parent = create('observe-parent')
-        foreign = create('observe-foreign')
-        provider.phase, provider.code = 'seed_foreign', None
-        client.call('prompt_and_wait', timeout_seconds=90, activeSessionId=foreign['active'], message='SEED_FOREIGN')
-        assert len(provider.requests['seed_foreign']) == 1, 'foreign seed did not finish'
+        other_parent = create('observe-other-parent')
+        # Parentless roots are siblings in both products. An actual child of
+        # that sibling is outside this root's nuclear family (nephew/niece).
+        provider.phase = 'foreign_spawn_setup'
+        provider.code = """import json, dataclasses
+await rlm.spawn('OBSERVE_TASK_FOREIGN', name='observe-foreign-child', model='fixture/observe-fixture')
+print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(row) for row in await rlm.list_subagents()]}, default=str))
+"""
+        client.call('prompt_and_wait', timeout_seconds=90, activeSessionId=other_parent['active'],
+                    message='Spawn an actual child in the other parent family.')
+        foreign_setup = current_probe(provider.requests['foreign_spawn_setup'], 'foreign_spawn_setup')
+        foreign_observation = observation['foreign_setup'] = {'spawn_setup': foreign_setup}
+        with provider.children_arrived:
+            assert provider.children_arrived.wait_for(lambda: 'OBSERVE_TASK_FOREIGN' in provider.child_requests,
+                timeout=LIMIT), 'foreign child never reached its actual model request'
+        def read_foreign_identity(number, remaining):
+            phase = 'foreign_identity_poll_%d' % number
+            provider.phase, provider.code = phase, READ_CHILDREN
+            client.call('prompt_and_wait', timeout_seconds=remaining, activeSessionId=other_parent['active'],
+                        message='Read actual foreign child identity readiness.')
+            return current_probe(provider.requests[phase], phase)
+        foreign_rows = await_child_identities(foreign_setup, read_foreign_identity, foreign_observation,
+                                              expected_tasks=FOREIGN_CHILD_TASKS)
+        foreign_row = foreign_rows['observe-foreign-child']
+        foreign = {'active': foreign_row['active_session_id'], 'durable': foreign_row['session_id'], 'raw': foreign_row}
+        created['observe-foreign-child'] = foreign
+        provider.phase = 'foreign_topology'
+        provider.code = """import json, agent_observe
+print('OBSERVE_SELECTORS_PARITY=' + json.dumps(await agent_observe.get_agent('observe-foreign-child')))
+"""
+        client.call('prompt_and_wait', timeout_seconds=90, activeSessionId=other_parent['active'],
+                    message='Observe the actual foreign child parent edges.')
+        foreign_agent = current_probe(provider.requests['foreign_topology'], 'foreign_topology')['agent']
+        observation['foreign_agent'] = foreign_agent
+        validate_foreign_agent(foreign_agent, foreign, other_parent, parent)
         provider.phase = 'spawn_setup'
         provider.code = """import json, dataclasses
 await rlm.spawn('OBSERVE_TASK_A', name='observe-child-a', model='fixture/observe-fixture')
@@ -334,7 +387,7 @@ print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(
         setup = current_probe(provider.requests['spawn_setup'], 'spawn_setup')
         observation['spawn_setup'] = setup
         with provider.children_arrived:
-            assert provider.children_arrived.wait_for(lambda: set(provider.child_requests) == {'OBSERVE_TASK_A', 'OBSERVE_TASK_B'},
+            assert provider.children_arrived.wait_for(lambda: set(provider.child_requests) == ALL_TASKS,
                 timeout=LIMIT), 'spawned children never reached their actual model requests'
         def read_identity_snapshot(number, remaining):
             phase = 'identity_poll_%d' % number
@@ -359,11 +412,7 @@ print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(
                         message='Run the resident observe selectors fixture: ' + phase)
             value = current_probe(provider.requests[phase], phase)
             probes[phase] = value
-            roster = value['roster']
-            family = [roster['current']] + roster['agents']
-            family_ids = {row.get('activeSessionId') for row in family}
-            assert {parent['active'], a['active'], b['active']} <= family_ids, roster
-            assert foreign['active'] not in family_ids, roster
+            validate_roster(value['roster'], parent, other_parent, a, b, foreign)
             return value['selectors']
         basic = probe('baseline', {'exact': a['active'], 'active_suffix': suffix(a['active'], ids),
             'durable_suffix': suffix(a['durable'], ids), 'name': 'observe-child-a',
@@ -382,7 +431,7 @@ print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(
         contract['duplicate_name'] = rejected(ambiguous['duplicate_name'], 'ambiguous', label)
         # Selection is proven only for resident rows; no hydration or full summary equality.
         assert len(observation['worker_identities']) == 2, 'missing owned root-worker proof'
-        assert set(provider.child_requests) == {'OBSERVE_TASK_A', 'OBSERVE_TASK_B'}, 'missing live spawned-child proof'
+        assert set(provider.child_requests) == ALL_TASKS, 'missing live spawned-child proof'
         assert all(len(requests) == 1 for requests in provider.child_requests.values()), 'child retried/finished during selection'
         assert not provider.child_reply_timeout, 'held child completed before selector proof'
         observation['summary_field_presence'] = {
