@@ -169,6 +169,48 @@ def suffix(identifier, all_ids):
     raise AssertionError('fixture did not generate a unique ID suffix')
 
 
+READ_CHILDREN = """import json, dataclasses
+print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(row) for row in await rlm.list_subagents()]}, default=str))
+"""
+
+
+def ready_children(snapshot, expected_child_ids):
+    children = snapshot['children']
+    assert len(children) == 2, 'unexpected spawned-child roster size'
+    rows = {row['session_name']: row for row in children}
+    assert set(rows) == {'observe-child-a', 'observe-child-b'}, 'unexpected/duplicate child names'
+    for name, task in (('observe-child-a', 'OBSERVE_TASK_A'), ('observe-child-b', 'OBSERVE_TASK_B')):
+        row = rows[name]
+        assert row['rlm_child_id'] == expected_child_ids[name], 'spawned child identity changed'
+        assert row['status'] == 'running', 'spawned child settled before identity proof'
+        assert row.get('label') == task, 'spawned child task/name mismatch'
+    if not all(row.get('active_session_id') and row.get('session_id') for row in children):
+        return None  # Admission can precede asynchronous live-ID publication in TS.
+    for key in ('active_session_id', 'session_id'):
+        ids = [row[key] for row in children]
+        assert all(isinstance(value, str) for value in ids) and len(set(ids)) == 2, 'duplicate/invalid live child IDs'
+    return rows
+
+
+def await_child_identities(first, read_snapshot, observation, clock=time.monotonic, budget=LIMIT):
+    expected = {row['session_name']: row['rlm_child_id'] for row in first['children']}
+    assert all(isinstance(value, str) and value for value in expected.values()), 'invalid spawned child handles'
+    assert len(set(expected.values())) == 2, 'duplicate spawned child handles'
+    deadline = clock() + budget
+    observation['identity_polls'] = []
+    rows = ready_children(first, expected)
+    while rows is None:
+        remaining = deadline - clock()
+        assert remaining > 0, 'spawned children did not publish live IDs before deadline'
+        # Each poll executes the actual RLM host read in another REPL tool call.
+        # The request itself yields to publication; no fixed sleep grants readiness.
+        snapshot = read_snapshot(len(observation['identity_polls']) + 1, remaining)
+        observation['identity_polls'].append(snapshot)
+        assert clock() < deadline, 'spawned child identity observation exceeded deadline'
+        rows = ready_children(snapshot, expected)
+    return rows
+
+
 def selected(row, expected, marker):
     for operation in ('get', 'recent'):
         value = row[operation]['value']
@@ -290,7 +332,13 @@ print('OBSERVE_SELECTORS_PARITY=' + json.dumps({'children': [dataclasses.asdict(
         with provider.children_arrived:
             assert provider.children_arrived.wait_for(lambda: set(provider.child_requests) == {'OBSERVE_TASK_A', 'OBSERVE_TASK_B'},
                 timeout=LIMIT), 'spawned children never reached their actual model requests'
-        rows = {row['session_name']: row for row in setup['children']}
+        def read_identity_snapshot(number, remaining):
+            phase = 'identity_poll_%d' % number
+            provider.phase, provider.code = phase, READ_CHILDREN
+            client.call('prompt_and_wait', timeout_seconds=remaining, activeSessionId=parent['active'],
+                        message='Read actual spawned child identity readiness.')
+            return current_probe(provider.requests[phase], phase)
+        rows = await_child_identities(setup, read_identity_snapshot, observation)
         def child(name):
             row = rows[name]
             value = {'active': row['active_session_id'], 'durable': row['session_id'], 'raw': row}

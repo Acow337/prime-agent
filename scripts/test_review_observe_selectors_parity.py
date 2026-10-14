@@ -71,6 +71,57 @@ class SelectorReceiptTests(unittest.TestCase):
             {'role': 'user', 'content': 'Run parent selector baseline.'}]}))
         self.assertIsNone(fixture.child_task({'messages': [{'role': 'assistant', 'content': 'OBSERVE_TASK_A'}]}))
 
+    def children(self, ready=True):
+        return {'children': [
+            {'session_name': name, 'rlm_child_id': child_id, 'status': 'running', 'label': task,
+             'active_session_id': active, 'session_id': durable}
+            for name, child_id, task, active, durable in (
+                ('observe-child-a', 'child-a', 'OBSERVE_TASK_A', 'active-a', 'durable-a'),
+                ('observe-child-b', 'child-b', 'OBSERVE_TASK_B', 'active-b' if ready else None, 'durable-b' if ready else None))]}
+
+    def test_actual_identity_poll_keeps_first_and_every_ready_snapshot(self):
+        first, ready = self.children(False), self.children()
+        polls, observation = [], {'spawn_setup': first}
+        def read(number, remaining):
+            polls.append((number, remaining))
+            return ready
+        times = iter([100, 101, 102])
+        rows = fixture.await_child_identities(first, read, observation, clock=lambda: next(times), budget=5)
+        self.assertEqual(rows['observe-child-b']['active_session_id'], 'active-b')
+        self.assertEqual(polls, [(1, 4)])
+        self.assertIs(observation['spawn_setup'], first)
+        self.assertEqual(observation['identity_polls'], [ready])
+
+    def test_already_ready_children_need_no_additional_model_turn(self):
+        def forbidden(*_args):
+            self.fail('readiness was already observed')
+        observation = {}
+        rows = fixture.await_child_identities(self.children(), forbidden, observation, clock=lambda: 100)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(observation['identity_polls'], [])
+
+    def test_identity_wait_deadline_is_strict_and_never_sleeps_or_retries(self):
+        times = iter([100, 106])
+        def forbidden(*_args):
+            self.fail('deadline expired before another model turn')
+        with self.assertRaisesRegex(AssertionError, 'before deadline'):
+            fixture.await_child_identities(self.children(False), forbidden, {}, clock=lambda: next(times), budget=5)
+        times = iter([100, 101, 106])
+        observation = {}
+        with self.assertRaisesRegex(AssertionError, 'exceeded deadline'):
+            fixture.await_child_identities(self.children(False), lambda *_args: self.children(),
+                                          observation, clock=lambda: next(times), budget=5)
+        self.assertEqual(observation['identity_polls'], [self.children()])
+
+    def test_identity_ready_rejects_duplicate_ids_changed_handle_or_wrong_task(self):
+        expected = {'observe-child-a': 'child-a', 'observe-child-b': 'child-b'}
+        for key, bad in (('active_session_id', 'active-a'), ('session_id', 'durable-a'),
+                         ('rlm_child_id', 'other-child'), ('label', 'OBSERVE_TASK_A'), ('status', 'completed')):
+            snapshot = self.children()
+            snapshot['children'][1][key] = bad
+            with self.assertRaises(AssertionError, msg=key):
+                fixture.ready_children(snapshot, expected)
+
     def test_identical_cell_uses_actual_skill_functions(self):
         code = fixture.cell({'exact': 'actual-a', 'foreign_suffix': 'FFF-123'})
         tree = ast.parse(code)
