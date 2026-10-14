@@ -959,7 +959,6 @@ fn saved_session_rows_match_the_catalog_row_golden() {
             "modified": "2026-09-21T14:14:20.000Z",
             "messageCount": 2,
             "firstMessage": "fix the login bug",
-            "allMessagesText": "fix the login bug fixed in auth.rs",
             "state": { "status": "active" },
             "name": "golden name",
             "parentSessionPath": "/s/parent.jsonl",
