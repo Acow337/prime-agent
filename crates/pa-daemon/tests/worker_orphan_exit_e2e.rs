@@ -352,12 +352,8 @@ fn the_orphan_exit_writes_a_current_info_sidecar() {
     )
     .expect("script file");
     let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
-    let mut worker = spawn_worker_with_window(
-        dir.path(),
-        &supervisor_socket,
-        "4000",
-        Some(&script),
-    );
+    let mut worker =
+        spawn_worker_with_window(dir.path(), &supervisor_socket, "4000", Some(&script));
     let worker_socket = dir.path().join("worker.sock");
     wait_worker_socket(&worker_socket);
     let session_file = canonical_dir.join("orphan-sidecar-session.jsonl");
@@ -387,7 +383,9 @@ fn the_orphan_exit_writes_a_current_info_sidecar() {
     let sidecar = std::fs::read(session_file.with_extension("info-cache.json"))
         .expect("the orphan exit wrote its info sidecar");
     let value: serde_json::Value = serde_json::from_slice(&sidecar).expect("sidecar json");
-    let len = value["state"]["generation"]["len"].as_u64().expect("gen len");
+    let len = value["state"]["generation"]["len"]
+        .as_u64()
+        .expect("gen len");
     let offset = value["state"]["offset"].as_u64().expect("offset");
     assert_eq!(
         (len, offset),

@@ -11,7 +11,9 @@ fn assert_sidecar_current(label: &str, session_file: &Path) {
     let bytes =
         std::fs::read(&sidecar).unwrap_or_else(|error| panic!("{label}: no sidecar: {error}"));
     let value: Value = serde_json::from_slice(&bytes).expect("the sidecar is JSON");
-    let len = value["state"]["generation"]["len"].as_u64().expect("gen len");
+    let len = value["state"]["generation"]["len"]
+        .as_u64()
+        .expect("gen len");
     let offset = value["state"]["offset"].as_u64().expect("offset");
     assert_eq!(
         (len, offset),
