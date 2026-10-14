@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::TryRecvError;
 
-use super::text_utils::{char_at, char_prefix, ends_with_symbol_token};
+use super::text_utils::{char_prefix, ends_with_symbol_token};
 use super::{AutocompleteSearch, Editor, EditorEvent, PendingAutocomplete};
 
 impl Editor {
@@ -110,13 +110,6 @@ impl Editor {
                 && matches!(&slash_ctx, Some(ctx) if ctx.kind == crate::autocomplete::SlashKind::Name)
             {
                 self.request_autocomplete(false, false);
-            } else if c == '@' || c == '#' {
-                let current_line = &self.lines[self.cursor_line];
-                let before = char_prefix(current_line, self.cursor_col);
-                let prev = char_at(&before, before.chars().count().saturating_sub(2));
-                if before.chars().count() <= 1 || prev == Some(' ') || prev == Some('\t') {
-                    self.request_autocomplete(false, false);
-                }
             } else if slash_ctx.is_some() && (c.is_ascii_alphanumeric() || ".-_".contains(c)) {
                 self.request_autocomplete(false, false);
             } else {
