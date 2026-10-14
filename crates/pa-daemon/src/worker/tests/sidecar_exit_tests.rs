@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The session-end sidecar pins: a worker that ends a session leaves a
 //! current info sidecar — the next process that reads the file folds zero bytes.
 use super::*;
