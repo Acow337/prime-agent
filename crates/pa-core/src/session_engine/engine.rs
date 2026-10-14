@@ -243,10 +243,12 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         config.cron_store.clone(),
     );
 
+    let refinement_settings = settings.reopen();
     let service_tier_preference = settings.get_default_service_tier();
     // Captured before `settings` moves into the resource loader: the
     // compaction budget and the auto-refine gates.
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
+    let compaction_threshold_percent = settings.get_compaction_threshold_percent();
     let auto_refine_gates =
         super::refine::AutoRefineGates::from_settings(settings.settings().auto_refine.as_ref());
     // Request timing: the settings half of the flag is read once here
@@ -346,6 +348,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // serve live views per request.
     crate::mcp::McpManager::register_host_handlers(&mcp_manager, &mut handlers);
     let turn_boundary = Arc::new(super::turn_boundary::TurnBoundaryRequests::new());
+    let _ = turn_boundary
+        .refinement_settings
+        .set(refinement_settings.reopen());
     turn_boundary.register_model_info_handler(&mut handlers, model_info.clone());
     let keep_recent_tokens = compaction_settings
         .keep_recent_tokens
@@ -559,6 +564,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let (existing_messages, has_thinking_entry, has_service_tier_entry) = {
         let session = wiring.session.lock().await;
         let messages = super::compact_session::rebuilt_context_after_compaction(&session);
+        let messages = if super::refinement_gate::enabled(Some(&refinement_settings)) {
+            messages
+        } else {
+            super::refinement_gate::without_refinements(messages)
+        };
         let has_thinking_entry = session.has_thinking_level();
         let has_service_tier_entry = session.has_service_tier();
         (messages, has_thinking_entry, has_service_tier_entry)
@@ -638,7 +648,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         // else (the harness digest included) becomes a user turn.
         convert_to_llm: Some(super::request_timing::instrument_convert_to_llm(
             std::sync::Arc::clone(&request_timing_wiring),
-            super::messages::engine_convert_to_llm(),
+            super::refinement_gate::convert_to_llm(refinement_settings.reopen()),
         )),
         // The Rust engine wires no transform, so the instrumented seam
         // wraps a pass-through that marks the turn's dispatch moment.
@@ -688,15 +698,27 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         agent.clone(),
         wiring.session.clone(),
         resources.prompts.clone(),
-        Some(digest_context),
+        super::refinement_gate::enabled(Some(&refinement_settings))
+            .then_some(digest_context.clone()),
     )
     .await?;
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
     session.set_agent_dir(config.agent_dir.clone());
+    // Keep the context descriptor even while disabled, so re-enabling can load it.
+    session.harness_digest = Some(digest_context);
+    session.refinement_settings = Some(refinement_settings);
+    // A disabled startup has never delivered its filtered digest. Defer that
+    // first delivery without re-arming digests already consumed in a live session.
+    if !session.harness_refinements_enabled() {
+        session
+            .digest_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     // Every compaction path reads the session's resolved compaction
     // settings (TS `getCompactionSettings`): `/compact` matches the
     // `compact.*` turn-boundary tool's `keepRecentTokens`/`reserveTokens`.
     session.set_compaction_settings(crate::session_engine::compaction::CompactionSettings {
+        threshold_percent: compaction_threshold_percent,
         enabled: compaction_settings.enabled.unwrap_or(true),
         reserve_tokens: compaction_settings
             .reserve_tokens

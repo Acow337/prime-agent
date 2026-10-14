@@ -1907,7 +1907,6 @@ mod tests {
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "fixture-echo" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1937,24 +1936,22 @@ mod tests {
             );
         }
         let result = config(pa_core::kernel::shared::HostRequestPayload {
-            data: serde_json::json!({ "server": "fixture-echo" }),
-            cell_source_code: None,
+            data: serde_json::json!({ "server": "second-echo" }),
         })
         .await
         .unwrap();
         assert_eq!(
-            result["command"], "python3",
-            "the registered handler serves its registration-time integrations"
+            result["command"], "node",
+            "the already-registered handler serves the live integrations"
         );
-        let missing = config(pa_core::kernel::shared::HostRequestPayload {
-            data: serde_json::json!({ "server": "second-echo" }),
-            cell_source_code: None,
+        let withdrawn = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "fixture-echo" }),
         })
         .await
         .unwrap();
         assert!(
-            missing.as_object().unwrap().is_empty(),
-            "the pre-refresh handler does not know the new server"
+            withdrawn.as_object().unwrap().is_empty(),
+            "the rewrite withdrew the old server from the live integrations"
         );
     }
 
