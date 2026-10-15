@@ -1516,6 +1516,14 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
 
+    async def test_unwritable_registry_cannot_strand_a_finished_shell(self):
+        handle = bash("sleep 0.5; exit 2", persistent=True)
+        self.pgids.append(handle.pid)
+        with open(os.path.join(self.session_dir, "persistent-shells.json"), "w") as f:
+            f.write("not json")
+        self.assertEqual((await asyncio.wait_for(handle, 10)).exit_code, 2)
+        self.assertFalse(handle.running)
+
     async def test_persistent_requires_a_session_dir(self):
         with mock.patch.dict(os.environ):
             del os.environ["RLM_SESSION_DIR"]
@@ -1553,6 +1561,21 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(stranger.poll())
         self.assertEqual(self.registry(), [])
         self.assertEqual(self.files(), [f"{'b' * 32}.out", f"{'b' * 32}.rc"])
+
+    async def test_reattached_shell_whose_pid_is_recycled_finishes_without_a_signal(self):
+        stranger = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(stranger.wait)
+        self.pgids.append(stranger.pid)
+        start_id = bash_module._process_start_id(stranger.pid)
+        self.write_registry(self.entry("d" * 32, stranger.pid, start_id))
+        bash_module._rehydrate_persistent_shells()
+        handle = self.handle_for(stranger.pid)
+        self.assertTrue(handle.running)
+        # The shell died without a status and its pid now names another process.
+        handle._start_id = "proc:not-this-process"
+        self.assertEqual((await asyncio.wait_for(handle, 10)).exit_code, -1)
+        self.assertIsNone(stranger.poll())
+        self.assertEqual(self.registry(), [])
 
     async def test_dead_entry_is_swept(self):
         gone = subprocess.Popen(["true"])

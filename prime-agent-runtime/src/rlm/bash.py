@@ -990,7 +990,7 @@ class _OutputFile:
         with open(self._path, "rb") as f:
             size = os.fstat(f.fileno()).st_size
             if size <= _HEAD_CAP + _TAIL_CAP:
-                return f.read().decode("utf-8", errors="replace")
+                return f.read(size).decode("utf-8", errors="replace")
             head = f.read(_HEAD_CAP)
             f.seek(size - _TAIL_CAP)
             tail = f.read(_TAIL_CAP)
@@ -1066,19 +1066,29 @@ class PersistentBashHandle(BashHandle):
             exit_code = self._proc.wait()
         elif running:
             # Not our child, so nothing to wait() on: poll the rc file and the
-            # pid (completion lags by up to _PERSISTENT_POLL seconds).
-            while not os.path.exists(self._rc_path) and _pid_alive(self._pid):
+            # pid identity (completion lags by up to _PERSISTENT_POLL seconds).
+            while not os.path.exists(self._rc_path) and _shell_identity(self._pid, self._start_id) is not False:
                 time.sleep(_PERSISTENT_POLL)
         try:
             with open(self._rc_path) as f:
                 exit_code = int(f.read())
         except FileNotFoundError:
             pass  # killed before the wrapper recorded a status
+        # Stragglers die with the shell, as for bash(). A re-attached pid that is
+        # alive under another identity names a stranger's group: never signal it.
+        reap = running and (
+            self._proc is not None
+            or not _pid_alive(self._pid)
+            or _shell_identity(self._pid, self._start_id) is True
+        )
         with self._kill_lock:
-            if running:
-                _signal_group(self._pid, signal.SIGKILL)  # stragglers die with the shell, as for bash()
+            if reap:
+                _signal_group(self._pid, signal.SIGKILL)
             self._reaped = True
-        _update_registry(self._session_dir, lambda shells: [s for s in shells if s["id"] != self._activity_id])
+        try:
+            _update_registry(self._session_dir, lambda shells: [s for s in shells if s["id"] != self._activity_id])
+        except (OSError, ValueError):
+            pass  # the shell is gone either way, and a stale entry fails the identity check
         self._finalize(exit_code)
         with self._callback_lock:
             callback, self._reap_callback = self._reap_callback, None
