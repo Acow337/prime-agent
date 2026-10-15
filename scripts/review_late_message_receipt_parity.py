@@ -150,6 +150,9 @@ def validate(observed):
 def observe(binary, kind, root, observed):
     env = env_for(root, kind)
     env[TAG] = str(root)
+    library = Path(os.environ['PI_PACKAGE_DIR']) / 'skills'
+    env['PYTHONPATH'] = os.pathsep.join(sorted(str(p) for p in library.glob('*/src') if p.is_dir()))
+    observed['fixture_pythonpath'] = env['PYTHONPATH']
     provider = Provider(root)
     thread = threading.Thread(target=provider.serve_forever, daemon=True)
     thread.start()
@@ -202,7 +205,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
-    result = {'verified': False, 'runs': {}, 'scope': __doc__, 'not_verified': [
+    result = {'verified': False, 'runs': {}, 'scope': __doc__,
+        'fixture_prerequisite': 'Both kernels receive the same pinned TS skill libraries through PYTHONPATH; this tests host receipt delivery, not native skill packaging.',
+        'not_verified': [
         'pre-result receipt landing (Rust regression)', 'I/O failure (Rust regression)',
         'compaction/tree-navigation receipt restoration', 'receipt event/frame equality',
         'all volatile generated target identifiers are retained, not compared as equal']}
