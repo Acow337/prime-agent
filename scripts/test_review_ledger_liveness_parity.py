@@ -5,10 +5,22 @@ from unittest.mock import patch
 from pathlib import Path
 import unittest
 
-from review_ledger_liveness_parity import NAME, MARKER, admitted_probe, confirm_cleanup, family_contract
+from review_ledger_liveness_parity import NAME, MARKER, admitted_probe, catalog_row, confirm_cleanup, family_contract
 
 
 class FamilyReceiptTests(unittest.TestCase):
+    def test_duplicate_catalog_paths_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'child.jsonl'
+            row = {'path': str(path), 'id': 'child'}
+            with self.assertRaises(AssertionError):
+                catalog_row({'sessions': [row, row]}, path)
+
+    def test_catalog_selection_does_not_accept_a_matching_id_at_an_unrelated_path(self):
+        row = {'path': '/unrelated/child.jsonl', 'id': 'child'}
+        with self.assertRaises(AssertionError):
+            catalog_row({'sessions': [row]}, Path('/fixture/child.jsonl'))
+
     def test_duplicate_current_probes_fail(self):
         text = MARKER + '{"child_id":"child"}'
         with self.assertRaises(AssertionError):
