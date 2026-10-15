@@ -121,13 +121,13 @@ fn hook_veto_keeps_primary_and_batch_out_of_durable_history() {
                 true
             },
         );
-        if message != "accepted primary" {
+        if message == "accepted primary" {
+            assert!(!failed);
+        } else {
             assert!(failed);
             assert!(durable_users.is_empty());
             let persisted = std::fs::read_to_string(&path).unwrap();
             assert!(!persisted.contains("\"role\":\"user\""));
-        } else {
-            assert!(!failed);
         }
     }
     let texts: Vec<String> = durable_users
