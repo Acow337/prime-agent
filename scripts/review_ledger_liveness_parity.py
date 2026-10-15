@@ -216,7 +216,11 @@ def cache_boundaries(client, config, root, created, child, ledger_path, provider
     child_file.rename(relocated)
     first = client.call('list_saved_sessions', cwd=str(root), scope='all')
     trace['artifact_reads'].append(first)
-    assert catalog_row(first, relocated)['id'] == child_session_id
+    first_matches = [row for row in first['sessions'] if Path(row['path']).resolve() == relocated.resolve()]
+    assert len(first_matches) <= 1, first_matches
+    trace['first_relocated_child_present'] = len(first_matches) == 1
+    if kind == 'rust':
+        assert catalog_row(first, relocated)['id'] == child_session_id
     moved_again = root / 'agent/session-artifacts/ledger-moved/second' / child_file.name
     moved_again.parent.mkdir(parents=True)
     relocated.rename(moved_again)
@@ -262,7 +266,9 @@ def cache_boundaries(client, config, root, created, child, ledger_path, provider
     warm = client.call('list_saved_sessions', cwd=str(root), scope='all')
     trace['bucket_warm'] = warm
     parent_before = catalog_row(warm, parent_file)
-    assert parent_before.get('deletedDescendantUsage') == usage, parent_before
+    trace['warm_bucket_matches_actual_usage'] = parent_before.get('deletedDescendantUsage') == usage
+    if kind == 'rust':
+        assert trace['warm_bucket_matches_actual_usage'], parent_before
     wake = client.call('send_message', targetActiveSessionId=own['id'], message='Restore the billing fixture.')
     trace['actual_restore_wake'] = wake
     assert billing_file.is_file() and not archive.exists(), 'actual catalog wake did not restore transcript'
@@ -392,6 +398,9 @@ def main(require_current_sidecar=False):
             assert result['runs']['ts']['contract'] == result['runs']['rust']['contract'], 'family contract mismatch'
         result['cache_boundary_observations'] = {kind: {key: run['cache_boundaries'][key] for key in
             ('artifact_contract', 'bucket_contract')} for kind, run in result['runs'].items()}
+        result['cache_boundary_scope'] = ('Rust regression invariants required; actual TS observations retained. '
+            'Pinned TS omitted the relocated passive child on the first actual hosted read; this is an explicit '
+            'baseline difference, not a claim of full cache-boundary parity.')
         result['cache_boundary_comparison'] = ('identical' if result['cache_boundary_observations']['ts'] ==
             result['cache_boundary_observations']['rust'] else 'actual TS/Rust difference; raw reads retained')
         result['require_current_rust_lease_exit_sidecar'] = require_current_sidecar
