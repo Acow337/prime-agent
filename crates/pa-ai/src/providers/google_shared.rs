@@ -255,13 +255,11 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                             // lower reasoning into answer text, including signature-only parts.
                             let mut part = Map::new();
                             part.insert("thought".into(), json!(true));
-                            if is_same_provider_and_model {
-                                if let Some(signature) = resolve_thought_signature(
-                                    is_same_provider_and_model,
-                                    thinking.thinking_signature.as_deref(),
-                                ) {
-                                    part.insert("thoughtSignature".into(), json!(signature));
-                                }
+                            if let Some(signature) = resolve_thought_signature(
+                                is_same_provider_and_model,
+                                thinking.thinking_signature.as_deref(),
+                            ) {
+                                part.insert("thoughtSignature".into(), json!(signature));
                             }
                             part.insert(
                                 "text".into(),
