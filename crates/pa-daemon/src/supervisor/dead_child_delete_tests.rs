@@ -120,7 +120,6 @@ async fn route_delete(supervisor: &Arc<Supervisor>) -> Value {
 /// A reaped worker awaiting its relaunch can never answer the kill: the delete
 /// succeeds from the ledger boundary alone instead of answering the route's
 /// not-connected failure after the stop already ran.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_delete_of_a_dead_workers_child_completes_without_a_handshake() {
     let Fixture {
@@ -149,7 +148,6 @@ async fn a_delete_of_a_dead_workers_child_completes_without_a_handshake() {
 
 /// Liveness, not route state, gates the short-circuit: a live worker still
 /// receives the kill.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_delete_of_a_live_workers_child_still_routes_the_kill() {
     let Fixture {
@@ -210,7 +208,6 @@ async fn a_delete_of_a_live_workers_child_still_routes_the_kill() {
 
 /// A retry after the boundary already stands is idempotent once the worker is
 /// gone, and refused while its process still runs.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_retried_delete_after_the_tombstone_is_gated_on_the_worker_process() {
     let Fixture {
