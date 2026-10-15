@@ -3,7 +3,8 @@
 
 Ordinary PTY clients use a controlled protocol-7 peer with no selected model.
 The actual binaries enumerate a temporary project containing spaces. Rust must
-refresh directory children after Tab, Enter, and a typed quoted slash. TS's
+refresh directory children after Tab, Enter, a typed quoted slash, and deleting
+inside that quoted token. TS's
 observed reaction and complete frames are retained as an intentional comparison,
 not normalized into equality or used to claim the new ranking matches TS.
 """
@@ -28,7 +29,7 @@ from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish, process_i
 DIRECTORY = 'dir with spaces'
 CHILD = 'only_child.rs'
 APPLIED = '@"dir with spaces/"'
-CASES = ('tab', 'enter', 'typed_slash')
+CASES = ('tab', 'enter', 'typed_slash', 'backspace', 'delete')
 
 
 def completion_rows(text):
@@ -189,20 +190,22 @@ def run_case(binary, kind, root, hello, case, observed):
         terminal.screen = DockScreen()
         terminal.wait('actual ordinary UI attached', lambda: server.attaches >= 1
                       and bool(terminal.screen.text().strip()), server)
-        token = '@"dir with spaces' if case == 'typed_slash' else '@dir'
+        token = ('@"dir with spaces' if case == 'typed_slash' else
+                 '@"dir with spaces/x' if case in ('backspace', 'delete') else '@dir')
         terminal.send(token)
         observed['inputs'].append(token.encode().hex())
-        if case != 'typed_slash':
+        if case in ('tab', 'enter'):
             observed['frames']['before'] = stable_frame(terminal, server,
                 'directory suggestion', lambda text: any(DIRECTORY + '/' in row
                                                         for row in completion_rows(text)))
         else:
             observed['frames']['before'] = stable_frame(terminal, server,
                 'quoted token typed', lambda text: token in text)
-        key = {'tab': '\t', 'enter': '\r', 'typed_slash': '/'}[case]
+        key = {'tab': '\t', 'enter': '\r', 'typed_slash': '/',
+               'backspace': '\x7f', 'delete': '\x1b[D\x1b[3~'}[case]
         terminal.send(key)
         observed['inputs'].append(key.encode().hex())
-        expected_token = '@"dir with spaces/' if case == 'typed_slash' else APPLIED
+        expected_token = APPLIED if case in ('tab', 'enter') else '@"dir with spaces/'
         observed['frames']['after'] = stable_frame(terminal, server,
             'directory action painted', lambda text: expected_token in text
             and (children_visible(text) if kind == 'rust' else True))
