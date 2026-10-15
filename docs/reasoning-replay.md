@@ -129,6 +129,21 @@ not a claim of byte equality or live-model consumption. Maintainer adjudication
 of the intended policy remains required. Rendered-frame and interactive parity
 are not claimed by this protocol fixture; rendering/interaction code is unchanged.
 
+The representative capture for PR head `3b1b39326` ran both real daemons
+([artifact](https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38781401175/artifacts/11995937577)).
+It pins TS source `7d442aafa985f9342134fac16c2ef41f03fb45c1` and Rust tested
+merge `a21337cab6d053d44643130866fe3caffbc94951`, with both binary SHA-256s
+in the receipt. Each daemon made exactly two loopback inference requests. After
+the GLM→DeepSeek switch, TS replayed the plan plus answer in assistant `content`;
+Rust replayed the answer in `content` and the plan in `reasoning_content`.
+The requests were not byte-equal. Additional captured differences include system
+prompt/digest layout, `ipython` versus `python_repl`, a duplicated initial user
+message in Rust and a Rust skills-unavailable notice. They remain in the raw
+requests and difference report; this provider change does not claim to cause or
+fix them. Maintainer adjudication is still required, rather than calling this
+full protocol parity. These are synthetic fixtures, not private reasoning traces
+or evidence that a live destination model consumed the history.
+
 The public-registry bypass also has hosted red-first evidence: on `3ab60aa2f`,
 `pa-ai#test:reasoning_registry` observed one unsupported Google HTTP request when
 zero was expected ([job log](https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38778482901/job/116572383155)).

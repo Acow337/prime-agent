@@ -192,7 +192,7 @@ fn openrouter_native_details_replay_without_a_plaintext_catalog_capability() {
             .unwrap(),
         vec![
             json!({"role": "developer", "content": "Synthetic shared prefix"}),
-            json!({"role": "assistant", "content": null, "reasoning_details": details})
+            json!({"role": "assistant", "content": "", "reasoning_details": details})
         ]
     );
     assert_eq!(context.messages, original);
