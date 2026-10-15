@@ -49,14 +49,6 @@ pub async fn find_session_model_with_readiness_wait(
     find_restorable(registry, provider, model_id)
 }
 
-/// The create-time scope resolution with the same bounded readiness a
-/// session-model restore gets: a private Prime Inference default the
-/// patterns select can be missing from the available-resolved scope only
-/// because the boot's catalog/auth refresh has not settled, so the
-/// refresh runs within the readiness window and the scope re-resolves
-/// from the refreshed availability. Unauthorized private models stay out
-/// either way — the scope only ever holds models the registry reports
-/// available.
 pub async fn resolve_model_scope_from_models_with_readiness(
     registry: &mut ModelRegistry,
     patterns: &[String],
@@ -66,9 +58,6 @@ pub async fn resolve_model_scope_from_models_with_readiness(
 ) -> Vec<ScopedModel> {
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
     let scoped = resolve_model_scope_from_models(patterns, &available);
-    // A continuing session's model is its own pinned pick with its own
-    // readiness wait; the default's availability moves only the startup
-    // pick of a fresh session.
     let default_missing = !is_continuing
         && default.is_some_and(|(provider, model_id)| {
             is_private_prime_inference_reference(provider, model_id)

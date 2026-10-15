@@ -1218,10 +1218,6 @@ fn a_model_switch_keeps_the_agent_slot_in_sync_with_the_reported_level() {
     );
 }
 
-/// A worker-create fixture in the private-default race shape: settings pin
-/// `internal/glm-5.3-fast` as the default and scope `enabledModels` to the
-/// featured public model plus it, prime auth carries the team, and no
-/// private-authorization cache exists (first run on this agent dir).
 async fn private_default_create_worker(
     dir: &std::path::Path,
     responses: Vec<Vec<u8>>,

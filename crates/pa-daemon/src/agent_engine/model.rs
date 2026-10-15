@@ -45,12 +45,6 @@ impl AgentSessionEngine {
         resolved
     }
 
-    /// The non-silent record of a fresh, unflagged session starting off the
-    /// configured default: the default was unavailable (a private default
-    /// the create's readiness window could not authorize, or an unrebuildable
-    /// id), so the startup chain owns the session and says which model runs.
-    /// A default the scope patterns deliberately exclude is the user's
-    /// choice, not a fallback.
     fn record_startup_default_fallback(
         &self,
         model: &Model,
@@ -60,16 +54,6 @@ impl AgentSessionEngine {
     ) {
         let (provider, model_id) = default;
         if scope.is_continuing || (model.provider == *provider && model.id == *model_id) {
-            return;
-        }
-        let wanted = scope.scoped_models.is_empty()
-            || pa_core::models::scope_patterns_select_reference(
-                &scope.patterns,
-                provider,
-                model_id,
-                all_models,
-            );
-        if !wanted {
             return;
         }
         let session_file = self
@@ -88,6 +72,16 @@ impl AgentSessionEngine {
             .as_ref()
             .is_some_and(|decision| decision.session_file == session_file)
         {
+            return;
+        }
+        let wanted = scope.scoped_models.is_empty()
+            || pa_core::models::scope_patterns_select_reference(
+                &scope.patterns,
+                provider,
+                model_id,
+                all_models,
+            );
+        if !wanted {
             return;
         }
         let message = format!(

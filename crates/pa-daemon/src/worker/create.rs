@@ -386,8 +386,6 @@ impl Worker {
         };
         // The worker owns the session file; the engine reads it for the
         // system prompt's conversation-log path and the local harness dir.
-        // The fresh arms bind it before their creation prefix resolves, so
-        // a startup-fallback decision records against the file it belongs to.
         if !store.path.as_os_str().is_empty() {
             self.engine.set_session_file(store.path.clone());
         }

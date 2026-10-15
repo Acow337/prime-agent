@@ -79,8 +79,6 @@ pub struct Reconstructed {
     /// The session's effective service tier (`state.serviceTier`), the
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
-    /// `summary.modelFallbackMessage`: why the session's startup model
-    /// fell back, shown once when the session opens.
     pub model_fallback_message: Option<String>,
     pub history_before: usize,
     pub(crate) backfill_seam: BackfillSeam,

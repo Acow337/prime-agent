@@ -287,26 +287,6 @@ fn glob_matches(pattern: &str, model: &Model) -> bool {
     }
 }
 
-/// Whether one scope pattern selects the reference model, with the same
-/// exact/fuzzy and glob semantics the scope resolution applies.
-fn pattern_selects_reference(pattern: &str, reference: &Model) -> bool {
-    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-        let glob_pattern = match pattern.rfind(':') {
-            Some(idx) if is_valid_thinking_level(&pattern[idx + 1..]) => &pattern[..idx],
-            _ => pattern,
-        };
-        let case_fold = glob_pattern.to_lowercase();
-        return glob_matches(&case_fold, reference) || glob_matches(glob_pattern, reference);
-    }
-    parse_model_pattern(pattern, std::slice::from_ref(reference), false)
-        .model
-        .is_some()
-}
-
-/// Whether the create-time scope patterns select the given model reference:
-/// the reference is matched as its provider's template rebuild — an
-/// unauthorized private default is in no catalog the patterns could select
-/// it from — and never enters any scope or resolution.
 #[must_use]
 pub fn scope_patterns_select_reference(
     patterns: &[String],
@@ -317,9 +297,37 @@ pub fn scope_patterns_select_reference(
     let Some(reference) = build_fallback_model(provider, model_id, all_models) else {
         return false;
     };
-    patterns
-        .iter()
-        .any(|pattern| pattern_selects_reference(pattern, &reference))
+    patterns.iter().any(|pattern| {
+        !pattern_matches(pattern, std::slice::from_ref(&reference))
+            .0
+            .is_empty()
+    })
+}
+
+fn pattern_matches<'a>(
+    pattern: &str,
+    available_models: &'a [Model],
+) -> (Vec<&'a Model>, Option<ThinkingLevel>, Option<String>) {
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        let (glob_pattern, thinking_level) = match pattern.rfind(':') {
+            Some(idx) if is_valid_thinking_level(&pattern[idx + 1..]) => {
+                (&pattern[..idx], parse_thinking_level(&pattern[idx + 1..]))
+            }
+            _ => (pattern, None),
+        };
+        let case_fold = glob_pattern.to_lowercase();
+        let matching = available_models
+            .iter()
+            .filter(|model| glob_matches(&case_fold, model) || glob_matches(glob_pattern, model))
+            .collect();
+        return (matching, thinking_level, None);
+    }
+    let parsed = parse_model_pattern(pattern, available_models, false);
+    (
+        parsed.model.into_iter().collect(),
+        parsed.thinking_level,
+        parsed.warning,
+    )
 }
 
 /// Resolve model patterns to scoped models: exact/fuzzy for plain patterns,
@@ -331,47 +339,21 @@ pub fn resolve_model_scope_from_models(
 ) -> Vec<ScopedModel> {
     let mut scoped: Vec<ScopedModel> = Vec::new();
     for pattern in patterns {
-        if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-            let (glob_pattern, thinking_level) = match pattern.rfind(':') {
-                Some(idx) if is_valid_thinking_level(&pattern[idx + 1..]) => {
-                    (&pattern[..idx], parse_thinking_level(&pattern[idx + 1..]))
-                }
-                _ => (pattern.as_str(), None),
-            };
-            let matching: Vec<&Model> = available_models
-                .iter()
-                .filter(|model| {
-                    let case_fold = glob_pattern.to_lowercase();
-                    glob_matches(&case_fold, model) || glob_matches(glob_pattern, model)
-                })
-                .collect();
-            if matching.is_empty() {
-                eprintln!("Warning: No models match pattern \"{pattern}\"");
-                continue;
-            }
-            for model in matching {
-                if !scoped.iter().any(|sm| models_equal(&sm.model, model)) {
-                    scoped.push(ScopedModel {
-                        model: model.clone(),
-                        thinking_level,
-                    });
-                }
-            }
-            continue;
-        }
-        let parsed = parse_model_pattern(pattern, available_models, false);
-        if let Some(warning) = &parsed.warning {
+        let (matching, thinking_level, warning) = pattern_matches(pattern, available_models);
+        if let Some(warning) = &warning {
             eprintln!("Warning: {warning}");
         }
-        let Some(model) = parsed.model else {
+        if matching.is_empty() {
             eprintln!("Warning: No models match pattern \"{pattern}\"");
             continue;
-        };
-        if !scoped.iter().any(|sm| models_equal(&sm.model, model)) {
-            scoped.push(ScopedModel {
-                model: model.clone(),
-                thinking_level: parsed.thinking_level,
-            });
+        }
+        for model in matching {
+            if !scoped.iter().any(|sm| models_equal(&sm.model, model)) {
+                scoped.push(ScopedModel {
+                    model: model.clone(),
+                    thinking_level,
+                });
+            }
         }
     }
     scoped

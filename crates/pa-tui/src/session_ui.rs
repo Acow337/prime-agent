@@ -198,8 +198,6 @@ pub(crate) struct SessionUi {
     /// `None` until the first sample, a rebind restarts it.
     speed_stats: Option<SpeedStats>,
     service_tier: Option<String>,
-    /// The attach summary's model-fallback notice, folded into the next
-    /// rebuild's transcript as a one-shot startup warning.
     pending_model_fallback_message: Option<String>,
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
     /// The ban-risk warning's view-local dedup (TS
