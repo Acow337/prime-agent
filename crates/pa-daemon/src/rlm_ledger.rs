@@ -477,7 +477,7 @@ impl RlmSpawnLedger {
     /// # Errors
     ///
     /// Returns an error when the ledger replay fails (an oversized
-    /// ledger).
+    /// ledger) or a prior panic poisoned the deleted-usage cache.
     pub fn deleted_descendant_usage_by_parent(
         &self,
     ) -> Result<HashMap<String, crate::session_usage::SessionUsageSummary>> {
@@ -489,7 +489,10 @@ impl RlmSpawnLedger {
             .filter(|edge| edge.deleted.is_some())
             .map(|edge| file_identity(Path::new(&edge.child)))
             .collect::<Result<Vec<_>>>()?;
-        let mut cached = state.deleted_bucket.lock().expect("deleted bucket lock");
+        let mut cached = state
+            .deleted_bucket
+            .lock()
+            .map_err(|_| anyhow::anyhow!("deleted bucket lock poisoned"))?;
         if let Some(bucket) = cached.as_ref().filter(|bucket| bucket.inputs == inputs) {
             return Ok(bucket.usage.clone());
         }
