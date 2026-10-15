@@ -1516,6 +1516,14 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
 
+    async def test_unwritable_registry_cannot_strand_a_finished_shell(self):
+        handle = bash("sleep 0.5; exit 2", persistent=True)
+        self.pgids.append(handle.pid)
+        with open(os.path.join(self.session_dir, "persistent-shells.json"), "w") as f:
+            f.write("not json")
+        self.assertEqual((await asyncio.wait_for(handle, 10)).exit_code, 2)
+        self.assertFalse(handle.running)
+
     async def test_persistent_requires_a_session_dir(self):
         with mock.patch.dict(os.environ):
             del os.environ["RLM_SESSION_DIR"]

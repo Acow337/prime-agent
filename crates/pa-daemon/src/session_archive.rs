@@ -260,13 +260,19 @@ pub(crate) async fn run_archive_sweep(
             protected.insert(canonical_session_path(Path::new(&job.session_file)));
         }
     }
-    let archived = sweep_sessions(
-        &sessions_dir,
-        &archive_dir(&agent_dir),
-        &protected,
-        &policy,
-        SystemTime::now(),
-    )?;
+    // Blocking work (file moves, the persistent-shell SIGTERM grace): off the runtime.
+    let archive = archive_dir(&agent_dir);
+    let archived = tokio::task::spawn_blocking(move || {
+        sweep_sessions(
+            &sessions_dir,
+            &archive,
+            &protected,
+            &policy,
+            SystemTime::now(),
+        )
+    })
+    .await
+    .context("the archive sweep task failed")??;
     if !archived.is_empty() {
         supervisor.log_line(&format!(
             "archived {} session(s) into {}",

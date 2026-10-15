@@ -990,7 +990,7 @@ class _OutputFile:
         with open(self._path, "rb") as f:
             size = os.fstat(f.fileno()).st_size
             if size <= _HEAD_CAP + _TAIL_CAP:
-                return f.read().decode("utf-8", errors="replace")
+                return f.read(size).decode("utf-8", errors="replace")
             head = f.read(_HEAD_CAP)
             f.seek(size - _TAIL_CAP)
             tail = f.read(_TAIL_CAP)
@@ -1085,7 +1085,10 @@ class PersistentBashHandle(BashHandle):
             if reap:
                 _signal_group(self._pid, signal.SIGKILL)
             self._reaped = True
-        _update_registry(self._session_dir, lambda shells: [s for s in shells if s["id"] != self._activity_id])
+        try:
+            _update_registry(self._session_dir, lambda shells: [s for s in shells if s["id"] != self._activity_id])
+        except (OSError, ValueError):
+            pass  # the shell is gone either way, and a stale entry fails the identity check
         self._finalize(exit_code)
         with self._callback_lock:
             callback, self._reap_callback = self._reap_callback, None
