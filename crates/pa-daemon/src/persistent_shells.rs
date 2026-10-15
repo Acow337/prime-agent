@@ -34,20 +34,14 @@ struct Registry {
     shells: Vec<Shell>,
 }
 
-/// The registered shells whose pid still runs under the recorded start
-/// identity: a recycled pid or an unreadable identity never counts.
-fn live_shells(artifact_dir: &Path) -> Vec<Shell> {
+fn registered_shells(artifact_dir: &Path) -> Vec<Shell> {
     let Ok(raw) = std::fs::read(artifact_dir.join(REGISTRY_FILE)) else {
         return Vec::new();
     };
     let Ok(registry) = serde_json::from_slice::<Registry>(&raw) else {
         return Vec::new();
     };
-    registry
-        .shells
-        .into_iter()
-        .filter(runs_as_registered)
-        .collect()
+    registry.shells
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -61,10 +55,12 @@ fn runs_as_registered(shell: &Shell) -> bool {
 }
 
 /// The session's live persistent shells as rows with the kernel bash
-/// activity row field names.
+/// activity row field names: a recycled pid or an unreadable identity never
+/// counts as live.
 pub(crate) fn live_shell_rows(artifact_dir: &Path) -> Vec<Value> {
-    live_shells(artifact_dir)
+    registered_shells(artifact_dir)
         .into_iter()
+        .filter(runs_as_registered)
         .map(|shell| {
             json!({
                 "id": shell.id,
@@ -78,28 +74,29 @@ pub(crate) fn live_shell_rows(artifact_dir: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// Kill the session's live persistent shells (group TERM, then group KILL
-/// after [`TERM_GRACE`] or once every leader exited) and remove the registry
-/// and the shells' files.
+/// Kill the session's persistent shells (group TERM to the live ones, then
+/// [`kill_groups`] after [`TERM_GRACE`] or once every leader exited) and
+/// remove the registry and the shells' files.
 pub(crate) fn kill_session_shells(artifact_dir: &Path) {
-    let shells = live_shells(artifact_dir);
-    if !shells.is_empty() {
-        for shell in &shells {
-            let _ = signal_process_group(shell.pid as i32, Signal::Term);
-        }
-        let deadline = Instant::now() + TERM_GRACE;
-        while Instant::now() < deadline && shells.iter().any(runs_as_registered) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        kill_groups(&shells);
+    let shells = registered_shells(artifact_dir);
+    for shell in shells.iter().filter(|shell| runs_as_registered(shell)) {
+        let _ = signal_process_group(shell.pid as i32, Signal::Term);
     }
+    let deadline = Instant::now() + TERM_GRACE;
+    while Instant::now() < deadline && shells.iter().any(runs_as_registered) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    kill_groups(&shells);
     let _ = std::fs::remove_file(artifact_dir.join(REGISTRY_FILE));
     let _ = std::fs::remove_dir_all(artifact_dir.join(FILES_DIR));
 }
 
 /// SIGKILL each shell's group unless its pid now runs under another identity.
 /// A dead leader's group still gets it: members that outlive the leader keep
-/// the pgid reserved.
+/// the pgid reserved, because a dead pid can only be some other process's
+/// pgid if a new process with that pid created the group. So an existing
+/// group whose leader is dead holds the original shell's stragglers, and a
+/// group that no longer exists makes the kill fail with ESRCH.
 fn kill_groups(shells: &[Shell]) {
     for shell in shells {
         if !pid_alive(shell.pid) || runs_as_registered(shell) {
@@ -124,10 +121,16 @@ pub(crate) mod test_support {
             || crate::lease::get_process_start_id(child.id()).expect("start id"),
             str::to_string,
         );
+        register(artifact_dir, child.id(), &start_id);
+        child
+    }
+
+    /// Write `artifact_dir`'s registry with one shell `pid` under `start_id`.
+    pub(crate) fn register(artifact_dir: &Path, pid: u32, start_id: &str) {
         std::fs::create_dir_all(artifact_dir.join(super::FILES_DIR)).expect("files dir");
         let registry = serde_json::json!({ "shells": [{
             "id": "a".repeat(32),
-            "pid": child.id(),
+            "pid": pid,
             "startId": start_id,
             "command": "sleep 60",
             "startedAt": "2026-01-01T00:00:00+00:00",
@@ -137,16 +140,26 @@ pub(crate) mod test_support {
             registry.to_string(),
         )
         .expect("write registry");
-        child
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::process::ExitStatusExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Child, Command};
 
-    use super::test_support::registered_sleeper;
+    use nix::sys::signal::{kill, Signal as NixSignal};
+    use nix::unistd::Pid;
+
+    use super::test_support::{register, registered_sleeper};
     use super::*;
+
+    /// Send `child` our own SIGTERM and return the signal it died by: an
+    /// earlier SIGKILL is already pending and wins.
+    fn fatal_signal_after_own_term(mut child: Child) -> Option<i32> {
+        let _ = kill(Pid::from_raw(child.id() as i32), NixSignal::SIGTERM);
+        child.wait().unwrap().signal()
+    }
 
     #[test]
     fn session_delete_kills_live_shells_and_removes_their_files() {
@@ -169,15 +182,45 @@ mod tests {
     #[test]
     fn recycled_pid_is_neither_reported_nor_killed() {
         let artifacts = tempfile::tempdir().unwrap();
-        let mut stranger = registered_sleeper(artifacts.path(), Some("proc:not-this-process"));
+        let stranger = registered_sleeper(artifacts.path(), Some("proc:not-this-process"));
 
         assert!(live_shell_rows(artifacts.path()).is_empty());
         kill_session_shells(artifacts.path());
 
-        assert!(stranger.try_wait().unwrap().is_none(), "never signalled");
         assert!(!artifacts.path().join(REGISTRY_FILE).exists());
-        stranger.kill().unwrap();
-        stranger.wait().unwrap();
+        assert_eq!(
+            fatal_signal_after_own_term(stranger),
+            Some(NixSignal::SIGTERM as i32),
+            "never signalled"
+        );
+    }
+
+    #[test]
+    fn exited_leaders_group_is_killed() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let mut leader_command = Command::new("sleep");
+        leader_command.arg("60");
+        pa_core::platform::process::set_new_process_group(&mut leader_command);
+        let mut leader = leader_command.spawn().unwrap();
+        let start_id = crate::lease::get_process_start_id(leader.id()).unwrap();
+        register(artifacts.path(), leader.id(), &start_id);
+        let member = Command::new("sleep")
+            .arg("60")
+            .process_group(leader.id() as i32)
+            .spawn()
+            .unwrap();
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+
+        kill_session_shells(artifacts.path());
+
+        assert!(!artifacts.path().join(REGISTRY_FILE).exists());
+        assert!(!artifacts.path().join(FILES_DIR).exists());
+        assert_eq!(
+            fatal_signal_after_own_term(member),
+            Some(NixSignal::SIGKILL as i32),
+            "the dead leader's group got SIGKILL"
+        );
     }
 
     #[test]
