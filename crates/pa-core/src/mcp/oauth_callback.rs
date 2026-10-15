@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -23,22 +23,30 @@ fn redirect_uri_for(port: u16) -> String {
     format!("http://localhost:{port}{CALLBACK_PATH}")
 }
 
-fn candidate_ports(callback_port: Option<u16>) -> Vec<u16> {
-    match callback_port {
+pub(super) fn validate_callback_port(callback_port: Option<u16>) -> Result<()> {
+    if callback_port == Some(0) {
+        bail!("OAuth callbackPort must be between 1 and 65535");
+    }
+    Ok(())
+}
+
+fn candidate_ports(callback_port: Option<u16>) -> Result<Vec<u16>> {
+    validate_callback_port(callback_port)?;
+    Ok(match callback_port {
         Some(port) => vec![port],
         None => (0..CALLBACK_PORT_COUNT)
             .map(|offset| CALLBACK_PORT_BASE + offset)
             .collect(),
-    }
+    })
 }
 
 /// Every redirect URI a login registers (dynamic client registration
 /// offers them all).
-pub fn redirect_uris(callback_port: Option<u16>) -> Vec<String> {
-    candidate_ports(callback_port)
+pub fn redirect_uris(callback_port: Option<u16>) -> Result<Vec<String>> {
+    Ok(candidate_ports(callback_port)?
         .into_iter()
         .map(redirect_uri_for)
-        .collect()
+        .collect())
 }
 
 /// The authorization code plus the echoed `state` from the browser
@@ -85,7 +93,7 @@ impl CallbackServer {
     pub async fn start(label: &str, callback_port: Option<u16>) -> Result<Self> {
         let host = callback_host();
         let mut last_error: Option<String> = None;
-        for port in candidate_ports(callback_port) {
+        for port in candidate_ports(callback_port)? {
             let listener = match TcpListener::bind((host.as_str(), port)).await {
                 Ok(listener) => listener,
                 Err(error) => {
@@ -351,6 +359,16 @@ mod tests {
         assert_ne!(server.redirect_uri(), redirect_uri_for(CALLBACK_PORT_BASE));
         assert!(server.redirect_uri().starts_with("http://localhost:5370"));
         drop(blocker);
+    }
+
+    #[tokio::test]
+    async fn zero_callback_port_is_rejected_before_binding_or_registration() {
+        assert!(redirect_uris(Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("callbackPort"));
+        let error = CallbackServer::start("fixture", Some(0)).await.unwrap_err();
+        assert!(error.to_string().contains("callbackPort"));
     }
 
     #[tokio::test]

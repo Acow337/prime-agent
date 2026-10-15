@@ -136,6 +136,7 @@ pub async fn mcp_login(
     config: &McpOAuthConfig,
     ui: &dyn McpLoginUi,
 ) -> Result<AuthCredential> {
+    super::oauth_callback::validate_callback_port(config.callback_port)?;
     let discovery = discover(http, &config.url).await?;
     ui.on_progress(&format!(
         "Discovered {}",
@@ -1269,6 +1270,20 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("OAuth state mismatch"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn zero_callback_port_fails_before_any_oauth_request() {
+        for client_id in [None, Some("fixture-client".to_string())] {
+            let http = ScriptedHttp::new(vec![]);
+            let ui = test_ui();
+            let mut login_config = config("fixture", ORIGIN_URL);
+            login_config.client_id = client_id;
+            login_config.callback_port = Some(0);
+            let error = mcp_login(&http, &login_config, &ui).await.unwrap_err();
+            assert!(error.to_string().contains("callbackPort"));
+            assert!(http.seen.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
