@@ -1084,6 +1084,17 @@ _RATE_LIMIT_MARKERS = (
     "usage limit",
 )
 
+INFRA_VERIFY_QUIET_SECONDS = POLL_TIMEOUT_MS / 1000
+"""Quiet period before the executor re-reads a worker that settled with an
+infra error (one collect-poll slice): the re-check must not race the very
+probe streak that reported the death. The sleep is injected, so tests see
+no wall-clock wait."""
+
+_INFRA_ERROR_MARKERS = (
+    "child worker unreachable",
+    "supervisor link",
+)
+
 _FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 TERMINAL_ENTRY_STATUSES = ("done", "error", "cancelled")
 
@@ -1092,6 +1103,15 @@ def _is_rate_limit_error(message: str) -> bool:
     """Heuristic: the host reports admission failures as error strings."""
     lowered = message.lower()
     return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
+def _is_infra_error(message: str) -> bool:
+    """Heuristic: the supervisor reports worker deaths and lost supervisor
+    links as one-shot error settles (``Child worker unreachable`` after the
+    daemon's unreachable-probe streak, or a ``supervisor link ...`` error
+    from a failed kickoff). Infra, not the task's failure."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _INFRA_ERROR_MARKERS)
 
 
 def _child_name(run_id: str, state_id: str, instance_index: int, attempt: int) -> str:
@@ -1340,8 +1360,15 @@ class _NodeInstance:
     prompt: str  # fully rendered; re-spawns reuse it verbatim
     status: str = "pending"  # pending | running | done | error | cancelled
     attempt: int = 0  # spawn admissions tried for this instance; a rate-limit
-    # deferral counts here too, and ``retries`` compares against this same
-    # counter, so one transient 429 admission consumes one declared retry.
+    # deferral counts here too, and charged retries compare against
+    # ``attempt - retry_base``, so one transient 429 admission consumes one
+    # declared retry.
+    retry_base: int = 0  # the attempt count at the last retry-budget reset:
+    # an infra respawn or a resume's re-admission grants fresh ``retries``
+    # by moving this base instead of zeroing ``attempt`` (spawn labels
+    # count on it staying monotonic).
+    infra_respawned: bool = False  # the instance's one free worker-death
+    # respawn is spent; a resume's re-admission grants a fresh one.
     rate_limit_streak: int = 0  # consecutive rate-limited admissions in the
     # control loop's backoff path; a successful spawn resets it, and
     # BACKOFF_MAX_ATTEMPTS in a row fails the node. An admission-phase
@@ -1686,9 +1713,9 @@ class FactoryExecutor:
 
         An escalate pause holds its failed entry unsettled, so resume
         re-admits that entry first: a fresh attempt of the same rendered
-        prompt in the same entry slot -- no extra ``max_entries`` spend.
-        The failure only ever propagates to dependents under
-        ``failure_policy: "continue"``. A budget or max_transitions
+        prompt in the same entry slot -- no extra ``max_entries`` spend,
+        fresh ``retries``. The failure only ever propagates to dependents
+        under ``failure_policy: "continue"``. A budget or max_transitions
         pause is reported once per run: resuming after it is an explicit
         operator decision and no further budget pauses fire. Raises
         ``ValueError`` when the run is not paused.
@@ -1736,8 +1763,9 @@ class FactoryExecutor:
         definition. Resume turns each held entry back into a fresh attempt
         of the SAME entry slot: the errored and cancelled instances re-run
         their rendered prompt (``attempt`` keeps counting, so spawn labels
-        stay unique) and ``max_entries`` is not spent again. A
-        binding-failure entry has no instances: it
+        stay unique), ``max_entries`` is not spent again, and the
+        ``retries`` budget restarts (``retry_base`` moves to the current
+        attempt count). A binding-failure entry has no instances: it
         re-binds through the readiness pass, and a still-broken upstream
         settles it into the same pause again.
         """
@@ -1758,6 +1786,8 @@ class FactoryExecutor:
                     instance.answer = None
                     instance.provisional = False
                     instance.rate_limit_streak = 0
+                    instance.retry_base = instance.attempt
+                    instance.infra_respawned = False
                 self._event(
                     run,
                     "readmitted",
@@ -2836,6 +2866,26 @@ class FactoryExecutor:
     ) -> None:
         if instance.status != "running":
             return  # cancelled (stop/fail_fast) while the collect was in flight
+        if result.status == "error" and _is_infra_error(result.error or ""):
+            # A worker death or a lost supervisor link is infra, not the
+            # task's failure: the executor verifies it itself (a short
+            # quiet period, then one re-read through the supervisor)
+            # instead of failing the entry on the first error row and
+            # flagging the parent to do the verifying.
+            fresh = await self._recheck_infra_death(instance, result)
+            if fresh is None:
+                return  # a stop/fail_fast pass claimed it, or the worker answered
+            result = fresh
+            if (
+                entry.status == "running"
+                and not instance.infra_respawned
+                and result.status == "error"
+                and _is_infra_error(result.error or "")
+            ):
+                await self._respawn_infra_dead(run, state, entry, instance, result)
+                return
+            # otherwise: a second verified death (or an entry a sibling
+            # failed first) takes the normal retries/policy path below
         instance.duration_ms = result.duration_ms
         instance.tool_uses = result.tool_use_count or 0
         run.settle_count += 1
@@ -2912,6 +2962,98 @@ class FactoryExecutor:
             entry.answer = self._entry_answer(entry)
             await self._capture_outputs(run, state, entry)
             self._queue_settle(run, state, entry)
+
+    async def _recheck_infra_death(self, instance: _NodeInstance, result: Any) -> Any:
+        """Liveness-verify one infra-flavoured error settle before it is
+        applied.
+
+        The supervisor reports a dead worker as a one-shot error settle, so
+        the executor re-reads the worker after a short quiet period instead
+        of trusting the first row. Returns the fresh result to apply -- a
+        settle that landed meanwhile supersedes the error, and the same
+        error read back means the death is verified -- or ``None`` when a
+        concurrent pass (stop(), fail_fast) claimed the instance or the
+        worker answered alive (the loop keeps collecting it).
+        """
+        from . import collect
+
+        child_id = instance.child_id
+        await self._sleep_fn(INFRA_VERIFY_QUIET_SECONDS)
+        if instance.status != "running" or instance.child_id != child_id:
+            return None  # a stop, fail_fast, or resumed lane claimed the instance
+        results = await collect([child_id], timeout_ms=0)
+        if instance.status != "running" or instance.child_id != child_id:
+            return None
+        row = next((r for r in results if r.rlm_child_id == child_id), None)
+        if row is not None and not row.settled:
+            return None  # the worker answered: alive, keep collecting it
+        # No fresh row at all means the child vanished from the supervisor
+        # (a hand delete): as dead as the error said, so the original
+        # settle applies through the normal failure path.
+        return row or result
+
+    async def _respawn_infra_dead(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance, result: Any
+    ) -> None:
+        """Re-spawn one worker the executor verified dead, free of charge.
+
+        Infra is not the task's failure: the dead attempt counts as a
+        settle (its ledger row keeps the error), but the instance is
+        re-queued with the same rendered prompt -- spending neither a
+        ``retries`` slot nor a fresh ``max_entries`` entry -- and the dead
+        attempt's exit text is dropped, so no needs-verify mark is raised
+        for work the respawn redoes. ``infra_respawned`` keeps this to ONE
+        free respawn; a second verified death falls through to the normal
+        retries/failure_policy path.
+        """
+        from . import delete_subagent
+
+        old_child = instance.child_id or ""
+        # The worker may be alive-but-unreachable rather than dead: retire
+        # it so the respawn cannot run beside its zombie in the same
+        # worktree. Best-effort and bounded — the host's delete kills under
+        # the daemon's own timeout, the rest is registry bookkeeping — so
+        # an already-gone child or a dead bridge must not wedge the
+        # respawn; the supervisor-side zombie sweep this pairs with lands
+        # in PR 2 of the [factory] group.
+        try:
+            await delete_subagent(old_child)
+        except Exception:
+            pass
+        if instance.status != "running" or run.state != "running":
+            return  # a stop()/fail_fast pass claimed the instance mid-delete
+        instance.duration_ms = result.duration_ms
+        instance.tool_uses = result.tool_use_count or 0
+        run.settle_count += 1
+        run.tool_use_total += instance.tool_uses
+        instance.infra_respawned = True
+        instance.retry_base += 1
+        instance.status = "pending"
+        instance.error = None
+        instance.answer = None
+        instance.provisional = False
+        reason = result.error or "child worker unreachable"
+        self._event(
+            run,
+            "settled",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            status="error",
+            error=reason,
+            duration_ms=instance.duration_ms,
+        )
+        self._event(
+            run,
+            "infra_respawn",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            detail=(
+                f"worker verified dead ({reason}); re-spawning the same rendered prompt "
+                "once (no retry, no max_entries)"
+            ),
+        )
 
     def _entry_answer(self, entry: _StateEntry) -> str | None:
         """Captured answer for binding: one preview, or all instances joined."""
@@ -3054,8 +3196,15 @@ class FactoryExecutor:
         # count the pending instance as in-flight, so the control loop
         # would never finish the run. The failed instance settles as an
         # error instead; the policy call below is a no-op on a terminal
-        # entry.
-        if retry and instance.attempt <= retries and entry.status == "running":
+        # entry. ``attempt - retry_base`` charges only the admissions
+        # since the last budget reset: an infra respawn and a resume's
+        # re-admission restart the declared retries without zeroing the
+        # spawn counter the labels count on.
+        if (
+            retry
+            and instance.attempt - instance.retry_base <= retries
+            and entry.status == "running"
+        ):
             instance.status = "pending"
             instance.error = None
             self._event(
@@ -3094,12 +3243,22 @@ class FactoryExecutor:
             # status-level needs_verify signal hand the operator the
             # revival-race decision instead of a silent drop.
             entry.needs_verify = True
+            # A worker whose death the executor already verified and
+            # re-spawned once is not a mystery for the parent to re-verify
+            # remotely: what the mark preserves is the respawned attempt's
+            # last words after its own death.
+            respawned = any(instance.infra_respawned for instance in entry.instances)
             self._event(
                 run,
                 "needs_verify",
                 node=state.state_id,
                 entry=entry.index,
-                detail="child exit captured a provisional answer - verify the remote state",
+                detail=(
+                    "worker verified dead by the executor after its automatic respawn; "
+                    "last assistant text preserved as a provisional answer"
+                    if respawned
+                    else "child exit captured a provisional answer - verify the remote state"
+                ),
             )
         if entry.status in TERMINAL_ENTRY_STATUSES:
             return  # the policy already ran for this entry
@@ -4868,9 +5027,14 @@ the cap and fails to bind.
   `escalate` (the default: pause the run BEFORE the failed settle
   propagates — no transition fires and no downstream entry is spent — and
   `resume` re-admits the failed entry as a fresh attempt: same rendered
-  prompt, same entry slot; a binding failure over a broken upstream
-  re-binds and pauses again, so stop and fix the upstream or author the
-  dependent's state with `continue`).
+  prompt, same entry slot, fresh `retries`; a binding failure over a
+  broken upstream re-binds and pauses again, so stop and fix the upstream
+  or author the dependent's state with `continue`). A child whose worker
+  died or whose supervisor link was lost is infra, not the task's
+  failure: the executor re-checks it after a short quiet period, then
+  re-spawns the same prompt once without spending `retries` or
+  `max_entries`; a second death fails through `retries`/`failure_policy`
+  like any task failure.
 - **Dead configurations fail loudly, never wedge**: a pending entry whose
   input source never settled, a `max_parallel` cap held entirely by
   never-settling residents with work queued, or nothing in flight and
@@ -4944,8 +5108,11 @@ status["events"]   # trailing ledger: spawned, settled, answer_captured,
 status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, running,
                     # transitions_fired
 status["needs_verify"]  # (when set) states whose child EXITED carrying a
-                        # provisional answer - verify the remote state; the
-                        # entry row carries the provisional_answer preview
+                        # provisional answer; worker deaths are
+                        # liveness-checked and re-spawned by the executor
+                        # first, so the mark only remains for exits that
+                        # still carry text - the entry row carries the
+                        # provisional_answer preview
 status["pause_reason"]  # (paused) why the run paused; with "last_error" (the
 status["last_error"]    # last admission/bind failure) and a one-line "remedy"
 ```

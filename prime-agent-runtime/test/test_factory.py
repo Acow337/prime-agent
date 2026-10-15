@@ -4316,6 +4316,120 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.node_status(status, "a")["status"], "error")
         self.assertEqual(status["state"], "failed")
 
+    # -- worker deaths (infra) --------------------------------------------------------
+
+    @async_test
+    async def test_worker_death_respawns_once_without_spending_retries_or_max_entries(self) -> None:
+        # Defect B (live run fa1a8f1c): "Child worker unreachable" consumed
+        # the entry and, with default retries=0, escalated into a pause --
+        # twenty minutes of child work discarded on an infra hiccup. A
+        # verified worker death is infra, not the task's failure: the
+        # executor liveness-verifies it itself (a short quiet period, then
+        # one re-collect) and re-spawns the same rendered prompt once,
+        # spending neither retries nor a fresh max_entries slot.
+        self.host.child_outcomes["child-1"] = {
+            "status": "error",
+            "error": "Child worker unreachable",
+            "answer": "partial work",
+        }
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker"}]})
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.host.notice_kinds(), ["finished"])
+        work = self.node_status(status, "work")
+        self.assertEqual(work["status"], "done")
+        self.assertEqual(work["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("work")), 2)
+        # the dead attempt's exit text was dropped, not marked for verify:
+        # the respawn redid the work and the entry settled for real
+        self.assertNotIn("needs_verify", status)
+        self.assertNotIn("needs_verify", work)
+        # the executor verified the death itself before re-spawning
+        self.assertIn(factory_module.INFRA_VERIFY_QUIET_SECONDS, self.sleeps.sleeps)
+
+    @async_test
+    async def test_second_worker_death_falls_through_retries_and_policy(self) -> None:
+        # Only ONE free respawn: a second verified death charges the normal
+        # retries budget (the free respawn consumed none) and then the
+        # failure_policy applies like any task failure.
+        self.host.outcomes["work"] = {"status": "error", "error": "Child worker unreachable"}
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue"},
+                "nodes": [{"id": "work", "subagent": "worker", "retries": 1}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        work = self.node_status(status, "work")
+        self.assertEqual(work["status"], "error")
+        # initial spawn, free respawn, one charged retry: three admissions
+        self.assertEqual(len(self.host.spawn_calls("work")), 3)
+        self.assertEqual(work["attempts"], 3)
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 1)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+
+    @async_test
+    async def test_worker_death_recheck_adopts_a_live_settle(self) -> None:
+        # The liveness re-check is not a rubber stamp: when the worker
+        # answers again during the quiet period, its fresh settle supersedes
+        # the error row and nothing is re-spawned.
+        self.host.child_outcomes["child-1"] = {
+            "status": "error",
+            "error": "Child worker unreachable",
+        }
+        host = self.host
+
+        class ReviveSleep(ClockSleep):
+            """The executor's quiet-period sleep revives child-1: the
+            worker was never dead, and the re-read must see it settled."""
+
+            async def __call__(self, seconds: float) -> None:
+                await super().__call__(seconds)
+                host.child_outcomes["child-1"] = {"status": "done", "answer": "late done"}
+
+        self.executor._sleep_fn = ReviveSleep(self.clock)
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker"}]})
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+        self.assertEqual(self.all_events_of(result, "infra_respawn"), [])
+        self.assertEqual(self.node_status(status, "work")["answer_preview"], "late done")
+
+    @async_test
+    async def test_resume_grants_fresh_retries_and_a_fresh_respawn(self) -> None:
+        # The approved resume semantics: a re-admitted entry restarts both
+        # budgets. The charged retry after the free respawn must be granted
+        # again, and an infra death of the re-admitted attempt must get its
+        # own free respawn instead of failing through a spent one.
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "Child worker unreachable"}
+        self.host.child_outcomes["child-2"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-3"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-4"] = {"status": "error", "error": "Child worker unreachable"}
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker", "retries": 1}]})
+        result = await self.start()
+        paused = await self.settle(result)
+        # infra death -> free respawn; the respawn's own task failure spent
+        # the one charged retry; the retry failed too -> escalate pause.
+        self.assertEqual(paused["state"], "paused")
+        self.assertEqual(len(self.host.spawn_calls("work")), 3)
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 1)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+        # resume re-admits the entry with fresh budgets: the re-admitted
+        # attempt's infra death respawns free again, and this time it
+        # settles done.
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        final = await self.settle(result)
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(self.node_status(final, "work")["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("work")), 5)
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 2)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+        self.assertEqual(self.host.notice_kinds(), ["paused", "finished"])
+
     # -- budgets ----------------------------------------------------------------------
 
     @async_test
