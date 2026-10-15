@@ -1094,4 +1094,145 @@ pub(crate) mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn stopping_a_childless_root_leaves_the_bucket_and_other_rows_unchanged() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        append_family_edge(
+            &agent_dir,
+            &sessions_dir,
+            "sub-live",
+            &root_file,
+            &child_file,
+        );
+        let gone_child = agent_dir
+            .join("session-artifacts")
+            .join("root-1")
+            .join("sub-gone")
+            .join("sub-gone.jsonl");
+        std::fs::create_dir_all(gone_child.parent().expect("gone child dir")).unwrap();
+        write_display_file(&gone_child, "/the/gone/cwd");
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-gone".to_string(),
+                parent: root_file.to_string_lossy().to_string(),
+                child: gone_child.to_string_lossy().to_string(),
+                depth: 1,
+                name: "gone".to_string(),
+            })
+            .expect("append spawn");
+        ledger
+            .append_delete_with_usage(
+                "sub-gone",
+                &gone_child.to_string_lossy(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+                &crate::session_usage::SessionUsageSummary {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    cost: 0.5,
+                },
+            )
+            .expect("append delete");
+        let mut events = supervisor.events.subscribe();
+        let mut root_summary = live_child_summary(&root_file, &child_file);
+        root_summary["runtimeKind"] = json!("top-level");
+        root_summary["sessionId"] = json!("root-persisted");
+        root_summary["id"] = json!("root-persisted");
+        root_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        root_summary.as_object_mut().unwrap().remove("rlmChildId");
+        root_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&root_summary, Some("w-root"));
+        let _ = drain_roster_pushes(&mut events);
+        let childless_file = sessions_dir.join("childless.jsonl");
+        write_display_file(&childless_file, "/the/childless/cwd");
+        register_root_worker(&supervisor, "w-childless", &childless_file).await;
+        let mut childless_summary = live_child_summary(&root_file, &child_file);
+        childless_summary["runtimeKind"] = json!("top-level");
+        childless_summary["sessionId"] = json!("childless-persisted");
+        childless_summary["id"] = json!("childless-persisted");
+        childless_summary["sessionFile"] = json!(childless_file.to_string_lossy());
+        childless_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("rlmChildId");
+        childless_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&childless_summary, Some("w-childless"));
+        let _ = drain_roster_pushes(&mut events);
+        supervisor.spawn_roster_boot_seed();
+        drain_pending_seeds_for_tests(&supervisor).await;
+        let _ = drain_roster_pushes(&mut events);
+        supervisor.refresh_deleted_descendant_usage().await;
+        let _ = drain_roster_pushes(&mut events);
+
+        let before = supervisor
+            .handle_roster_subscribe("s1", "roster_subscribe")
+            .await;
+        let before_rows = before.data.expect("snapshot")["roster"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let family_root = before_rows
+            .iter()
+            .find(|entry| entry["summary"]["sessionId"] == json!("root-persisted"))
+            .expect("family root row");
+        assert_eq!(
+            family_root["summary"]["deletedDescendantUsage"],
+            json!({ "inputTokens": 11, "outputTokens": 7, "cost": 0.5 }),
+            "the bucket attached to the family root before the stop"
+        );
+        let childless_id = roster_agent_id_for_summary(&childless_summary);
+        let before_others: Vec<&Value> = before_rows
+            .iter()
+            .filter(|entry| entry["agentId"] != json!(childless_id))
+            .collect();
+
+        supervisor.registry.remove("w-childless").await;
+        supervisor
+            .passivate_roster_worker("w-childless", false)
+            .await;
+
+        let after = supervisor
+            .handle_roster_subscribe("s2", "roster_subscribe")
+            .await;
+        let after_rows = after.data.expect("snapshot")["roster"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let stopped = after_rows
+            .iter()
+            .find(|entry| entry["agentId"] == json!(childless_id))
+            .expect("the childless root's row settles in place");
+        assert_eq!(stopped["status"], "inactive");
+        assert_eq!(stopped["summary"]["isSessionActive"], false);
+        let after_others: Vec<&Value> = after_rows
+            .iter()
+            .filter(|entry| entry["agentId"] != json!(childless_id))
+            .collect();
+        assert_eq!(
+            before_others.len(),
+            after_others.len(),
+            "no row appeared or disappeared besides the stopped root"
+        );
+        for expected in &before_others {
+            let found = after_others
+                .iter()
+                .find(|entry| entry["agentId"] == expected["agentId"])
+                .unwrap_or_else(|| panic!("row vanished: {}", expected["agentId"]));
+            assert_eq!(
+                found, expected,
+                "the stop of a childless root rewrote another row"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
