@@ -18,6 +18,15 @@ class FactoryReceiptGuards(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 validate(probe)
 
+    def test_accepts_explicit_wire_camel_case_without_ignoring_duplicates(self):
+        probe = self.probe()
+        for row in probe['done']['nodes']:
+            row['entriesUsed'] = row.pop('entries_used')
+        validate(probe)
+        probe['done']['nodes'][0]['entries_used'] = 1
+        with self.assertRaises(AssertionError):
+            validate(probe)
+
     def test_rejects_missing_or_historical_tool_receipt(self):
         probe = self.probe()
         tool = {'role': 'tool', 'tool_call_id': 'factory_probe',

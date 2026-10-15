@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from review_kernel_env_parity import KernelClient as Client
 from review_draft_disconnect_parity import digest, env_for, TS_ARCHIVE_SHA256
@@ -32,19 +33,7 @@ factory_harness.create_factory('Recovery fixture', 'Actual factory output recove
     'transitions': [{'from': 'work', 'to': 'verified',
         'when': {'output': 'data', 'path': 'ok', 'op': 'eq', 'value': True}}]})
 factory_started = await rlm.factory.run('recovery-fixture')
-async def fixture_settle():
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline:
-        status = await rlm.factory.status(factory_started['run_id'])
-        if status['state'] != 'running':
-            return status
-        await asyncio.sleep(0.025)
-    raise AssertionError('factory never settled')
-factory_paused = await fixture_settle()
-assert factory_paused['state'] == 'paused', factory_paused
-await rlm.factory.resume(factory_started['run_id'])
-factory_done = await fixture_settle()
-print('FACTORY_RECOVERY_RESULT=' + json.dumps({'paused': factory_paused, 'done': factory_done}))'''
+print('FACTORY_RECOVERY_RESULT=' + json.dumps(factory_started))'''
 
 
 class Provider(http.server.ThreadingHTTPServer):
@@ -109,15 +98,20 @@ def extract(requests):
     return values[0]
 
 
+def count(row, snake, camel):
+    assert not (snake in row and camel in row), 'ambiguous duplicate wire keys'
+    return row[snake] if snake in row else row[camel]
+
+
 def validate(probe):
     assert probe['paused']['state'] == 'paused', probe
     assert probe['done']['state'] == 'done', probe
     nodes = probe['done']['nodes']
     assert sorted(n['id'] for n in nodes) == ['verified', 'work'], nodes
     verified = next(n for n in nodes if n['id'] == 'verified')
-    assert verified['status'] == 'done' and verified['entries_used'] == 1 and verified['attempts'] == 1, verified
+    assert verified['status'] == 'done' and count(verified, 'entries_used', 'entriesUsed') == 1 and verified['attempts'] == 1, verified
     node = next(n for n in nodes if n['id'] == 'work')
-    assert node['entries_used'] == 1 and node['attempts'] == 2, node
+    assert count(node, 'entries_used', 'entriesUsed') == 1 and node['attempts'] == 2, node
     assert node['status'] == 'done', node
 
 
@@ -156,7 +150,26 @@ def observe(binary, kind, root, observed):
             control.call('attach', activeSessionId=active)
             control.call('prompt', activeSessionId=active, message='Run FACTORY_PARENT_PROBE')
             control.call('wait_for_idle', timeout_seconds=120, activeSessionId=active)
-            observed['probe'] = extract(server.parent_requests)
+            started = extract(server.parent_requests[:2])
+            observed['started'] = started
+            run_id = started['run_id']
+            def settled():
+                snapshots = []
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    status = control.call('factory_activity', activeSessionId=active,
+                                          action='status', runId=run_id)
+                    snapshots.append(status)
+                    if status['state'] != 'running':
+                        return status
+                    threading.Event().wait(0.025)
+                observed.setdefault('timed_out_snapshots', []).extend(snapshots)
+                raise AssertionError('factory did not leave running after parent turn completed')
+            paused = settled()
+            assert paused['state'] == 'paused', paused
+            observed['resume_response'] = control.call('factory_activity', activeSessionId=active,
+                action='resume', runId=run_id)
+            observed['probe'] = {'paused': paused, 'done': settled()}
             validate(observed['probe'])
             assert len(server.child_requests) == 3, 'not two producer attempts plus one guarded verifier'
         observed['behavior_verified'] = True
