@@ -156,10 +156,11 @@ impl Client {
     }
 }
 
-fn saved_row(client: &mut Client, id: &str, cwd: &Path, session_id: &str) -> Value {
+fn saved_row(client: &mut Client, id: &str, sessions_dir: &Path, session_id: &str) -> Value {
     let listed = client.request(
         id,
-        &json!({ "type": "list_saved_sessions", "cwd": cwd.to_string_lossy() }),
+        &json!({ "type": "list_saved_sessions", "cwd": "/",
+                 "sessionDir": sessions_dir.to_string_lossy() }),
     );
     listed["data"]["sessions"]
         .as_array()
@@ -213,7 +214,7 @@ fn inactive_session_row_lists_only_its_live_persistent_shells() {
     let socket = dir.path().join("supervisor.sock");
     let _daemon = spawn_supervisor(&socket, &agent_dir, None);
     let mut client = Client::connect(&socket);
-    let row = saved_row(&mut client, "l1", Path::new("/tmp"), session_id);
+    let row = saved_row(&mut client, "l1", &sessions_dir, session_id);
 
     assert_eq!(
         row["persistentShells"],
@@ -299,7 +300,7 @@ fn persistent_shell_survives_daemon_shutdown_and_dies_with_session_delete() {
     let socket = dir.path().join("supervisor-2.sock");
     let _daemon = spawn_supervisor(&socket, &agent_dir, Some(&kernel_python));
     let mut client = Client::connect(&socket);
-    let row = saved_row(&mut client, "l1", dir.path(), &session_id);
+    let row = saved_row(&mut client, "l1", &sessions_dir, &session_id);
     assert_eq!(row["persistentShells"][0]["pid"], pid);
     client.request(
         "d1",
