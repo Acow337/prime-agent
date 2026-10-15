@@ -124,12 +124,15 @@ impl Editor {
     /// inside it — a `/` too, and a completion that keeps it open (an
     /// applied directory, `@src/`) — lists what the token now matches.
     pub(crate) fn request_autocomplete_in_symbol_token(&mut self) {
-        let before = char_prefix(&self.lines[self.cursor_line], self.cursor_col);
-        if ends_with_symbol_token(&before)
-            || crate::autocomplete::extract_at_prefix(&before.chars().collect::<Vec<_>>()).is_some()
-        {
+        if self.cursor_ends_symbol_token() {
             self.request_autocomplete(false, false);
         }
+    }
+
+    fn cursor_ends_symbol_token(&self) -> bool {
+        let before = char_prefix(&self.lines[self.cursor_line], self.cursor_col);
+        ends_with_symbol_token(&before)
+            || crate::autocomplete::extract_at_prefix(&before.chars().collect::<Vec<_>>()).is_some()
     }
 
     pub(crate) fn request_autocomplete(&mut self, force: bool, explicit_tab: bool) {
@@ -274,10 +277,8 @@ impl Editor {
     }
 
     pub(crate) fn refresh_autocomplete_after_edit(&mut self, retrigger: bool) {
-        let current_line = &self.lines[self.cursor_line];
-        let before = char_prefix(current_line, self.cursor_col);
         let has_ctx =
-            self.current_slash_command_context().is_some() || ends_with_symbol_token(&before);
+            self.current_slash_command_context().is_some() || self.cursor_ends_symbol_token();
 
         // An edit that empties the prompt cancels both the open menu and the
         // parked request (a parked request can exist without an open menu; if it

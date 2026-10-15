@@ -968,6 +968,30 @@ mod tests {
     }
 
     #[test]
+    fn deleting_in_a_quoted_directory_retriggers_the_closed_menu() {
+        for forward in [false, true] {
+            let (base, mut e) = at_editor();
+            std::fs::create_dir_all(base.path().join("dir with spaces")).unwrap();
+            std::fs::write(base.path().join("dir with spaces/child.rs"), "x").unwrap();
+            for ch in "@\"dir with spaces/x".chars() {
+                e.handle_input(&ch.to_string());
+            }
+            e.materialize_autocomplete();
+            assert!(!e.is_showing_autocomplete());
+            if forward {
+                e.handle_input("left");
+                e.handle_forward_delete();
+            } else {
+                e.handle_backspace();
+            }
+            assert_eq!(
+                settled_menu(&mut e),
+                Some(vec!["@\"dir with spaces/child.rs\"".to_string()])
+            );
+        }
+    }
+
+    #[test]
     fn slash_in_a_quoted_directory_refreshes_the_running_search() {
         let (base, mut e) = at_editor();
         std::fs::create_dir_all(base.path().join("dir with spaces")).unwrap();
