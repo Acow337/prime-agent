@@ -74,13 +74,14 @@ def observe(binary, kind, root, observed):
                     for line in p.read_text().splitlines()]
         observed['ledger_after'] = ledger()
         boundary = delete_contract(observed['ledger_after'], child_id)
+        assert len(boundary) == 1, 'expected exactly one original deletion boundary'
         if kind == 'rust':
             observed['retry_response'] = control.call('kill', **payload)
             observed['ledger_after_retry'] = ledger()
             # No second deletion boundary; usage amendments, if any, retain
             # their actual rows and are not normalized out of this count.
             after = delete_contract(observed['ledger_after_retry'], child_id)
-            assert len(after) == len(boundary), 'idempotent retry appended another boundary'
+            assert after == boundary, 'idempotent retry changed the original boundary'
         observed['behavior_verified'] = True
     finally:
         observed['wire'] = list(control.wire) if control else []
