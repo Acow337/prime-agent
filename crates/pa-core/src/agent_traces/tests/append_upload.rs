@@ -23,6 +23,8 @@ async fn whole_upload_then_unicode_tail_satisfies_the_backend_byte_and_hash_prec
     let _credentials = clear_trace_credentials();
     std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
     let fixture = Fixture::new();
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(true).unwrap();
     let session = fixture.write_session("unicode.jsonl", "unicode-session");
     let prefix = std::fs::read_to_string(&session)
         .unwrap()
