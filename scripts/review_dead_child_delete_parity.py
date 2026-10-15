@@ -2,8 +2,10 @@
 """Hosted real TS/Rust RLM child deletion baseline and Rust idempotent retry.
 
 A real kernel admits a child whose model request is held. The ordinary daemon
-kill command must close the active child session. Rust stops its separate child
-worker; historical TS hosts the child in its parent worker, which remains alive. Rust recognizes rlmLedgerDelete and persists
+kill command is accepted by both implementations. Rust closes its separate
+child worker and removes its projection. TS hosts the child in its parent worker
+and its plain kill leaves the spawn edge live; its immediate projection is
+retained in the receipt without claiming delete parity. Rust recognizes rlmLedgerDelete and persists
 its edge boundary; pinned TS ignores that Rust-native marker (raw ledger
 absence is retained as an explicit difference). The new dead-PID and
 interrupted-cleanup branches are separately exercised by hosted Unix supervisor
@@ -85,9 +87,9 @@ def observe(binary, kind, root, observed):
         observed['delete_response'] = control.call('kill', **payload)
         after_list = control.call('list', all=True)
         observed['sessions_after'] = after_list
-        assert not any(r.get('activeSessionId') == child_active for r in after_list['sessions']), after_list
-        observed['child_session_closed'] = True
         if kind == 'rust':
+            assert not any(r.get('activeSessionId') == child_active for r in after_list['sessions']), after_list
+            observed['child_session_closed'] = True
             deadline = time.monotonic() + 15
             while True:
                 try:
@@ -101,6 +103,8 @@ def observe(binary, kind, root, observed):
                 threading.Event().wait(0.025)
             observed['child_worker_stopped'] = True
         else:
+            observed['ts_child_projection_after_raw_kill'] = [r for r in after_list['sessions']
+                if r.get('rlmChildId') == child_id]
             current, state = process_identity(pid)
             assert current == identity and state != 'Z', 'TS unexpectedly lost the shared parent worker'
             observed['shared_parent_worker_alive'] = True
