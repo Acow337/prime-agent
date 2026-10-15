@@ -38,7 +38,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         .session
         .prompt_with_images(
             message,
-            images,
+            images.clone(),
             PromptOptions {
                 streaming_behavior: behavior,
                 return_after_accepted: true,
@@ -88,6 +88,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         &command,
         model,
         api_key,
+        &images,
         compact_permit,
     )
     .await;
@@ -131,6 +132,7 @@ async fn run_session_command(
     command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     model: pa_types::ai::Model,
     api_key: Option<String>,
+    images: &[pa_agent::types::ImageContent],
     compact_permit: Option<pa_core::session_engine::compact_session::CompactionHookPermit>,
 ) -> Result<(), String> {
     let is_compact = command.name == "compact";
@@ -180,6 +182,7 @@ async fn run_session_command(
             &engine,
             &mut params,
             command,
+            images,
             compact_permit,
         )
         .await

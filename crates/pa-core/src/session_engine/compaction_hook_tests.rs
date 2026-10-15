@@ -316,6 +316,7 @@ async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook
             autonomous: &mut autonomous,
         },
         &command,
+        &[],
         Some(permit),
     )
     .await;
