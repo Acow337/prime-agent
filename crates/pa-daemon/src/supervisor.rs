@@ -25,6 +25,8 @@ use signals_shutdown::daemon_closing_shutdown_event;
 mod supervision;
 
 #[cfg(test)]
+mod dead_child_delete_tests;
+#[cfg(test)]
 mod handshake_tests;
 #[cfg(test)]
 mod spawn_record_tests;
