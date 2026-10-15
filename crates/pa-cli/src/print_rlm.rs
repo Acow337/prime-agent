@@ -255,6 +255,9 @@ pub(crate) fn late_sent_agent_message_sink(
             current_node
                 .pending_receipts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Admission must wake an already armed zero-count quiescence scan;
+            // waiting only for completion leaves a window for false success.
+            current_node.activity.notify_waiters();
             current = current_node.parent_node();
             pending_nodes.push(current_node);
         }
@@ -1367,7 +1370,16 @@ mod tests {
             },
         );
         assert!(has_unsettled_rlm_work(&node).await);
-        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, notified)
+                .await
+                .is_ok(),
+            "admission must wake an armed quiescence scan before the recorder runs"
+        );
+        let completed = node.activity.notified();
+        tokio::pin!(completed);
+        completed.as_mut().enable();
+        tokio::time::timeout(std::time::Duration::from_secs(5), completed)
             .await
             .expect("receipt completion must wake the parked drive");
         assert_eq!(
@@ -1411,7 +1423,16 @@ mod tests {
         );
         // Even with no active child turn in the root's roster, pending work holds it.
         assert!(has_unsettled_rlm_work(&root).await);
-        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, notified)
+                .await
+                .is_ok(),
+            "child receipt admission must wake the ancestor before recording starts"
+        );
+        let completed = root.activity.notified();
+        tokio::pin!(completed);
+        completed.as_mut().enable();
+        tokio::time::timeout(std::time::Duration::from_secs(5), completed)
             .await
             .expect("a child's completed recorder must wake its ancestor");
         assert_eq!(
