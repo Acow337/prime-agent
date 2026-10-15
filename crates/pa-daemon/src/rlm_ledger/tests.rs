@@ -1410,3 +1410,82 @@ fn the_bucket_updates_after_an_append_on_the_same_ledger() {
         "the appended delete bills on the same instance: {bucket:?}"
     );
 }
+
+#[test]
+fn a_restored_tombstoned_child_stops_billing_the_parent_without_an_append() {
+    let dir = temp_dir("bucket-restore");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    let child = sessions.join("child.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&child, assistant_usage_row("m1", 0.25)).unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-child".into(),
+            parent: parent.to_string_lossy().into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    ledger
+        .append_delete_with_usage(
+            "sub-child",
+            &child.to_string_lossy(),
+            RlmLedgerDeleteReason::User,
+            &usage_summary(0.25),
+        )
+        .unwrap();
+    let archive = crate::session_archive::archive_dir(&dir);
+    fs::create_dir_all(&archive).unwrap();
+    let archived = archive.join(crate::session_store::session_file_name("child"));
+    fs::rename(&child, &archived).unwrap();
+    let key = canonical_session_path(&parent)
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        ledger.deleted_descendant_usage_by_parent().unwrap(),
+        HashMap::from([(key, usage_summary(0.25))])
+    );
+    crate::session_archive::restore_session(&archive, &sessions, "child").unwrap();
+    assert_eq!(
+        ledger.deleted_descendant_usage_by_parent().unwrap(),
+        HashMap::new()
+    );
+}
+
+#[test]
+fn the_artifact_index_rechecks_deleted_and_relocated_transcripts_without_an_append() {
+    let dir = temp_dir("index-disk-change");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let child = dir.join("session-artifacts/parent/sub/child.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(&child, "{}").unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: "/gone/child.jsonl".into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    let initial = ledger.live_edges().unwrap();
+    assert_eq!(initial.len(), 1);
+    fs::remove_file(&child).unwrap();
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    let relocated = dir.join("session-artifacts/other/sub/child.jsonl");
+    fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+    fs::write(&relocated, "{}").unwrap();
+    let mut expected = initial;
+    expected[0].child = canonical_session_path(&relocated)
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(ledger.live_edges().unwrap(), expected);
+}

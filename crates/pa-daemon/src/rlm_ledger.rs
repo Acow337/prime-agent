@@ -33,7 +33,7 @@ mod replay;
 
 use replay::{
     canonicalize_dir, edge_key, file_identity, is_file, parse_ledger_line, sole_edge_by_child_id,
-    LedgerRecord, LivePathResolver, ReplaySnapshot, ReplayState,
+    DeletedBucket, LedgerRecord, LivePathResolver, ReplaySnapshot, ReplayState,
 };
 
 mod legacy_registry;
@@ -515,10 +515,22 @@ impl RlmSpawnLedger {
     ) -> Result<HashMap<String, crate::session_usage::SessionUsageSummary>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
-        Ok(state
-            .deleted_bucket
-            .get_or_init(|| self.fold_deleted_descendant_usage(&state.edges))
-            .clone())
+        let inputs = state
+            .edges
+            .iter()
+            .filter(|edge| edge.deleted.is_some())
+            .map(|edge| file_identity(Path::new(&edge.child)))
+            .collect::<Result<Vec<_>>>()?;
+        let mut cached = state.deleted_bucket.lock().expect("deleted bucket lock");
+        if let Some(bucket) = cached.as_ref().filter(|bucket| bucket.inputs == inputs) {
+            return Ok(bucket.usage.clone());
+        }
+        let usage = self.fold_deleted_descendant_usage(&state.edges);
+        *cached = Some(DeletedBucket {
+            inputs,
+            usage: usage.clone(),
+        });
+        Ok(usage)
     }
 
     pub(crate) fn family_topology(&self) -> Result<Arc<FamilyTopology>> {

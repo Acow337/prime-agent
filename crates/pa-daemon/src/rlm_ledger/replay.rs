@@ -5,7 +5,7 @@
 use anyhow::Context as _;
 
 use super::{
-    bail, canonical_session_path, fs, json, Arc, HashMap, OnceLock, Path, PathBuf, Result,
+    bail, canonical_session_path, fs, json, Arc, HashMap, Mutex, OnceLock, Path, PathBuf, Result,
     RlmLedgerDeleteReason, RlmLedgerEdge, Value,
 };
 
@@ -157,8 +157,16 @@ pub(super) struct ReplayState {
     pub(super) edges: Vec<RlmLedgerEdge>,
     pub(super) index: HashMap<String, usize>,
     pub(super) artifact_index: OnceLock<HashMap<String, PathBuf>>,
-    pub(super) deleted_bucket: OnceLock<HashMap<String, crate::session_usage::SessionUsageSummary>>,
+    pub(super) deleted_bucket: Mutex<Option<DeletedBucket>>,
     pub(super) family_topology: OnceLock<std::sync::Arc<crate::rlm_ledger::FamilyTopology>>,
+}
+
+/// Ledger rows are immutable within a replay, but restore/archive and transcript
+/// edits can change the inputs of the deleted-spend fold without any append.
+#[derive(Debug)]
+pub(super) struct DeletedBucket {
+    pub(super) inputs: Vec<Option<FileIdentity>>,
+    pub(super) usage: HashMap<String, crate::session_usage::SessionUsageSummary>,
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {
@@ -176,6 +184,7 @@ pub(super) struct LivePathResolver<'a> {
     sessions_dir: PathBuf,
     pub(super) resolved: HashMap<String, Option<PathBuf>>,
     artifact_index: &'a OnceLock<HashMap<String, PathBuf>>,
+    refreshed_artifact_index: Option<HashMap<String, PathBuf>>,
 }
 
 impl<'a> LivePathResolver<'a> {
@@ -189,6 +198,7 @@ impl<'a> LivePathResolver<'a> {
             sessions_dir,
             resolved: HashMap::new(),
             artifact_index,
+            refreshed_artifact_index: None,
         }
     }
 
@@ -222,9 +232,18 @@ impl<'a> LivePathResolver<'a> {
         ) {
             return None;
         }
-        self.artifact_index
-            .get_or_init(|| artifact_session_index(&self.agent_dir))
+        let index = self
+            .artifact_index
+            .get_or_init(|| artifact_session_index(&self.agent_dir));
+        if let Some(path) = index.get(&id).filter(|path| is_file(path)) {
+            return Some(path.clone());
+        }
+        // Top-level deletion and restore/move do not append to this ledger.
+        // Revalidate hits, and refresh at most once per read for changed paths.
+        self.refreshed_artifact_index
+            .get_or_insert_with(|| artifact_session_index(&self.agent_dir))
             .get(&id)
+            .filter(|path| is_file(path))
             .cloned()
     }
 }
