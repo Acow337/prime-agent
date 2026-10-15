@@ -72,6 +72,7 @@ fn group_alive(pgid: i32) -> bool {
         })
 }
 
+// The returned Daemon's Drop kills and reaps the child.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: Option<&Path>) -> Daemon {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
@@ -171,7 +172,7 @@ fn saved_row(client: &mut Client, id: &str, sessions_dir: &Path, session_id: &st
         .iter()
         .find(|row| row["id"] == session_id)
         .cloned()
-        .unwrap_or_else(|| panic!("no catalog row for {session_id}: {listed}"))
+        .expect("the session has a catalog row")
 }
 
 #[test]

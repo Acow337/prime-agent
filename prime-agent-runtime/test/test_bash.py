@@ -1554,6 +1554,21 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.registry(), [])
         self.assertEqual(self.files(), [f"{'b' * 32}.out", f"{'b' * 32}.rc"])
 
+    async def test_reattached_shell_whose_pid_is_recycled_finishes_without_a_signal(self):
+        stranger = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(stranger.wait)
+        self.pgids.append(stranger.pid)
+        start_id = bash_module._process_start_id(stranger.pid)
+        self.write_registry(self.entry("d" * 32, stranger.pid, start_id))
+        bash_module._rehydrate_persistent_shells()
+        handle = self.handle_for(stranger.pid)
+        self.assertTrue(handle.running)
+        # The shell died without a status and its pid now names another process.
+        handle._start_id = "proc:not-this-process"
+        self.assertEqual((await asyncio.wait_for(handle, 10)).exit_code, -1)
+        self.assertIsNone(stranger.poll())
+        self.assertEqual(self.registry(), [])
+
     async def test_dead_entry_is_swept(self):
         gone = subprocess.Popen(["true"])
         gone.wait()
