@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
+import ast
+import asyncio
+import contextlib
+import io
+import sys
+import types
+from unittest.mock import patch
 import copy
 import json
 import unittest
-from review_mcp_oauth_config_parity import BEFORE, AFTER, DEFAULT, MARKER, extract, validate
+from review_mcp_oauth_config_parity import BEFORE, AFTER, DEFAULT, MARKER, CELL, extract, validate
 
 
 class OAuthConfigGuards(unittest.TestCase):
@@ -24,6 +31,22 @@ class OAuthConfigGuards(unittest.TestCase):
         changed['before']['fixture-default']['callbackPort'] = 0
         with self.assertRaises(AssertionError):
             validate(changed)
+
+    def test_actual_cell_compiles_and_awaits_both_requests(self):
+        calls = []
+        async def host_request(kind, payload):
+            calls.append((kind, payload))
+            return BEFORE if payload['server'] == 'fixture-oauth' else DEFAULT
+        module = types.ModuleType('rlm')
+        module.host_request = host_request
+        output = io.StringIO()
+        code = compile(CELL, 'fixture-cell', 'exec', flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        with patch.dict(sys.modules, {'rlm': module}), contextlib.redirect_stdout(output):
+            asyncio.run(eval(code, {}))
+        self.assertEqual(calls, [('mcp.config', {'server': 'fixture-oauth'}),
+                                 ('mcp.config', {'server': 'fixture-default'})])
+        self.assertEqual(json.loads(output.getvalue().strip().removeprefix(MARKER)),
+                         {'fixture-oauth': BEFORE, 'fixture-default': DEFAULT})
 
     def test_current_real_tool_result_is_required(self):
         value = {'fixture-oauth': BEFORE, 'fixture-default': DEFAULT}

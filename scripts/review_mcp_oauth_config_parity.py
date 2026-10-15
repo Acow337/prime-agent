@@ -28,7 +28,10 @@ BEFORE = {'type': 'http', 'url': 'https://fixture.invalid/mcp', 'oauth': True,
           'clientId': 'fixture-client-before', 'callbackPort': 3118}
 AFTER = {**BEFORE, 'clientId': 'fixture-client-after', 'callbackPort': 4118}
 CELL = """from rlm import host_request
-print('MCP_OAUTH_CONFIG_RESULT=' + __import__('json').dumps({name: await host_request('mcp.config', {'server': name}) for name in ('fixture-oauth', 'fixture-default')}))"""
+oauth_configs = {}
+for name in ('fixture-oauth', 'fixture-default'):
+    oauth_configs[name] = await host_request('mcp.config', {'server': name})
+print('MCP_OAUTH_CONFIG_RESULT=' + __import__('json').dumps(oauth_configs))"""
 
 
 class Provider(http.server.ThreadingHTTPServer):
