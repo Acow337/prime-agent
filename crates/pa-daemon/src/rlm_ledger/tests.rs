@@ -497,7 +497,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
         sessions_dir.clone(),
         &state.artifact_index,
     );
-    let scoped = resolve_live_edges(&state, &mut resolver);
+    let scoped = resolve_live_edges(&state, &mut resolver).unwrap();
     assert_eq!(scoped.len(), 2, "{scoped:?}");
     assert_eq!(
         resolver.resolved.len(),
@@ -511,7 +511,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
     );
     let full = ledger.replay_cached().unwrap();
     let mut unscoped = LivePathResolver::new(agent_dir, sessions_dir, &full.artifact_index);
-    assert_eq!(resolve_live_edges(&full, &mut unscoped).len(), 2);
+    assert_eq!(resolve_live_edges(&full, &mut unscoped).unwrap().len(), 2);
     assert!(full.artifact_index.get().is_some());
     assert_eq!(unscoped.resolved.len(), 103);
 }
@@ -1488,4 +1488,43 @@ fn the_artifact_index_rechecks_deleted_and_relocated_transcripts_without_an_appe
         .to_string_lossy()
         .into_owned();
     assert_eq!(ledger.live_edges().unwrap(), expected);
+}
+
+#[test]
+fn artifact_misses_stay_cached_until_a_directory_changes() {
+    let dir = temp_dir("index-negative-cache");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let partition = dir.join("session-artifacts/parent/sub");
+    fs::create_dir_all(&partition).unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: "/gone/child.jsonl".into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    let scans = replay::ARTIFACT_SCANS.with(std::cell::Cell::get);
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    assert_eq!(replay::ARTIFACT_SCANS.with(std::cell::Cell::get), scans + 1);
+    let restored = partition.join("child.jsonl");
+    fs::write(&restored, "{}").unwrap();
+    let expected = vec![RlmLedgerEdge {
+        child_id: "sub".into(),
+        parent: canonical_session_path(&parent).to_string_lossy().into(),
+        child: canonical_session_path(&restored).to_string_lossy().into(),
+        depth: 1,
+        name: "child".into(),
+        deleted: None,
+        deleted_usage: None,
+    }];
+    assert_eq!(ledger.live_edges().unwrap(), expected);
+    assert_eq!(ledger.live_edges().unwrap(), expected);
+    assert_eq!(replay::ARTIFACT_SCANS.with(std::cell::Cell::get), scans + 2);
 }
