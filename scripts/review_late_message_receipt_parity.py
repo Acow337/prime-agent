@@ -22,13 +22,15 @@ from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
 from review_restore_notice_parity import texts, probe_from
 
 MESSAGE = 'LATE_RECEIPT_FIXTURE_MESSAGE'
-PARENT_CELL = "late_child = await rlm.spawn('LATE_RECEIPT_CHILD', name='late-child')\nprint('LATE_SPAWN_HANDLE=' + __import__('json').dumps({'rlm_child_id': late_child.rlm_child_id, 'session_dir': late_child.session_dir}))"
+PARENT_CELL = "late_child = await rlm.spawn('LATE_RECEIPT_CHILD', name='late-child')\nprint('LATE_SPAWN_HANDLE=' + __import__('json').dumps({'rlm_child_id': late_child.rlm_child_id, 'session_dir': str(late_child.session_dir)}))"
 
 
 def late_entries(root):
     entries = []
     for path in root.rglob('*.jsonl'):
         for line in path.read_text().splitlines(keepends=True):
+            if not line.strip():
+                continue  # session readers also permit blank JSONL separators
             if not line.endswith('\n'):
                 continue  # an in-progress append is not an observed complete entry
             row = json.loads(line)
