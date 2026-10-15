@@ -42,6 +42,9 @@ See [Claude preserved thinking](https://platform.claude.com/docs/en/build-with-c
 and [thinking encryption](https://platform.claude.com/docs/en/build-with-claude/thinking#thinking-encryption).
 No live cross-platform generation or account-link acceptance was tested.
 
+Registry dispatch is the single preflight boundary for the facade and publicly
+returned providers, so direct registry calls cannot bypass the same policy.
+
 An adapter limitation is explicit before generation when replay would silently lose or
 mislabel reasoning: unrelated foreign opaque signatures, unsigned Claude blocks,
 plaintext without a Responses reasoning item, a Completions route with no supported
@@ -49,6 +52,28 @@ channel, signed Claude reasoning sent to a non-Claude Bedrock model, malformed o
 payloads, or a route requiring thinking as answer text. Google currently retains
 thoughts/signatures only for the same model, including signatures attached to answer
 text. Unsupported history remains stored.
+
+## Recovery and policy decision
+
+Strict preservation is intentional: replay reasoning through a supported typed/native
+representation or stop with an explicit error. Kevin has selected this policy for
+this change; maintainer review and acknowledgement remain required before merge.
+There is no implicit opt-in to discard reasoning on a switch.
+
+If replay is blocked, switch back to the original or another compatible provider,
+model and account (including any required linked-account access), or start a new
+session with the intended destination. Stored history stays intact. `/compact` is
+not a guaranteed recovery: it can keep recent reasoning/signatures that still
+block the destination, so another turn can fail for the same reason.
+
+OpenRouter support remains representation-specific. Native same-protocol
+`reasoning_details` can replay without the plaintext capability field. A
+cross-provider plaintext handoff to an OpenRouter route needs a verified destination
+`reasoningReplayField`; it is not inferred from the OpenRouter provider name.
+Catalog follow-up, owned by `prime-agent-catalog`: verify each destination's
+accepted input field and native retention policy, publish its compat entry,
+and test the resulting route before advertising that handoff. No catalog data
+or serving settings are changed here.
 
 ## Internal route evidence
 
@@ -88,10 +113,30 @@ Final native compilation, lint and tests run in hosted CI, not on Kevin's Mac.
 ## Parity-diff evidence
 
 Wire behavior intentionally diverges from TS v0.9.8 for typed reasoning replay.
-The synthetic request comparison above characterizes the deliberate difference;
-byte comparison against the full TS daemon and terminal frame/interaction parity
-have not been run. No renderer, key/mouse handling or session persistence changed.
-Those merge-gate limitations remain explicit; CI cannot prove incident causality.
+`scripts/review_reasoning_wire_parity.py` drives real TS and Rust daemon sessions:
+a local capture server supplies synthetic GLM reasoning, the daemon changes to
+DeepSeek, and the next actual HTTP request is captured. It pins TS v0.9.8 source
+`7d442aafa985f9342134fac16c2ef41f03fb45c1` and its release archive SHA-256,
+records the Rust build revision, PR head and binary hashes, and saves request
+body bytes, headers, normalized byte hashes and every structural difference.
+Only the owned fixture root is normalized; JSON formatting/key order and static
+prompt/tool differences remain visible. These captures are hosted CI artifacts;
+see the PR for the actual run and receipt, not merely the verifier's presence.
+
+The expected replay delta is legacy assistant answer text containing reasoning
+versus Rust's separate `reasoning_content`. This is characterized divergence,
+not a claim of byte equality or live-model consumption. Maintainer adjudication
+of the intended policy remains required. Rendered-frame and interactive parity
+are not claimed by this protocol fixture; rendering/interaction code is unchanged.
+
+The public-registry bypass also has hosted red-first evidence: on `3ab60aa2f`,
+`pa-ai#test:reasoning_registry` observed one unsupported Google HTTP request when
+zero was expected ([job log](https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38778482901/job/116572383155)).
+The fix moves validation ownership to registry dispatch; the facade keeps its
+immediate error semantics while direct registered providers return a terminal
+error stream before serialization/authentication/HTTP. New fixtures cover the
+lookup variants, native/simple streaming, unchanged source history and signed
+empty Google parts, alongside the existing native Claude/Bedrock regressions.
 
 The visible-thinking report and the nine-minute wait are not established causes
 or fixes. The exact incident session and raw request/SSE capture are unavailable.

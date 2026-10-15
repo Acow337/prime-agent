@@ -171,3 +171,29 @@ fn native_binding_drops_are_explicit_without_signature_or_reasoning_disclosure()
     }
     assert_eq!(validate_input_transformations(Some(&json!([]))), Ok(()));
 }
+
+#[test]
+fn openrouter_native_details_replay_without_a_plaintext_catalog_capability() {
+    let source = model("openai-completions", "openrouter", "source");
+    let destination = model("openai-completions", "openrouter", "destination");
+    let details = vec![
+        json!({"type": "reasoning.encrypted", "data": "SYNTHETIC_OPAQUE", "format": "synthetic", "index": 0}),
+    ];
+    let signature = crate::providers::openai_completions::encode_reasoning_details(&details);
+    let context = history(
+        &source,
+        &json!([{ "type": "thinking", "thinking": "", "thinkingSignature": signature, "redacted": true }]),
+    );
+    let original = context.messages.clone();
+    assert_eq!(validate_reasoning_replay(&destination, &context), Ok(()));
+    let compat = crate::providers::openai_completions::get_compat(&destination);
+    assert_eq!(
+        crate::providers::openai_completions::convert_messages(&destination, &context, &compat)
+            .unwrap(),
+        vec![
+            json!({"role": "developer", "content": "Synthetic shared prefix"}),
+            json!({"role": "assistant", "content": null, "reasoning_details": details})
+        ]
+    );
+    assert_eq!(context.messages, original);
+}

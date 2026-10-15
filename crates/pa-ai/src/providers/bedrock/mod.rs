@@ -429,8 +429,6 @@ async fn run_stream(
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
 ) -> Result<(), ProviderError> {
-    crate::providers::reasoning_replay::validate_reasoning_replay(model, context)
-        .map_err(ProviderError::Message)?;
     let options = options.cloned().unwrap_or_default();
     let _ = get_env_api_key(&model.provider); // Bedrock auth never uses provider env keys
 

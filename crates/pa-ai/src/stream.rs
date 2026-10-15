@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use crate::event_stream::AssistantMessageEventStream;
 use crate::providers::simple_options::default_request_max_tokens;
-use crate::registry::{ensure_builtins, get_api_provider};
+use crate::registry::{ensure_builtins, get_checked_api_provider, CheckedProvider};
 use crate::types::{AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions};
 use crate::utils_inner::ProviderError;
 
-fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, ProviderError> {
+fn resolve_provider(api: &str) -> Result<Arc<CheckedProvider>, ProviderError> {
     ensure_builtins();
-    get_api_provider(api)
+    get_checked_api_provider(api)
         .ok_or_else(|| ProviderError::Message(format!("No API provider registered for api: {api}")))
 }
 
@@ -118,12 +118,10 @@ pub fn stream(
     context: &Context,
     options: Option<StreamOptions>,
 ) -> Result<AssistantMessageEventStream, ProviderError> {
-    crate::providers::reasoning_replay::validate_reasoning_replay(model, context)
-        .map_err(ProviderError::Message)?;
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
     clamp_output_budget(model, context, options.as_mut());
-    Ok(provider.stream(model, context, options.as_ref()))
+    provider.stream_checked(model, context, options.as_ref())
 }
 
 /// Await the final assistant message of a provider-native stream.
@@ -152,8 +150,6 @@ pub fn stream_simple(
     context: &Context,
     options: Option<SimpleStreamOptions>,
 ) -> Result<AssistantMessageEventStream, ProviderError> {
-    crate::providers::reasoning_replay::validate_reasoning_replay(model, context)
-        .map_err(ProviderError::Message)?;
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
     // A `None` caller still gets the default output budget downstream
@@ -163,7 +159,7 @@ pub fn stream_simple(
     // materialized default builds the same request otherwise.
     let simple = options.get_or_insert_with(SimpleStreamOptions::default);
     clamp_output_budget(model, context, Some(&mut simple.base));
-    Ok(provider.stream_simple(model, context, options.as_ref()))
+    provider.stream_simple_checked(model, context, options.as_ref())
 }
 
 /// Await the final assistant message of a simple stream (`completeSimple`).

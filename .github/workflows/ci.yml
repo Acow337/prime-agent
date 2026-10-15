@@ -371,11 +371,14 @@ jobs:
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
           mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
           comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice; do
+          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice reasoning_wire; do
             verifier="scripts/review_${scenario}_parity.py"
             if [ -f "${verifier}" ]; then
               if [ "${scenario}" = "draft_disconnect" ]; then
                 python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
+              fi
+              if [ "${scenario}" = "reasoning_wire" ]; then
+                python3 scripts/test_review_reasoning_wire_parity.py || comparison_status=1
               fi
               python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
             fi
@@ -386,7 +389,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lifecycle-parity-receipts-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/lifecycle-parity-receipts/*.json
+          path: |
+            ${{ runner.temp }}/lifecycle-parity-receipts/*.json
+            ${{ runner.temp }}/lifecycle-parity-receipts/reasoning-wire-captures/**
           if-no-files-found: error
       - name: Run this shard's test subset
         if: ${{ !cancelled() && (success() || steps.lifecycle_parity.outcome == 'failure') }}

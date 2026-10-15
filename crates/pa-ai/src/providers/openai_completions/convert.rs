@@ -25,7 +25,6 @@ pub fn convert_messages(
     compat: &ResolvedCompat,
 ) -> Result<Vec<Value>, String> {
     use crate::types::Message;
-    crate::providers::reasoning_replay::validate_reasoning_replay(model, context)?;
     let mut params: Vec<Value> = Vec::new();
 
     let transformed =
@@ -649,30 +648,6 @@ mod tests {
             ]
         );
         assert_eq!(context.messages, original);
-    }
-
-    #[test]
-    fn unsupported_channel_and_foreign_signature_return_explicit_replay_limitations() {
-        let unknown = model("prime-inference", 0.0, 0.0);
-        let context = thinking_only_context(Some("reasoning_content"));
-        assert!(convert_messages(
-            &unknown,
-            &context,
-            &crate::providers::openai_completions::get_compat(&unknown)
-        )
-        .unwrap_err()
-        .contains("no supported reasoning replay channel"));
-        let supported = model("deepseek", 0.0, 0.0);
-        let bound = thinking_only_context(Some("SOURCE_BOUND_SIGNATURE"));
-        let original = bound.messages.clone();
-        assert!(convert_messages(
-            &supported,
-            &bound,
-            &crate::providers::openai_completions::get_compat(&supported)
-        )
-        .unwrap_err()
-        .contains("source-bound"));
-        assert_eq!(bound.messages, original);
     }
 
     #[test]

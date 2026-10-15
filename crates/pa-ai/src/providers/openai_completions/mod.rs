@@ -28,7 +28,7 @@ pub use stream::stream_openai_completions;
 pub const API_OPENAI_COMPLETIONS: &str = "openai-completions";
 
 const REASONING_DETAILS_SIGNATURE_TYPE: &str = "openai-completions.reasoning_details.v1";
-pub(crate) const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_text"];
+pub(crate) use pa_types::ai::PLAINTEXT_REASONING_FIELDS as REASONING_FIELDS;
 
 /// Tool selection passed to the API.
 #[derive(Clone, Debug, PartialEq)]

@@ -7,6 +7,8 @@ use crate::providers::openai_completions::{
 use crate::types::{AssistantContent, AssistantMessage, Context, Message, Model, StopReason};
 use base64::Engine as _;
 
+const REPLAY_RECOVERY: &str = "Switch back to a compatible provider, model and account, or start a new session. Compacting may keep recent reasoning and leave this error unresolved.";
+
 pub(crate) const CLAUDE_BINDING_DIAGNOSTICS_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// A Claude-native wire bridge; this does not assert model/account/prefix readability.
@@ -44,7 +46,7 @@ pub(crate) fn validate_input_transformations(
             })
         })
     {
-        return Err("The provider dropped replayed reasoning because its native model, account, or conversation binding was not satisfied. Original session history is unchanged.".into());
+        return Err(format!("The provider dropped replayed reasoning because its native model, account, or conversation binding was not satisfied. Original session history is unchanged. {REPLAY_RECOVERY}"));
     }
     Ok(())
 }
@@ -82,7 +84,7 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
         let claude_bridge = is_claude_bridge(assistant, model);
         let limitation = |detail: &str| {
             format!(
-            "Cannot replay reasoning from {}/{} to {}/{}: {detail}. Original session history is unchanged.",
+            "Cannot replay reasoning from {}/{} to {}/{}: {detail}. Original session history is unchanged. {REPLAY_RECOVERY}",
             assistant.provider, assistant.model, model.provider, model.id,
         )
         };

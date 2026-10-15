@@ -82,10 +82,9 @@ fn field_valid(api: &str, key: &str, value: &Value) -> bool {
     match key {
         "maxTokensField" => matches!(value.as_str(), Some("max_completion_tokens" | "max_tokens")),
         "thinkingFormat" => THINKING_FORMATS.contains(&value.as_str().unwrap_or_default()),
-        "reasoningReplayField" => matches!(
-            value.as_str(),
-            Some("reasoning_content" | "reasoning" | "reasoning_text")
-        ),
+        "reasoningReplayField" => {
+            pa_types::ai::PLAINTEXT_REASONING_FIELDS.contains(&value.as_str().unwrap_or_default())
+        }
         "cacheControlFormat" => value.as_str() == Some("anthropic"),
         "openRouterRouting" => open_router_routing_valid(value),
         "vercelGatewayRouting" => vercel_gateway_routing_valid(value),
