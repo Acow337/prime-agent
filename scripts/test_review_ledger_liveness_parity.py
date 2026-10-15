@@ -5,10 +5,18 @@ from unittest.mock import patch
 from pathlib import Path
 import unittest
 
-from review_ledger_liveness_parity import NAME, MARKER, admitted_probe, catalog_row, confirm_cleanup, family_contract
+from review_ledger_liveness_parity import NAME, MARKER, admitted_probe, archive_restore_unsupported, catalog_row, confirm_cleanup, family_contract
 
 
 class FamilyReceiptTests(unittest.TestCase):
+    def test_only_exact_actual_archive_refusal_is_classified_unsupported(self):
+        row = {'type': 'response', 'command': 'send_message', 'success': False,
+               'error': 'Unknown active session: saved-id'}
+        self.assertTrue(archive_restore_unsupported(row, 'saved-id'))
+        for changed in ({'success': True}, {'error': 'Request timed out'},
+                        {'error': 'Unknown active session: different-id'}, {'command': 'kill'}):
+            self.assertFalse(archive_restore_unsupported({**row, **changed}, 'saved-id'))
+
     def test_duplicate_catalog_paths_fail(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'child.jsonl'
