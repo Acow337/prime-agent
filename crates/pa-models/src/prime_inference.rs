@@ -253,7 +253,8 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> 
 /// # Errors
 ///
 /// Fails when the payload carries no `data` array, on a duplicate model
-/// id, or when every entry was dropped and `allow_empty` is false.
+/// id, when all entries are malformed, or when every entry was filtered and
+/// `allow_empty` is false.
 // TS-parity parser: entry sanitization stays one pass over each item.
 #[allow(clippy::too_many_lines)]
 pub fn parse_prime_inference_model_catalog(
@@ -264,6 +265,7 @@ pub fn parse_prime_inference_model_catalog(
         return Err("Invalid Prime Inference model catalog".into());
     };
     let mut entries = Vec::with_capacity(items.len());
+    let mut valid_entries = 0;
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for item in items {
         let wire: WireItem = match serde_json::from_value(item.clone()) {
@@ -297,6 +299,7 @@ pub fn parse_prime_inference_model_catalog(
         if !seen.insert(wire.id.clone()) {
             return Err(format!("Duplicate Prime Inference model {}", wire.id));
         }
+        valid_entries += 1;
         let supported_parameters = parse_string_array(wire.supported_parameters.as_ref());
         // Capability filtering (a documented deviation from the TS parser, which never reads this
         // field): a route declaring its supported parameters without "tools" can never serve a
@@ -362,6 +365,12 @@ pub fn parse_prime_inference_model_catalog(
             entry.reasoning = wire.specs.supports_reasoning;
         }
         entries.push(entry);
+    }
+    // Only an explicitly empty payload or valid entries filtered for lack of
+    // tool support may yield an empty authoritative snapshot. Malformed-only
+    // responses must not revoke a scope's last-good private entitlements.
+    if !items.is_empty() && valid_entries == 0 {
+        return Err("Prime Inference model catalog has no valid entries".into());
     }
     if entries.is_empty() && !allow_empty {
         return Err("Prime Inference model catalog is empty".into());
@@ -767,12 +776,19 @@ mod tests {
         assert!(parse_authenticated_catalog(&json!({}), &compiled).is_err());
         assert!(parse_authenticated_catalog(
             &json!({"data": [
-                {"id": "no-price"}
+                {"id": "no-price"},
+                {"malformed": true}
             ]}),
             &compiled
         )
-        .expect("invalid entries skip")
-        .is_empty());
+        .is_err());
+        let mut no_tools = wire_entry("internal/no-tools", 1.0, 2.0);
+        no_tools["supported_parameters"] = json!(["max_tokens"]);
+        assert!(
+            parse_authenticated_catalog(&json!({"data": [no_tools]}), &compiled)
+                .expect("valid routes without tools revoke available models")
+                .is_empty()
+        );
     }
 
     #[test]

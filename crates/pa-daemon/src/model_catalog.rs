@@ -657,11 +657,16 @@ mod tests {
         assert_canonical_models_order(&fresh);
         let heads = fixture.server.recorded_requests();
         assert_eq!(heads.len() - requests_before, 2);
+        let team = std::env::var("PRIME_TEAM_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "team-b".into());
         assert!(heads[requests_before..].iter().any(|head| {
             head.contains("Bearer sk-account-b")
-                && head
-                    .to_ascii_lowercase()
-                    .contains("x-prime-team-id: team-b")
+                && head.to_ascii_lowercase().contains(&format!(
+                    "x-prime-team-id: {}",
+                    team.trim().to_ascii_lowercase()
+                ))
         }));
     }
 
