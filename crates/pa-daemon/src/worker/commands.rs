@@ -223,7 +223,10 @@ impl Worker {
 
     /// `navigate_tree` with the reload's announcement: announced before the
     /// response reaches the client, so surfaces never show the pre-navigation goal.
+    /// The whole navigation runs under the queued-work pause (TS
+    /// `_navigateTree`'s `acquireQueuedWorkPause` + `waitForIdle`).
     async fn handle_navigate_tree(&self, payload: &Value) -> DaemonResponse {
+        let _queued_work = self.hold_queued_work_pause("navigate");
         let response = self.tree_navigation.navigate_tree(payload).await;
         if response.success {
             if let Some(goal) = self.engine.goal_update_after_rebuild() {
