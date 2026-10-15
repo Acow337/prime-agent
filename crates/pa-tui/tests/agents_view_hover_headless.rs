@@ -324,16 +324,16 @@ async fn a_click_on_an_inactive_row_opens_it() {
     );
 }
 
-/// A plain click on the merged `N subagents (M running)` row EXPANDS the dropdown — the toggle, not
+/// A plain click on the merged `N subagents · M running` row EXPANDS the dropdown — the toggle, not
 /// an open: the frame renders the child rows and the run keeps running with no selection.
 #[tokio::test]
 async fn a_click_on_the_merged_summary_expands_the_dropdown() {
-    let frames = settled_frames("subagents (").await;
-    let row = locate_row(&frames, "subagents (").expect("the merged line renders");
+    let frames = settled_frames("subagents \u{b7}").await;
+    let row = locate_row(&frames, "subagents \u{b7}").expect("the merged line renders");
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "subagents \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click { row, col: 4 },
@@ -358,12 +358,12 @@ async fn a_click_on_the_merged_summary_expands_the_dropdown() {
 /// row.
 #[tokio::test]
 async fn a_click_on_the_expanded_child_opens_the_subagent() {
-    let frames = settled_frames("subagents (").await;
-    let summary = locate_row(&frames, "subagents (").expect("the merged line renders");
+    let frames = settled_frames("subagents \u{b7}").await;
+    let summary = locate_row(&frames, "subagents \u{b7}").expect("the merged line renders");
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "subagents \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click {
@@ -380,7 +380,7 @@ async fn a_click_on_the_expanded_child_opens_the_subagent() {
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "subagents \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click {
@@ -405,12 +405,12 @@ async fn a_click_on_the_expanded_child_opens_the_subagent() {
 /// merged line, the child rows, and the headings, then a plain click — the subagent still opens.
 #[tokio::test]
 async fn hover_motions_never_disturb_the_agents_view_click() {
-    let frames = settled_frames("subagents (").await;
-    let summary = locate_row(&frames, "subagents (").expect("the merged line renders");
+    let frames = settled_frames("subagents \u{b7}").await;
+    let summary = locate_row(&frames, "subagents \u{b7}").expect("the merged line renders");
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "subagents \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click {
@@ -427,7 +427,7 @@ async fn hover_motions_never_disturb_the_agents_view_click() {
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "subagents \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         // Hover motions across the parent row, the merged line, the heading, and the expanded child
