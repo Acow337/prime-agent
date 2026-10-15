@@ -346,12 +346,30 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
         .get("customInstructions")
         .and_then(Value::as_str)
         .map(str::to_string);
-    // The handle guard stays held through the compaction: a replacement
-    // cannot dispose the kernel or land a `set_model` mid-compaction.
+    // Hook preflight owns only snapshots. Revalidate before acquiring the
+    // ordinary mutation guards so replacement/model changes cannot make the
+    // permit authorize a different compaction.
     let handle = state.session.handle().await;
     let model = handle.model.clone();
-    let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
+    drop(handle);
+    let permit = tokio::select! {
+        biased;
+        () = state.session.shutdown_cancelled() => {
+            return Err("A signal exit is in progress".to_string());
+        }
+        result = engine.session.preflight_compaction_hook(
+            pa_core::session_engine::compact_session::CompactionTrigger::Manual,
+            instructions.as_deref(), &model, None,
+        ) => result.map_err(|error| format!("{error:#}"))?,
+    };
+    let handle = state.session.handle().await;
+    if !Arc::ptr_eq(&engine, &handle.engine) || handle.model != model {
+        return Err("Session or model changed during compaction hook; retry compact".to_string());
+    }
+    let api_key = handle.api_key.clone();
+    // Retain the handle through mutation: replacement cannot dispose the kernel
+    // or change the model. The consumed permit performs no external command.
     // The gate arms BEFORE the turn settles, so a pump woken by the
     // abort's idle settle parks instead of admitting into the snapshot
     // window. The gate is a COUNT (overlaps arm their own increments).
@@ -376,7 +394,7 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     state.writer.drain_within(COMPACT_FRAME_FLUSH_BUDGET).await;
     let outcome = engine
         .session
-        .compact(instructions.as_deref(), &model, api_key, None)
+        .compact_with_permit(instructions.as_deref(), &model, api_key, None, permit)
         .await;
     state.compacting.fetch_sub(1, Ordering::SeqCst);
     // The parked rows deliver after the rebuild settles, never into its

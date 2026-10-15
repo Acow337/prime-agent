@@ -11,7 +11,6 @@ use crate::types::{
 };
 
 use super::abort::race_with_abort;
-use super::run::clone_context;
 use super::tools::{find_tool, FinalizedToolCallOutcome, Preparation, PreparedToolCall};
 use super::{AgentEventSink, AgentLoopConfig};
 
@@ -79,7 +78,7 @@ async fn prepare_tool_call_inner(
                     assistant_message: assistant_message.clone(),
                     tool_call: tool_call.clone(),
                     args: validated_args.clone(),
-                    context: clone_context(current_context),
+                    context: config.tool_hook_context.snapshot(current_context),
                 },
                 signal.cloned().unwrap_or_default(),
             ),
@@ -252,7 +251,7 @@ pub(crate) async fn finalize_executed_tool_call(
                     args: prepared.args.clone(),
                     result: result.clone(),
                     is_error,
-                    context: clone_context(current_context),
+                    context: config.tool_hook_context.snapshot(current_context),
                 },
                 signal.cloned().unwrap_or_default(),
             ),

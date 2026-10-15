@@ -218,6 +218,22 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
+    fn end_session_hooks(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let hook = {
+                let session = self.session.lock().await;
+                session
+                    .as_deref()
+                    .and_then(pa_core::session_engine::engine::SessionEngine::session_end_hook)
+            };
+            if let Some(hook) = hook {
+                hook().await;
+            }
+        })
+    }
+
     /// Finalize telemetry on the live session: `agent session ended` + one flush; best-effort.
     fn end_telemetry(
         &self,

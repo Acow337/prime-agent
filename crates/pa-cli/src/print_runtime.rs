@@ -231,11 +231,16 @@ async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
     let mut initial_lease = None;
     let parts = build_headless_engine_parts(options, "rpc", &mut initial_lease).await?;
     if let Some(goal) = &config.initial_goal {
-        parts
+        if let Err(error) = parts
             .engine
             .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
             .await
-            .map_err(|error| format!("{error:#}"))?;
+        {
+            if let Some(hook) = parts.engine.session_end_hook() {
+                hook().await;
+            }
+            return Err(format!("{error:#}"));
+        }
     }
     let factory = rpc_engine_factory(options);
     let mut engine_handle = pa_daemon::rpc::session::RpcEngineHandle::from(parts);
@@ -395,15 +400,22 @@ async fn print_mode_main(
     // main.ts `executionMode: appMode`).
     let headless = build_headless_engine_parts(options, options.app_mode.as_str(), lease).await?;
     let engine = std::sync::Arc::new(headless.engine);
-    // The CLI `--goal` seed: a fresh root branch starts the goal; a resumed
-    // branch keeps its persisted goal. Depth 0 only — the print session is a root.
-    if let Some(goal) = &options.config.initial_goal {
-        engine
-            .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
-            .await
-            .map_err(|error| format!("{error:#}"))?;
+    let result = async {
+        // The CLI `--goal` seed: a fresh root branch starts the goal; a resumed
+        // branch keeps its persisted goal. Depth 0 only — the print session is a root.
+        if let Some(goal) = &options.config.initial_goal {
+            engine
+                .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+        }
+        run_prompts_and_emit(&engine, &headless.model, headless.api_key.clone(), options).await
     }
-    run_prompts_and_emit(&engine, &headless.model, headless.api_key.clone(), options).await
+    .await;
+    if let Some(hook) = engine.session_end_hook() {
+        hook().await;
+    }
+    result
 }
 
 /// Assemble the in-process session engine for a headless run: model

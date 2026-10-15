@@ -174,7 +174,7 @@ fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
             terminate_session.fire_shutdown();
             // Serialize with any in-flight whole-session replacement:
             // the handle read below sees the session that is live NOW.
-            let _replacement = terminate_session.replacement_lease().await;
+            let replacement = terminate_session.replacement_lease().await;
             let engine = terminate_session.handle().await.engine.clone();
             // Retire the queued-input pumps BEFORE the abort (idempotent
             // with the dispose's bump): no queued row starts a turn the
@@ -182,6 +182,12 @@ fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
             terminate_session.retire_pumps();
             engine.session.agent().abort();
             terminate_session.dispose().await;
+            // Release the replacement gate before running an external command.
+            // The shutdown broadcast already prevents another replacement.
+            drop(replacement);
+            if let Some(hook) = engine.session_end_hook() {
+                hook().await;
+            }
             terminate_writer.drain_bounded().await;
             exit_with(SIGTERM_EXIT);
         }
@@ -197,7 +203,7 @@ fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
             // Serialize with any in-flight replacement (the lease holds
             // until the exit): the abort and the dispose target the
             // session that is live NOW.
-            let _replacement = hangup_session.replacement_lease().await;
+            let replacement = hangup_session.replacement_lease().await;
             let engine = hangup_session.handle().await.engine.clone();
             // Retire the queued-input pumps BEFORE the abort (idempotent
             // with the dispose's bump): no queued row starts a turn the
@@ -205,6 +211,12 @@ fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
             hangup_session.retire_pumps();
             engine.session.agent().abort();
             hangup_session.dispose().await;
+            // Release the replacement gate before running an external command.
+            // The shutdown broadcast already prevents another replacement.
+            drop(replacement);
+            if let Some(hook) = engine.session_end_hook() {
+                hook().await;
+            }
             hangup_writer.drain_bounded().await;
             exit_with(SIGHUP_EXIT);
         }
@@ -258,6 +270,10 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
     {
         let _pump = state.queue_pump.lock().await;
         state.session.dispose().await;
+    }
+    let engine = state.session.handle().await.engine.clone();
+    if let Some(hook) = engine.session_end_hook() {
+        hook().await;
     }
     state.writer.drain().await;
     0
