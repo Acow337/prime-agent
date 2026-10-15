@@ -913,10 +913,7 @@ mod tests {
     /// The host loop's idle ticks until no request is parked and no
     /// background search runs; the open menu's item values, if any.
     fn settled_menu(e: &mut Editor) -> Option<Vec<String>> {
-        while e.has_pending_autocomplete() {
-            e.materialize_autocomplete();
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        e.settle_autocomplete_search();
         e.autocomplete_state()
             .map(|state| state.items.iter().map(|item| item.value.clone()).collect())
     }
@@ -947,6 +944,44 @@ mod tests {
         e.handle_input("tab");
         assert_eq!(settled_menu(&mut e), children);
         assert_eq!(e.get_text(), "@prime-agent/");
+    }
+
+    #[test]
+    fn quoted_directory_completions_list_children_on_tab_and_enter() {
+        for accept in ["tab", "enter"] {
+            let (base, mut e) = at_editor();
+            std::fs::create_dir_all(base.path().join("dir with spaces")).unwrap();
+            std::fs::write(base.path().join("dir with spaces/child.rs"), "x").unwrap();
+            for ch in "@dir".chars() {
+                e.handle_input(&ch.to_string());
+            }
+            assert_eq!(
+                settled_menu(&mut e),
+                Some(vec!["@\"dir with spaces/\"".to_string()])
+            );
+            e.handle_input(accept);
+            assert_eq!(
+                settled_menu(&mut e),
+                Some(vec!["@\"dir with spaces/child.rs\"".to_string()])
+            );
+        }
+    }
+
+    #[test]
+    fn slash_in_a_quoted_directory_refreshes_the_running_search() {
+        let (base, mut e) = at_editor();
+        std::fs::create_dir_all(base.path().join("dir with spaces")).unwrap();
+        std::fs::write(base.path().join("dir with spaces/child.rs"), "x").unwrap();
+        for ch in "@\"dir with spaces".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        e.materialize_autocomplete();
+        assert!(e.autocomplete_search.is_some());
+        e.handle_input("/");
+        assert_eq!(
+            settled_menu(&mut e),
+            Some(vec!["@\"dir with spaces/child.rs\"".to_string()])
+        );
     }
 
     #[test]

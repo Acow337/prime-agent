@@ -125,7 +125,9 @@ impl Editor {
     /// applied directory, `@src/`) — lists what the token now matches.
     pub(crate) fn request_autocomplete_in_symbol_token(&mut self) {
         let before = char_prefix(&self.lines[self.cursor_line], self.cursor_col);
-        if ends_with_symbol_token(&before) {
+        if ends_with_symbol_token(&before)
+            || crate::autocomplete::extract_at_prefix(&before.chars().collect::<Vec<_>>()).is_some()
+        {
             self.request_autocomplete(false, false);
         }
     }
@@ -301,6 +303,26 @@ impl Editor {
         self.autocomplete_search = None;
         if was {
             self.emit(EditorEvent::AutocompleteToggled(false));
+        }
+    }
+}
+
+#[cfg(test)]
+impl Editor {
+    /// Wait for the actual search response, with a failure deadline rather than idle polling.
+    pub(super) fn settle_autocomplete_search(&mut self) {
+        while self.has_pending_autocomplete() {
+            if self.pending_autocomplete.is_some() {
+                self.materialize_autocomplete();
+            }
+            if let Some(active) = self.autocomplete_search.take() {
+                let result = active
+                    .search
+                    .results
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("autocomplete search must send its result");
+                self.apply_suggestions(result, active.request);
+            }
         }
     }
 }
