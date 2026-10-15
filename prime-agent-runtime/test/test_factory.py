@@ -6102,6 +6102,88 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
 
     @async_test
+    async def test_missing_answer_capture_has_a_bounded_poll_window(self) -> None:
+        self.host.outcomes["work"] = {"status": "done"}
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker",
+                                      "outputs": [{"name": "data", "type": "json"}]}]})
+        before = self.clock()
+        result = await self.start()
+        status = await self.settle(result)
+        elapsed = self.clock() - before
+        self.assertEqual(status["state"], "paused")
+        self.assertGreater(elapsed, 0)
+        self.assertLessEqual(elapsed, factory_module.POLL_TIMEOUT_MS / 1000 + 1e-9)
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+        self.assertIn("captured no value", self.node_status(status, "work")["error"])
+
+    @async_test
+    async def test_stop_during_missing_answer_poll_preserves_cancellation(self) -> None:
+        self.host.outcomes["work"] = {"status": "done"}
+        sleeps = GatedSleep()
+        self.executor._sleep_fn = sleeps
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker",
+                                      "outputs": [{"name": "data", "type": "json"}]}]})
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        await self.wait_until(sleeps.entered.is_set)
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        sleeps.release.set()
+        await run.task
+        entry = run.states["work"].entries[0]
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(entry.status, "cancelled")
+        self.assertFalse(entry.instances[0].provisional)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+
+    @async_test
+    async def test_capture_waits_for_the_settled_workers_answer_handoff(self) -> None:
+        handoff_requested = asyncio.Event()
+        answer_ready = asyncio.Event()
+
+        class HandoffHost(FakeHost):
+            empty_reads = 0
+
+            async def __call__(self, request_type, payload=None):
+                response = await super().__call__(request_type, payload)
+                if request_type == "rlm.collect" and not answer_ready.is_set():
+                    for row in response["results"]:
+                        if row["rlm_child_id"] == "child-1":
+                            row.pop("answer_text", None)
+                            row.pop("answer_preview", None)
+                            self.empty_reads += 1
+                            if self.empty_reads >= 2:
+                                handoff_requested.set()
+                return response
+
+        class YieldingSleep(ClockSleep):
+            async def __call__(self, seconds):
+                await super().__call__(seconds)
+                await yield_loop_turn()
+
+        self.host = HandoffHost(clock=self.clock)
+        self.host.outcomes["work"] = {"status": "done", "answer": '{"data": {"ok": true}}'}
+        repatch = patch.object(rlm_module, "host_request", self.host)
+        repatch.start()
+        self.addCleanup(repatch.stop)
+        self.executor._sleep_fn = YieldingSleep(self.clock)
+
+        async def finish_handoff():
+            await handoff_requested.wait()
+            answer_ready.set()
+
+        handoff = asyncio.create_task(finish_handoff())
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker",
+                                      "outputs": [{"name": "data", "type": "json"}]}]})
+        result = await self.start()
+        status = await self.settle(result)
+        await handoff
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.node_status(status, "work")["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+
+    @async_test
     async def test_child_exit_captures_a_provisional_answer_and_marks_needs_verify(self) -> None:
         # M4: a child that dies without reporting is distinguishable from
         # completed work. The exit envelope's last assistant text is

@@ -3126,7 +3126,8 @@ class FactoryExecutor:
         that binds no value from the first capture is exactly the M2
         silent-failure class: the downstream would run on nothing. When a
         declared output binds no value, the settled children are
-        re-collected ONCE (a settled child keeps its result until deleted)
+        refreshed in one bounded capture window (a settled child keeps its
+        result until deleted; missing text waits for the worker hand-off),
         and the capture re-runs over the refreshed answers; a port that
         still binds nothing records a deterministic capture failure in the
         ledger (``output_capture_failed``) and fails the entry -- its
@@ -3166,8 +3167,8 @@ class FactoryExecutor:
         return "; ".join(failures) or None
 
     async def _refresh_entry_answers(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> bool:
-        """Re-collect the entry's settled children once; refresh any longer
-        captured answer. Returns whether any answer changed."""
+        """Refresh settled answers, waiting one bounded poll window for a
+        missing hand-off. Returns whether any answer changed."""
         from . import collect
 
         child_ids = [
@@ -3177,30 +3178,45 @@ class FactoryExecutor:
         ]
         if not child_ids:
             return False
-        try:
-            results = await collect(child_ids, timeout_ms=0)
-        except Exception as exc:
-            self._event(
-                run,
-                "output_capture_failed",
-                node=state.state_id,
-                entry=entry.index,
-                error=f"capture retry could not re-collect the settled children: {exc}",
-                detail="the first capture stands",
-            )
-            return False
-        by_child = {result.rlm_child_id: result for result in results}
+        # An idle worker may expose its settle before handing off its final
+        # assistant text. Give that missing capture one bounded poll window;
+        # existing nonempty (but invalid) output still gets only one refresh.
+        deadline = self._now_fn() + POLL_TIMEOUT_MS / 1000
         changed = False
-        for instance in entry.instances:
-            result = by_child.get(instance.child_id or "")
-            if result is None:
-                continue
-            answer = (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
-            if answer and (instance.answer is None or len(answer) > len(instance.answer)):
-                instance.answer = answer
-                changed = True
-        if changed:
-            entry.answer = self._entry_answer(entry)
+        while entry.status == "running":
+            try:
+                results = await collect(child_ids, timeout_ms=0)
+            except Exception as exc:
+                self._event(
+                    run,
+                    "output_capture_failed",
+                    node=state.state_id,
+                    entry=entry.index,
+                    error=f"capture retry could not re-collect the settled children: {exc}",
+                    detail="the first capture stands",
+                )
+                return changed
+            if entry.status != "running":
+                return changed  # stop/fail_fast claimed the entry during collect
+            by_child = {result.rlm_child_id: result for result in results}
+            for instance in entry.instances:
+                result = by_child.get(instance.child_id or "")
+                if result is None:
+                    continue
+                answer = (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
+                if answer and (instance.answer is None or len(answer) > len(instance.answer)):
+                    instance.answer = answer
+                    changed = True
+            if changed:
+                entry.answer = self._entry_answer(entry)
+            missing = any(
+                instance.status == "done" and instance.child_id is not None and not instance.answer
+                for instance in entry.instances
+            )
+            remaining = deadline - self._now_fn()
+            if not missing or remaining <= 0:
+                return changed
+            await self._sleep_fn(min(0.05, remaining))
         return changed
 
     async def _apply_instance_failure(
