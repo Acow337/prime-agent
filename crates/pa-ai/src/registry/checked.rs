@@ -25,13 +25,23 @@ impl CheckedProvider {
         Self { inner }
     }
 
+    fn validate(&self, model: &Model, context: &Context) -> Result<(), ProviderError> {
+        if model.api != self.inner.api() {
+            return Err(ProviderError::Message(format!(
+                "Registered provider API {} does not match model API {}. Choose the provider registered for this model's API.",
+                self.inner.api(), model.api,
+            )));
+        }
+        validate_reasoning_replay(model, context).map_err(ProviderError::Message)
+    }
+
     pub(crate) fn stream_checked(
         &self,
         model: &Model,
         context: &Context,
         options: Option<&StreamOptions>,
     ) -> Result<AssistantMessageEventStream, ProviderError> {
-        validate_reasoning_replay(model, context).map_err(ProviderError::Message)?;
+        self.validate(model, context)?;
         Ok(self.inner.stream(model, context, options))
     }
 
@@ -41,7 +51,7 @@ impl CheckedProvider {
         context: &Context,
         options: Option<&SimpleStreamOptions>,
     ) -> Result<AssistantMessageEventStream, ProviderError> {
-        validate_reasoning_replay(model, context).map_err(ProviderError::Message)?;
+        self.validate(model, context)?;
         Ok(self.inner.stream_simple(model, context, options))
     }
 }

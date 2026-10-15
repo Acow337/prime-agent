@@ -238,3 +238,30 @@ async fn same_model_google_signature_only_parts_keep_native_thinking_and_text_si
         );
     }
 }
+
+#[tokio::test]
+async fn public_registry_rejects_a_model_for_another_adapter_before_http() {
+    let capture = Capture::start().await;
+    let target = model("openai-completions", &capture.url);
+    let context = Context::default();
+    let options = StreamOptions {
+        api_key: Some("fixture-only".into()),
+        ..Default::default()
+    };
+    for api in ["google-generative-ai", "google-vertex"] {
+        let provider = lookup(api, 0);
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.stream(&target, &context, Some(&options)).result(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.stop_reason, StopReason::Error);
+        assert!(output
+            .error_message
+            .unwrap()
+            .contains("does not match model API"));
+        assert!(capture.requests.lock().unwrap().is_empty());
+        assert!(context.messages.is_empty());
+    }
+}
