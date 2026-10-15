@@ -145,6 +145,8 @@ pub struct ActivityDock {
     /// current session's kernel registry only): finished runs stay rows
     /// inside the bash view.
     pub shells: Vec<String>,
+    /// How many of the running shells are persistent.
+    pub shells_persistent: usize,
     /// The live factory runs, paused first, each `<name> <state>` (a live
     /// state — running, stopping, or paused — or a terminal run whose
     /// children are still in flight; the current session's kernel registry
@@ -790,10 +792,18 @@ pub fn render_activity_dock_segments(
                 }
             }
             // The label reads "shell(s)": the tool name stays bash() everywhere else.
-            ActivityGroup::Bash => line.push(theme.fg_span(
-                activity_color(shells),
-                format!("▸ {} shell{}", shells, if shells == 1 { "" } else { "s" }),
-            )),
+            ActivityGroup::Bash => {
+                line.push(theme.fg_span(
+                    activity_color(shells),
+                    format!("▸ {} shell{}", shells, if shells == 1 { "" } else { "s" }),
+                ));
+                if dock.shells_persistent > 0 {
+                    line.extend(cluster(
+                        &format!("{} persistent", dock.shells_persistent),
+                        activity_color(shells),
+                    ));
+                }
+            }
             // The factory page's indicator counts live runs only
             // (running, stopping, paused): done and failed runs stay as
             // panels inside the factory page, never in the indicator.

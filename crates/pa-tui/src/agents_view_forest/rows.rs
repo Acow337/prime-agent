@@ -99,12 +99,19 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
-        let activity = summary
-            .get("activeSessionId")
-            .and_then(Value::as_str)
-            .and_then(|active| activity.get(active))
-            .copied()
-            .unwrap_or_default();
+        let activity = match summary.get("activeSessionId").and_then(Value::as_str) {
+            Some(active) => activity.get(active).copied().unwrap_or_default(),
+            // Without a live kernel, the catalog row's live persistent shells are the session's.
+            None => SessionActivity {
+                shells: record
+                    .saved
+                    .as_ref()
+                    .and_then(|saved| saved.get("persistentShells"))
+                    .map(crate::bash_view::running_shell_counts)
+                    .unwrap_or_default(),
+                factory_runs: 0,
+            },
+        };
         base.push(BaseRow {
             kind,
             section: record.section,
@@ -379,7 +386,8 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// The node's own `$ N shells` and `⚙ N factory runs` lines, each only when its count is nonzero.
+/// The node's own `$ N shells[ · M persistent]` and `⚙ N factory runs` lines, each only when its
+/// count is nonzero.
 /// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
 fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     let line = |kind: RowKind, prefix: &str, title: String| AgentsViewRow {
@@ -403,11 +411,20 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
         factory_runs,
     } = parent.activity;
     let mut rows = Vec::new();
-    if shells > 0 {
+    if shells.running > 0 {
+        let persistent = if shells.persistent > 0 {
+            format!(" · {} persistent", shells.persistent)
+        } else {
+            String::new()
+        };
         rows.push(line(
             RowKind::Shells,
             super::SHELLS_ROW_PREFIX,
-            format!("$ {shells} shell{}", if shells == 1 { "" } else { "s" }),
+            format!(
+                "$ {} shell{}{persistent}",
+                shells.running,
+                if shells.running == 1 { "" } else { "s" }
+            ),
         ));
     }
     if factory_runs > 0 {
