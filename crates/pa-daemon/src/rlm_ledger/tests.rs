@@ -1555,17 +1555,15 @@ fn family_topology_rechecks_symlink_targets_without_a_ledger_append() {
     let parent = dir.join("parent.jsonl");
     let first = dir.join("first.jsonl");
     let second = dir.join("second.jsonl");
-    let alias = dir.join("alias.jsonl");
     for file in [&parent, &first, &second] {
         fs::write(file, "{}").unwrap();
     }
-    symlink(&first, &alias).unwrap();
     let ledger = ledger_for(&dir);
     ledger
         .append_spawn(&RlmSpawnInput {
             child_id: "sub".into(),
             parent: parent.to_string_lossy().into(),
-            child: alias.to_string_lossy().into(),
+            child: first.to_string_lossy().into(),
             depth: 1,
             name: "child".into(),
         })
@@ -1574,8 +1572,8 @@ fn family_topology_rechecks_symlink_targets_without_a_ledger_append() {
         ledger.family_topology().unwrap().canonical_children,
         vec![canonical_session_path(&first)]
     );
-    fs::remove_file(&alias).unwrap();
-    symlink(&second, &alias).unwrap();
+    fs::remove_file(&first).unwrap();
+    symlink(&second, &first).unwrap();
     assert_eq!(
         ledger.family_topology().unwrap().canonical_children,
         vec![canonical_session_path(&second)]
