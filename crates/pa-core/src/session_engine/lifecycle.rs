@@ -11,6 +11,26 @@ use serde_json::{json, Value};
 
 use super::hooks::Identity;
 
+const STARTUP: u8 = 1;
+const RESUME: u8 = 2;
+const COMPACT: u8 = 4;
+const INITIAL_START: u8 = STARTUP | RESUME;
+
+// Claim one event before awaiting, so a compact mark arriving during its
+// command remains pending. Cancellation or a dropped future restores the claim.
+struct PendingStart<'a> {
+    state: &'a AtomicU8,
+    event: u8,
+}
+
+impl Drop for PendingStart<'_> {
+    fn drop(&mut self) {
+        if self.event != 0 {
+            self.state.fetch_or(self.event, Ordering::AcqRel);
+        }
+    }
+}
+
 pub(super) struct LifecycleHooks {
     runtime: Arc<crate::hooks::HookRuntime>,
     identity: Arc<Identity>,
@@ -26,7 +46,7 @@ impl LifecycleHooks {
         Self {
             runtime,
             identity,
-            pending_start: AtomicU8::new(1),
+            pending_start: AtomicU8::new(STARTUP),
             deferred_rows: OnceLock::new(),
         }
     }
@@ -50,11 +70,13 @@ impl LifecycleHooks {
         // nor replace a pending post-compaction start.
         let _ = self
             .pending_start
-            .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                (pending & INITIAL_START == STARTUP).then_some((pending & !STARTUP) | RESUME)
+            });
     }
 
     pub fn mark_compact(&self) {
-        self.pending_start.store(3, Ordering::Release);
+        self.pending_start.fetch_or(COMPACT, Ordering::AcqRel);
     }
 
     fn common(&self, event: &str, model: &str) -> Value {
@@ -69,27 +91,38 @@ impl LifecycleHooks {
     }
 
     pub async fn start(&self, model: &str, signal: AbortSignal) -> anyhow::Result<()> {
-        let pending = self.pending_start.load(Ordering::Acquire);
-        let source = match pending {
-            1 => "startup",
-            2 => "resume",
-            3 => "compact",
-            _ => return Ok(()),
-        };
-        let mut input = self.common("SessionStart", model);
-        input["source"] = json!(source);
-        let outcome = self.runtime.dispatch(input, signal.clone()).await;
-        pa_agent::abort::throw_if_aborted_signal(Some(&signal))?;
-        // A completed lifecycle decision is one-shot even when it stops this
-        // admission. Cancellation leaves the pending event available to retry.
-        let _ =
-            self.pending_start
-                .compare_exchange(pending, 0, Ordering::AcqRel, Ordering::Acquire);
-        if let Some(reason) = outcome.stop.or(outcome.deny) {
-            anyhow::bail!("{reason}");
-        }
-        if let Some(message) = outcome.message {
-            tracing::warn!(%message, "session-start hook message");
+        // At most the initial event and one compact event per gate. A new
+        // compact mark racing its own dispatch remains for the next gate.
+        for mask in [INITIAL_START, COMPACT] {
+            let claimed =
+                self.pending_start
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                        (pending & mask != 0).then_some(pending & !mask)
+                    });
+            let Ok(previous) = claimed else { continue };
+            let mut claim = PendingStart {
+                state: &self.pending_start,
+                event: previous & mask,
+            };
+            let source = match claim.event {
+                STARTUP => "startup",
+                RESUME => "resume",
+                COMPACT => "compact",
+                _ => unreachable!("invalid pending SessionStart event"),
+            };
+            let mut input = self.common("SessionStart", model);
+            input["source"] = json!(source);
+            let outcome = self.runtime.dispatch(input, signal.clone()).await;
+            pa_agent::abort::throw_if_aborted_signal(Some(&signal))?;
+            // Completed stop decisions consume only this event. Other pending
+            // lifecycle work remains available to the next admitted prompt.
+            claim.event = 0;
+            if let Some(reason) = outcome.stop.or(outcome.deny) {
+                anyhow::bail!("{reason}");
+            }
+            if let Some(message) = outcome.message {
+                tracing::warn!(%message, "session-start hook message");
+            }
         }
         Ok(())
     }

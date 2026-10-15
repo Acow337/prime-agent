@@ -570,3 +570,114 @@ async fn stop_feedback_is_attributed_persisted_bounded_and_admitted() {
         }
     }
 }
+
+#[tokio::test]
+async fn pre_admission_compaction_preserves_initial_event_order_and_stop_retry() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    for resumed in [false, true] {
+        for stop_initial in [false, true] {
+            let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
+                "type": "command", "command": "input=$(cat); printf '%s\\n' \"$input\" >> starts.jsonl; if [ -f stop-initial ]; then case \"$input\" in *'\"source\":\"compact\"'*) ;; *) printf '%s' '{\"continue\":false,\"stopReason\":\"stop initial event\"}';; esac; fi"
+            }]}]}}));
+            if stop_initial {
+                std::fs::write(fixture.cwd.join("stop-initial"), []).unwrap();
+            }
+            let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+            provider.push_text_turn("accepted after lifecycle work");
+            let engine = create_session(fixture.config(&provider)).await.unwrap();
+            engine.session.mark_compaction_hook();
+            if resumed {
+                let mut durable = crate::session::manager::SessionManager::in_memory(&fixture.cwd);
+                durable
+                    .append_message(SessionAgentMessage::User(pa_types::ai::UserMessage {
+                        content: pa_types::ai::UserContent::Text("prior conversation".into()),
+                        timestamp: 0,
+                        rest: serde_json::Map::default(),
+                    }))
+                    .unwrap();
+                engine
+                    .session
+                    .rebuild_branch_context(durable.get_all_entries().to_vec())
+                    .await
+                    .unwrap();
+            }
+            // Neither event may disappear when admission is cancelled first.
+            let abort = pa_agent::abort::AbortController::new();
+            abort.abort();
+            assert!(engine
+                .session
+                .lifecycle_hooks
+                .as_ref()
+                .unwrap()
+                .start("test", abort.signal())
+                .await
+                .is_err());
+            assert!(!fixture.cwd.join("starts.jsonl").exists());
+            if stop_initial {
+                let error = engine
+                    .prompt("stopped", PromptOptions::default())
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("stop initial event"));
+                assert!(provider.calls().is_empty());
+                assert_eq!(events(&fixture.cwd.join("starts.jsonl")).len(), 1);
+            }
+            engine
+                .prompt("accepted", PromptOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                events(&fixture.cwd.join("starts.jsonl"))
+                    .iter()
+                    .map(|event| event["source"].clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    json!(if resumed { "resume" } else { "startup" }),
+                    json!("compact")
+                ]
+            );
+            assert_eq!(provider.calls().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn compact_mark_arriving_during_dispatch_survives_for_next_gate() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
+        "type": "command", "command": "input=$(cat); printf '%s\\n' \"$input\" >> starts.jsonl; case \"$input\" in *'\"source\":\"compact\"'*) touch entered; while [ ! -f release ]; do sleep 0.02; done;; esac"
+    }]}]}}));
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    let engine = create_session(fixture.config(&provider)).await.unwrap();
+    let hooks = engine.session.lifecycle_hooks.as_ref().unwrap();
+    hooks
+        .start("test", pa_agent::abort::AbortSignal::never())
+        .await
+        .unwrap();
+    engine.session.mark_compaction_hook();
+    let dispatch = hooks.start("test", pa_agent::abort::AbortSignal::never());
+    let concurrent_mark = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !fixture.cwd.join("entered").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("compact hook started");
+        engine.session.mark_compaction_hook();
+        std::fs::write(fixture.cwd.join("release"), []).unwrap();
+    };
+    let (result, ()) = tokio::join!(dispatch, concurrent_mark);
+    result.unwrap();
+    hooks
+        .start("test", pa_agent::abort::AbortSignal::never())
+        .await
+        .unwrap();
+    assert_eq!(
+        events(&fixture.cwd.join("starts.jsonl"))
+            .iter()
+            .map(|event| event["source"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("startup"), json!("compact"), json!("compact")]
+    );
+}

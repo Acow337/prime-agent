@@ -44,7 +44,9 @@ engine-build failure, or cancellation before admission leaves no attempted user
 row in the transcript. This correctness change also applies with hooks disabled;
 older daemon builds eagerly persisted attempted prompts before these checks.
 SessionStart classifies custom-only setup/goal history as startup; durable
-conversation or its summaries classify as resume. A completed SessionStart stop
+conversation or its summaries classify as resume. If compaction occurs before
+the first admission, the initial startup/resume event runs before the pending
+compact event; neither replaces the other. A completed SessionStart stop
 is consumed once; cancellation before completion leaves the event pending.
 
 ## Configuration and trust
