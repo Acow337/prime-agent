@@ -935,22 +935,31 @@ fn expanded_group_row(
         Span::raw(" ".repeat(EXPANDED_NAME_CELLS - str_width(name) + 2)),
     ];
     let used: usize = row.iter().map(|s| str_width(&s.content)).sum();
-    let shown = fitting_items(items, width.saturating_sub(used));
+    let available = width.saturating_sub(used);
+    let shown = fitting_items(items, available);
+    let overflow = (shown < items.len()).then(|| format!("  +{}", items.len() - shown));
+    let marker = overflow.as_deref().map_or(0, str_width);
     for (index, item) in items[..shown].iter().enumerate() {
         if index > 0 {
             row.push(theme.fg_span(ThemeColor::Dim, EXPANDED_ITEM_SEPARATOR));
         }
-        row.push(theme.fg_span(ThemeColor::Muted, item.clone()));
+        // Only an oversized first item gets clipped here, to leave the `+N` marker its room.
+        let item = if index == 0 {
+            crate::width::truncate_to_width(item, available.saturating_sub(marker), "\u{2026}")
+        } else {
+            item.clone()
+        };
+        row.push(theme.fg_span(ThemeColor::Muted, item));
     }
-    if shown < items.len() {
-        row.push(theme.fg_span(ThemeColor::Dim, format!("  +{}", items.len() - shown)));
+    if let Some(overflow) = overflow {
+        row.push(theme.fg_span(ThemeColor::Dim, overflow));
     }
     row
 }
 
 /// How many leading items fit `available` columns together with the
 /// `+N` overflow marker for the rest; the first item always shows (the
-/// row's truncation clips an oversized one).
+/// caller clips an oversized one beside the marker).
 fn fitting_items(items: &[String], available: usize) -> usize {
     let separator = str_width(EXPANDED_ITEM_SEPARATOR);
     (1..=items.len())

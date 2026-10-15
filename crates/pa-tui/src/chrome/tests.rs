@@ -434,6 +434,24 @@ fn an_overflowing_expanded_row_counts_the_rest() {
     assert_eq!(texts[3], " ▸ shells      item 1  ·  item 2  ·  item 3  +6");
 }
 
+/// A first item too long to sit beside the `+N` marker is ellipsized, so the omitted count still
+/// renders.
+#[test]
+fn an_oversized_first_item_keeps_the_overflow_marker() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        heartbeats_active: vec![
+            format!("in 5m {}", "check the deploy queue ".repeat(4)),
+            "in 9m lane canary".to_string(),
+        ],
+        selected: ActivityGroup::Subagents,
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 40));
+    assert_eq!(texts[2], " ◷ heartbeats  in 5m check the depl…  +1");
+}
+
 /// One press steps to the neighboring rendered group and wraps; N groups take exactly N presses.
 #[test]
 fn dock_arrows_visit_every_group_even_when_empty() {
