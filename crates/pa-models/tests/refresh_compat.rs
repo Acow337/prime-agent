@@ -393,12 +393,14 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
         .refresh(&team_a, true)
         .await
         .expect("team-a live models");
-    assert_eq!(a.len(), 60, "public live entries only");
-    // The public models cache never includes private ids (the private
-    // entitlement flow is the registry's, over its own authorization).
+    assert_eq!(
+        a.len(),
+        ids.len() + 1,
+        "authenticated snapshot includes the private entry"
+    );
     assert!(
-        !a.iter().any(|m| m.id == "internal/team-a-secret"),
-        "private ids are filtered from the public models cache"
+        a.iter().any(|m| m.id == "internal/team-a-secret"),
+        "the authenticated scope grants the private route"
     );
     let request = &server.recorded_requests()[0];
     assert!(request.contains("authorization: Bearer key-a"), "{request}");
