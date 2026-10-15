@@ -7,7 +7,8 @@ from review_factory_resumption_parity import MARKER, extract, validate
 class FactoryReceiptGuards(unittest.TestCase):
     def probe(self):
         return {'paused': {'state': 'paused'}, 'done': {'state': 'done', 'nodes': [
-            {'id': 'work', 'status': 'done', 'entries_used': 1, 'attempts': 2}]}}
+            {'id': 'work', 'status': 'done', 'entries_used': 1, 'attempts': 2},
+            {'id': 'verified', 'status': 'done', 'entries_used': 1, 'attempts': 1}]}}
 
     def test_rejects_missing_resume_extra_entry_or_extra_attempt(self):
         validate(self.probe())

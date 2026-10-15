@@ -23,9 +23,14 @@ from review_restore_notice_parity import texts
 MARKER = 'FACTORY_RECOVERY_RESULT='
 CELL = '''import asyncio, json, time
 factory_harness = rlm.get_harness_state()
-factory_harness.create_factory('Recovery fixture', 'Actual factory output recovery', id='recovery-fixture', dag={
-    'nodes': [{'id': 'work', 'subagent': {'prompt': 'FACTORY_RECOVERY_CHILD'},
-               'outputs': [{'name': 'data', 'type': 'json'}]}]})
+factory_harness.create_factory('Recovery fixture', 'Actual factory output recovery', id='recovery-fixture', machine={
+    'states': [{'id': 'work', 'entry': True, 'max_entries': 1,
+                'subagent': {'prompt': 'FACTORY_RECOVERY_CHILD'},
+                'outputs': [{'name': 'data', 'type': 'json'}]},
+               {'id': 'verified', 'max_entries': 1,
+                'subagent': {'prompt': 'FACTORY_RECOVERY_CHILD_VERIFY'}}],
+    'transitions': [{'from': 'work', 'to': 'verified',
+        'when': {'output': 'data', 'path': 'ok', 'op': 'eq', 'value': True}}]})
 factory_started = await rlm.factory.run('recovery-fixture')
 async def fixture_settle():
     deadline = time.monotonic() + 45
@@ -107,7 +112,11 @@ def extract(requests):
 def validate(probe):
     assert probe['paused']['state'] == 'paused', probe
     assert probe['done']['state'] == 'done', probe
-    node = next(n for n in probe['done']['nodes'] if n['id'] == 'work')
+    nodes = probe['done']['nodes']
+    assert sorted(n['id'] for n in nodes) == ['verified', 'work'], nodes
+    verified = next(n for n in nodes if n['id'] == 'verified')
+    assert verified['status'] == 'done' and verified['entries_used'] == 1 and verified['attempts'] == 1, verified
+    node = next(n for n in nodes if n['id'] == 'work')
     assert node['entries_used'] == 1 and node['attempts'] == 2, node
     assert node['status'] == 'done', node
 
@@ -149,7 +158,7 @@ def observe(binary, kind, root, observed):
             control.call('wait_for_idle', timeout_seconds=120, activeSessionId=active)
             observed['probe'] = extract(server.parent_requests)
             validate(observed['probe'])
-            assert len(server.child_requests) == 2, 'not exactly two real child model requests'
+            assert len(server.child_requests) == 3, 'not two producer attempts plus one guarded verifier'
         observed['behavior_verified'] = True
     finally:
         observed['provider_requests'] = server.requests
