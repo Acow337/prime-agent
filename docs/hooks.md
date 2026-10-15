@@ -28,6 +28,10 @@ must not silently appear to work.
 | `SessionEnd` | Main session only; reason `other`; always synchronous, even with `async: true`. Advisory output. Timeout default 1 second, maximum 3 seconds. Client detachment is not session end. | Root-session explicit shutdown/kill, print completion/error, RPC EOF and RPC-handled SIGTERM/SIGHUP. Concurrent callers join one bounded batch. Exit 0 ignores stdout; failures are advisory. Detach/runtime rebuild and abrupt process death do not emit it. |
 | `PreCompact` | Match trigger `manual` or `auto`; common JSON controls, no plain-text context; `continue: false` stops before compaction. | Synchronous gate at shared manual/automatic compaction entry, after eligibility and before the compaction flight lock. JSON `continue: false` vetoes; every nonzero exit is a callback failure. Successful compaction schedules SessionStart source `compact` before the next model call. |
 
+SessionStart stops the next model request; internally generated continuation rows may
+already be recorded and are not rolled back. Prompt admission before persistence
+applies to submitted user rows, not those internal records.
+
 Other Codex events (`PermissionRequest`, `PostCompact`, `SubagentStart`,
 `SubagentStop`, `Interrupt`) are unsupported. MCP, prompt and agent handlers,
 plugin manifests, managed hook policy, inline TOML, and Codex config autoimport
