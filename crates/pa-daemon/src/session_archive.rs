@@ -263,13 +263,7 @@ pub(crate) async fn run_archive_sweep(
     // Blocking work (file moves, the persistent-shell SIGTERM grace): off the runtime.
     let archive = archive_dir(&agent_dir);
     let archived = tokio::task::spawn_blocking(move || {
-        sweep_sessions(
-            &sessions_dir,
-            &archive,
-            &protected,
-            &policy,
-            SystemTime::now(),
-        )
+        sweep_sessions(&sessions_dir, &archive, &protected, &policy, SystemTime::now())
     })
     .await
     .context("the archive sweep task failed")??;
