@@ -2477,10 +2477,18 @@ class FactoryHelpTest(unittest.TestCase):
 
         # The worked examples bound their emitted payloads — captured answers
         # are capped previews (~160-200 chars), so an unbounded json payload
-        # would truncate at the cap and fail to bind.
+        # would truncate at the cap, fail to capture, and fail its state.
         self.assertIn('findings": ["at most three one-line findings"]', doc)
         self.assertIn("capped at the eight most relevant", doc)
-        self.assertIn("an unbounded payload truncates at the cap and fails to bind", flat)
+        self.assertIn(
+            "an unbounded payload truncates at the cap, fails to capture, "
+            "and fails the producing state",
+            flat,
+        )
+        # The output-capture contract: a declared port that never binds
+        # fails the producing entry as a task failure.
+        self.assertIn("is retried once and then FAILS the producing", flat)
+        self.assertIn("the answer stays preserved under `needs_verify`", flat)
 
         # The Discovery section ships the machine library as present (this
         # branch merges it): the bundled location, the seed names, the CLI
@@ -3562,7 +3570,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual([call["prompt"] for call in self.host.spawn_calls("b")], ["Process 7."])
 
     @async_test
-    async def test_bad_json_input_fails_node_without_spawning(self) -> None:
+    async def test_unparseable_output_fails_the_producer_and_never_spawns_the_dependent(self) -> None:
+        # a's declared json output never parses: the capture failure fails a
+        # itself (defect C) instead of settling it valueless, so b's required
+        # input over the errored source fails at binding without ever
+        # spawning; c still ran and finished, so the run completes but
+        # reports failed.
         self.host.outcomes["a"] = {"status": "done", "answer": "not json at all"}
         self.store_factory(
             {
@@ -3581,12 +3594,13 @@ class FactoryExecutorTest(_ExecutorTestCase):
         )
         result = await self.start()
         status = await self.settle(result)
-        # b failed at binding (continue policy): never spawned, marked error;
-        # c still ran and finished, so the run completes but reports failed.
         self.assertEqual(self.host.spawn_calls("b"), [])
+        a = self.node_status(status, "a")
+        self.assertEqual(a["status"], "error")
+        self.assertIn("no JSON object containing output 'result'", a["error"])
         b = self.node_status(status, "b")
         self.assertEqual(b["status"], "error")
-        self.assertIn("no JSON object containing output", b["error"])
+        self.assertIn("is unavailable (latest settle status 'error')", b["error"])
         self.assertEqual(self.node_status(status, "c")["status"], "done")
         self.assertEqual(status["state"], "failed")
 
@@ -3802,6 +3816,61 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # The null was captured and bound: the dependent renders the JSON
         # null, not the no-value sentinel path.
         self.assertIn("- data: null", self.host.spawn_calls("dep")[0]["prompt"])
+
+    @async_test
+    async def test_uncaptured_output_fails_the_producing_entry_instead_of_the_dependent(self) -> None:
+        # Defect C: a done settle whose declared output never bound (no
+        # parseable value after the one capture retry) used to settle the
+        # entry done and queue the settle -- the dependent's required input
+        # then failed over the valueless source, spending its entry budget
+        # on the producer's failure. The capture failure now fails the
+        # PRODUCING entry as a task failure at the origin: retries, then
+        # failure_policy, apply; no settle is queued, so escalate pauses at
+        # the producer and the dependent never enters.
+        self.host.outcomes["setup"] = {"status": "done", "answer": "no json here"}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "setup",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "config", "type": "json"}],
+                        "retries": 1,
+                    },
+                    {
+                        "id": "build",
+                        "subagent": "worker",
+                        "inputs": [{"name": "config", "type": "json", "from": "setup.config"}],
+                        "max_entries": 4,
+                    },
+                ],
+                "transitions": [{"from": "setup", "to": "build"}],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+        self.assertEqual(paused["state"], "paused")
+        setup = self.state_report(paused, "setup")
+        self.assertEqual(setup["status"], "error")
+        self.assertIn("config", setup["error"])
+        # the failed capture spent the one retry re-spawning the same
+        # prompt; the second capture failure is permanent
+        self.assertEqual(len(self.host.spawn_calls("setup")), 2)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+        self.assertEqual(len(self.all_events_of(result, "output_capture_failed")), 2)
+        # the dependent never entered on the unbound required input
+        self.assertEqual(self.state_report(paused, "build")["entries_used"], 0)
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.assertEqual(self.all_events_of(result, "transition_fired"), [])
+        # the settled answer is preserved as provisional, so the permanent
+        # failure surfaces needs_verify with the answer for review
+        self.assertEqual(paused["needs_verify"], ["setup"])
+        self.assertIn("no json here", setup["entries"][0]["provisional_answer"])
+        # the paused milestone tells the operator resume re-admits the entry
+        paused_notice = next(n for n in self.host.notices if n["kind"] == "paused")
+        self.assertIn("state setup failed", paused_notice["detail"])
+        self.assertIn("re-admit", paused_notice["detail"])
 
     @async_test
     async def test_capture_failure_names_the_binding_cap_and_records_the_event(self) -> None:
@@ -6090,7 +6159,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
     async def test_paused_run_status_carries_the_last_error_and_remedy(self) -> None:
         # M6: a paused run carries the LAST failed admission/bind error and
         # a one-line remedy in its status payload — no root-side
-        # archaeology over pending-state lists to learn what failed.
+        # archaeology over pending-state lists to learn what failed. The
+        # pause here is src's own failed output capture (defect C): the
+        # failure lands at the producer, before the dependent's bind.
         self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
         self.store_machine(
             {
@@ -6116,11 +6187,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(status["state"], "paused")
         self.assertEqual(
             status["pause_reason"],
-            "input 'data': no JSON object containing output 'data' in the upstream answer",
+            "no JSON object containing output 'data' in the upstream answer",
         )
-        self.assertIn("state 'dep' failed", status["last_error"])
+        self.assertIn("state 'src' failed", status["last_error"])
         self.assertIn("no JSON object containing output 'data'", status["last_error"])
         self.assertIn(f"rlm.factory.resume('{result['run_id']}')", status["remedy"])
+        self.assertEqual(status["needs_verify"], ["src"])
 
     @async_test
     async def test_machine_required_input_over_an_errored_source_fails_the_dependent_entry(self) -> None:
@@ -6169,10 +6241,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
     @async_test
     async def test_machine_optional_input_over_a_settled_source_with_no_captured_value_binds_the_null_sentinel(self) -> None:
         # Review finding (PR #3199), second no-value condition: the source
-        # settled done but captured no value for the declared port (an
-        # empty answer). The optional dependent proceeds on the null
-        # sentinel; only the required dependent over the same valueless
-        # settle fails its entry.
+        # settled but captured no value for the declared port (an empty
+        # answer). The optional dependent proceeds on the null sentinel;
+        # only the required dependent over the same valueless settle fails
+        # its entry.
         self.host.outcomes["src"] = {"status": "done", "answer": ""}
         self.store_machine(
             {
@@ -6208,6 +6280,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "failed")
+        # the empty answer never captured the text port, so the capture
+        # failure failed the source entry itself (defect C) instead of
+        # settling it valueless
+        src = self.state_report(status, "src")
+        self.assertEqual([entry["status"] for entry in src["entries"]], ["error"])
+        self.assertIn("captured no value", src["entries"][0]["error"])
         opt = self.state_report(status, "opt")
         self.assertEqual(opt["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
@@ -6216,7 +6294,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(req["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
         self.assertIn(
-            "input 'go' from state 'src' has no captured output 'go'",
+            "input 'go' from state 'src' is unavailable (latest settle status 'error')",
             req["entries"][0]["error"],
         )
         self.assertEqual(self.host.spawn_calls("req"), [])
@@ -6224,10 +6302,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
     @async_test
     async def test_machine_optional_input_over_a_failed_json_capture_binds_the_null_sentinel(self) -> None:
         # Review finding (PR #3199), third no-value condition: the source
-        # settled done, declared a json port, but its answer never parsed
-        # for that port (a JSON capture failure recorded on the settle).
-        # The optional dependent proceeds on the null sentinel; only the
-        # required dependent over the same failed capture fails its entry.
+        # settled, declared a json port, but its answer never parsed for
+        # that port (a JSON capture failure). The optional dependent
+        # proceeds on the null sentinel; only the required dependent over
+        # the same failed capture fails its entry.
         self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
         self.store_machine(
             {
@@ -6263,6 +6341,13 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "failed")
+        # the failed json capture failed the source entry itself (defect C),
+        # and its settled answer stays preserved for review
+        src = self.state_report(status, "src")
+        self.assertEqual([entry["status"] for entry in src["entries"]], ["error"])
+        self.assertIn("no JSON object containing output 'data'", src["entries"][0]["error"])
+        self.assertEqual(status["needs_verify"], ["src"])
+        self.assertIn("no json here", src["entries"][0]["provisional_answer"])
         opt = self.state_report(status, "opt")
         self.assertEqual(opt["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
@@ -6271,7 +6356,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(req["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
         self.assertIn(
-            "input 'data': no JSON object containing output 'data' in the upstream answer",
+            "input 'data' from state 'src' is unavailable (latest settle status 'error')",
             req["entries"][0]["error"],
         )
         self.assertEqual(self.host.spawn_calls("req"), [])

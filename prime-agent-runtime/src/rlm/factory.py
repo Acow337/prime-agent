@@ -1369,6 +1369,9 @@ class _NodeInstance:
     # count on it staying monotonic).
     infra_respawned: bool = False  # the instance's one free worker-death
     # respawn is spent; a resume's re-admission grants a fresh one.
+    capture_failed: bool = False  # this settle completed its entry but a
+    # declared output never bound; the preserved answer stays provisional
+    # until the capture is redone or the entry fails permanently.
     rate_limit_streak: int = 0  # consecutive rate-limited admissions in the
     # control loop's backoff path; a successful spawn resets it, and
     # BACKOFF_MAX_ATTEMPTS in a row fails the node. An admission-phase
@@ -1661,8 +1664,9 @@ class FactoryExecutor:
             "usage": self._usage_report(run),
         }
         # The M4 oversight signal: every state whose latest terminal entry
-        # carried a provisional answer (a child exit) needs verification —
-        # root-visible without ledger archaeology.
+        # carried a provisional answer (a child exit, or a settle whose
+        # declared output never bound) needs verification — root-visible
+        # without ledger archaeology.
         needs_verify = [
             state_id
             for state_id in run.order
@@ -1785,6 +1789,7 @@ class FactoryExecutor:
                     instance.error = None
                     instance.answer = None
                     instance.provisional = False
+                    instance.capture_failed = False
                     instance.rate_limit_streak = 0
                     instance.retry_base = instance.attempt
                     instance.infra_respawned = False
@@ -2910,6 +2915,7 @@ class FactoryExecutor:
             if exit_answer:
                 instance.answer = exit_answer
                 instance.provisional = True
+                instance.capture_failed = False  # the preserved text is an exit now
             # Child failures retry (same rendered prompt, attempts+1) while
             # attempts remain; then the entry failure_policy applies.
             await self._apply_instance_failure(run, state, entry, instance, child_reason, retry=True)
@@ -2938,6 +2944,7 @@ class FactoryExecutor:
             (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
         )
         instance.provisional = False  # a real settle supersedes any exit capture
+        instance.capture_failed = False
         self._event(
             run,
             "settled",
@@ -2958,9 +2965,24 @@ class FactoryExecutor:
                 stage="arrived",
             )
         if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
-            entry.status = "done"
             entry.answer = self._entry_answer(entry)
-            await self._capture_outputs(run, state, entry)
+            capture_failure = await self._capture_outputs(run, state, entry)
+            if capture_failure is not None:
+                # A declared output that never bound after the capture
+                # retry is the producing entry's task failure, not a silent
+                # valueless settle: no settle is queued (a dependent never
+                # enters on an unbound required input), retries then
+                # failure_policy apply, and the answer stays provisional
+                # for needs_verify if the entry fails permanently.
+                instance.provisional = True
+                instance.capture_failed = True
+                await self._apply_instance_failure(
+                    run, state, entry, instance, capture_failure, retry=True
+                )
+                return
+            if entry.status != "running":
+                return  # a stop()/fail_fast pass claimed the entry mid-capture
+            entry.status = "done"
             self._queue_settle(run, state, entry)
 
     async def _recheck_infra_death(self, instance: _NodeInstance, result: Any) -> Any:
@@ -3032,6 +3054,7 @@ class FactoryExecutor:
         instance.error = None
         instance.answer = None
         instance.provisional = False
+        instance.capture_failed = False
         reason = result.error or "child worker unreachable"
         self._event(
             run,
@@ -3092,7 +3115,7 @@ class FactoryExecutor:
         entry.outputs = outputs
         entry.output_errors = errors
 
-    async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
+    async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> str | None:
         """Capture the settle's outputs, retrying the capture once.
 
         A settle can race the child's answer capture on the host side (a
@@ -3103,7 +3126,9 @@ class FactoryExecutor:
         re-collected ONCE (a settled child keeps its result until deleted)
         and the capture re-runs over the refreshed answers; a port that
         still binds nothing records a deterministic capture failure in the
-        ledger (``output_capture_failed``) instead of passing silently.
+        ledger (``output_capture_failed``) and fails the entry -- its
+        joined port errors return as the task-failure reason, ``None``
+        when every declared port bound a value.
         """
         self._capture_ports(state, entry)
         declared = state.spec.get("outputs") or []
@@ -3114,10 +3139,11 @@ class FactoryExecutor:
         if not declared or not any(
             out.get("name") not in (entry.outputs or {}) for out in declared
         ):
-            return  # every declared port bound a value
+            return None  # every declared port bound a value
         refreshed = await self._refresh_entry_answers(run, state, entry)
         if refreshed:
             self._capture_ports(state, entry)
+        failures = []
         for out in declared:
             name = out.get("name")
             error = (entry.output_errors or {}).get(name)
@@ -3133,6 +3159,8 @@ class FactoryExecutor:
                     error=error,
                     detail=f"output {name!r} did not bind after one capture retry",
                 )
+                failures.append(error)
+        return "; ".join(failures) or None
 
     async def _refresh_entry_answers(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> bool:
         """Re-collect the entry's settled children once; refresh any longer
@@ -3243,23 +3271,27 @@ class FactoryExecutor:
             # status-level needs_verify signal hand the operator the
             # revival-race decision instead of a silent drop.
             entry.needs_verify = True
-            # A worker whose death the executor already verified and
-            # re-spawned once is not a mystery for the parent to re-verify
-            # remotely: what the mark preserves is the respawned attempt's
-            # last words after its own death.
+            # The detail names what the mark preserves: a settle whose
+            # declared output never bound, a respawned worker's last words
+            # after its own death, or a plain child exit. The capture mark
+            # is checked first: ``infra_respawned`` outlives its respawn,
+            # so a respawned attempt that later settles and fails capture
+            # preserves the capture's provenance, not the old death's.
             respawned = any(instance.infra_respawned for instance in entry.instances)
-            self._event(
-                run,
-                "needs_verify",
-                node=state.state_id,
-                entry=entry.index,
-                detail=(
+            capture_failed = any(instance.capture_failed for instance in entry.instances)
+            if capture_failed:
+                detail = (
+                    "output capture failed; the settled answer is preserved as a "
+                    "provisional answer - fix the declared output or verify by hand"
+                )
+            elif respawned:
+                detail = (
                     "worker verified dead by the executor after its automatic respawn; "
                     "last assistant text preserved as a provisional answer"
-                    if respawned
-                    else "child exit captured a provisional answer - verify the remote state"
-                ),
-            )
+                )
+            else:
+                detail = "child exit captured a provisional answer - verify the remote state"
+            self._event(run, "needs_verify", node=state.state_id, entry=entry.index, detail=detail)
         if entry.status in TERMINAL_ENTRY_STATUSES:
             return  # the policy already ran for this entry
         policy = state.spec.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT)
@@ -4941,7 +4973,8 @@ parent session after the run ends. Both worked examples bound their
 emitted payloads in the prompt — a capped findings list here, a capped
 file list in the review-sweep example — because the executor's capture
 cap still bounds very large payloads: an unbounded payload truncates at
-the cap and fails to bind.
+the cap, fails to capture, and fails the producing state through its
+`retries` and `failure_policy` instead of settling valueless.
 
 ## Authoring reference
 
@@ -4968,11 +5001,17 @@ the cap and fails to bind.
   `{input_name}` placeholders (one pass; inputs without a placeholder are
   appended in a trailing `## Inputs` section). A required input whose source
   has not settled yet keeps the entry pending; over a settled source that
-  offers no value (an errored settle, a port the settle captured no value
-  for, or a JSON capture failure) it fails the dependent entry, while
+  offers no value (an errored settle, or a settle that captured nothing for
+  the port) it fails the dependent entry, while
   `"optional": true` binds a null sentinel in every no-value case (a
   source that offers no value is not a value, so the dependent that
-  declared the input optional proceeds). A required self-input is
+  declared the input optional proceeds). A state's own declared outputs
+  capture from its settle's full answer: a declared port that binds no
+  value — no parseable fenced JSON for it, or a payload past the
+  executor's capture cap — is retried once and then FAILS the producing
+  entry as a task failure (`retries`, then `failure_policy`, apply, and
+  the answer stays preserved under `needs_verify`), so a valueless
+  settle never reaches a dependent's bind. A required self-input is
   rejected at validation —
   `state X input 'name' cannot require itself: mark the self-input optional
   - a required one can never bind on the state's first entry` — while an
@@ -5107,12 +5146,12 @@ status["events"]   # trailing ledger: spawned, settled, answer_captured,
                    # transition_fired, node_error, milestone, ...
 status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, running,
                     # transitions_fired
-status["needs_verify"]  # (when set) states whose child EXITED carrying a
-                        # provisional answer; worker deaths are
-                        # liveness-checked and re-spawned by the executor
-                        # first, so the mark only remains for exits that
-                        # still carry text - the entry row carries the
-                        # provisional_answer preview
+status["needs_verify"]  # (when set) states whose entry keeps a
+                        # provisional answer: a child exit with text, or a
+                        # settled answer whose declared output failed to
+                        # capture (worker deaths are liveness-checked and
+                        # re-spawned by the executor first) - the entry row
+                        # carries the provisional_answer preview
 status["pause_reason"]  # (paused) why the run paused; with "last_error" (the
 status["last_error"]    # last admission/bind failure) and a one-line "remedy"
 ```
