@@ -109,6 +109,38 @@ pub struct RlmSpawnInput {
     pub name: String,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct FamilyTopology {
+    pub(crate) edges: Vec<RlmLedgerEdge>,
+    pub(crate) canonical_children: Vec<PathBuf>,
+    pub(crate) parent_by_child: HashMap<PathBuf, PathBuf>,
+    pub(crate) children_by_parent: HashMap<PathBuf, Vec<usize>>,
+}
+
+impl FamilyTopology {
+    pub(crate) fn descendants(&self, root: &Path) -> Vec<usize> {
+        let mut visited = HashSet::from([root.to_path_buf()]);
+        let mut queue = vec![root.to_path_buf()];
+        let mut descendants = Vec::new();
+        while let Some(parent) = queue.pop() {
+            for at in self
+                .children_by_parent
+                .get(&parent)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                let child = &self.canonical_children[*at];
+                if !visited.insert(child.clone()) {
+                    continue;
+                }
+                descendants.push(*at);
+                queue.push(child.clone());
+            }
+        }
+        descendants
+    }
+}
+
 /// The per-sessions-dir spawn ledger. Reads are guarded by a file stat snapshot; a missing ledger
 /// is seeded from the legacy registries (seed failure degrades to empty, never fail-closed).
 pub struct RlmSpawnLedger {
@@ -487,6 +519,38 @@ impl RlmSpawnLedger {
             .deleted_bucket
             .get_or_init(|| self.fold_deleted_descendant_usage(&state.edges))
             .clone())
+    }
+
+    pub(crate) fn family_topology(&self) -> Result<Arc<FamilyTopology>> {
+        self.seed_once()?;
+        let state = self.replay_cached()?;
+        Ok(Arc::clone(state.family_topology.get_or_init(|| {
+            Arc::new(self.build_family_topology(&state))
+        })))
+    }
+
+    fn build_family_topology(&self, state: &ReplayState) -> FamilyTopology {
+        let mut resolver = LivePathResolver::new(
+            self.agent_dir.clone(),
+            self.canonical_sessions_dir.clone(),
+            &state.artifact_index,
+        );
+        let mut topology = FamilyTopology {
+            edges: resolve_live_edges(state, &mut resolver),
+            ..Default::default()
+        };
+        for edge in &topology.edges {
+            let child = canonical_session_path(Path::new(&edge.child));
+            let parent = canonical_session_path(Path::new(&edge.parent));
+            topology
+                .children_by_parent
+                .entry(parent.clone())
+                .or_default()
+                .push(topology.canonical_children.len());
+            topology.canonical_children.push(child.clone());
+            topology.parent_by_child.insert(child, parent);
+        }
+        topology
     }
 
     fn fold_deleted_descendant_usage(

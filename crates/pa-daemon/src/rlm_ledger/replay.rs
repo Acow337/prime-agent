@@ -158,6 +158,7 @@ pub(super) struct ReplayState {
     pub(super) index: HashMap<String, usize>,
     pub(super) artifact_index: OnceLock<HashMap<String, PathBuf>>,
     pub(super) deleted_bucket: OnceLock<HashMap<String, crate::session_usage::SessionUsageSummary>>,
+    pub(super) family_topology: OnceLock<std::sync::Arc<crate::rlm_ledger::FamilyTopology>>,
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {
