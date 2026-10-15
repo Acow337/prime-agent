@@ -1,8 +1,9 @@
 //! Persistent `bash()` shells across the daemon: a shell started with
 //! `bash(..., persistent=True)` survives the daemon's shutdown (it is neither
 //! journaled for the orphan reaper nor killed by the kernel's exit hook), shows
-//! on the INACTIVE session's saved-catalog row, and dies with the session's
-//! delete. The live-kernel test skips (with a note) without a kernel install.
+//! on the INACTIVE session's saved-catalog row, is re-attached by the kernel of
+//! the reopened session, and dies with the session's delete. The live-kernel
+//! test skips (with a note) without a kernel install.
 #![cfg(target_os = "linux")]
 // Narrowing casts sit at OS boundaries (pid) where the kernel bounds the values.
 #![allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -227,7 +228,7 @@ fn inactive_session_row_lists_only_its_live_persistent_shells() {
 }
 
 #[test]
-fn persistent_shell_survives_daemon_shutdown_and_dies_with_session_delete() {
+fn persistent_shell_survives_daemon_shutdown_is_reattached_and_dies_with_session_delete() {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -236,21 +237,13 @@ fn persistent_shell_survives_daemon_shutdown_and_dies_with_session_delete() {
     let sessions_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     let receipt = dir.path().join("pid.txt");
-    let cell = format!(
-        "h = bash('sleep 600', persistent=True)\nopen({:?}, 'w').write(str(h.pid))\n",
-        receipt.to_string_lossy()
+    let script = write_faux_script(
+        &dir.path().join("faux.json"),
+        &format!(
+            "h = bash('echo hi; sleep 600', persistent=True)\nopen({:?}, 'w').write(str(h.pid))\n",
+            receipt.to_string_lossy()
+        ),
     );
-    let script = dir.path().join("faux.json");
-    std::fs::write(
-        &script,
-        json!({ "engine": "faux", "responses": [
-            { "content": [{ "type": "toolCall", "name": "python_repl",
-                            "arguments": { "code": cell } }] },
-            { "text": "done" },
-        ] })
-        .to_string(),
-    )
-    .expect("write faux script");
 
     let baseline = kernel_pids();
     let socket = dir.path().join("supervisor.sock");
@@ -302,21 +295,74 @@ fn persistent_shell_survives_daemon_shutdown_and_dies_with_session_delete() {
         "the persistent shell died with the daemon"
     );
 
-    // A fresh daemon lists the inactive session's shell and kills it on delete.
+    // A fresh daemon lists the inactive session's shell.
     let socket = dir.path().join("supervisor-2.sock");
     let _daemon = spawn_supervisor(&socket, &agent_dir, Some(&kernel_python));
     let mut client = Client::connect(&socket);
     let row = saved_row(&mut client, "l1", &sessions_dir, &session_id);
     assert_eq!(row["persistentShells"][0]["pid"], pid);
+
+    // Reopening the session boots a new kernel, which re-attaches the shell.
+    let reattached = dir.path().join("reattached.json");
+    let script = write_faux_script(
+        &dir.path().join("faux-reopen.json"),
+        &format!(
+            "import json\nfrom rlm import persistent_shells\njson.dump([[h.pid, h.running, h.output()] for h in persistent_shells()], open({:?}, 'w'))\n",
+            reattached.to_string_lossy()
+        ),
+    );
+    let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
+    let reopened = client.request(
+        "c2",
+        &json!({ "type": "create", "sessionPath": session_file.to_string_lossy(), "config": {
+            "cwd": dir.path().to_string_lossy(),
+            "sessionDir": sessions_dir.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        } }),
+    );
+    let active_id = reopened["data"]["activeSessionId"]
+        .as_str()
+        .or_else(|| reopened["data"]["id"].as_str())
+        .expect("active session id")
+        .to_string();
+    client.request(
+        "p2",
+        &json!({ "type": "prompt", "activeSessionId": active_id, "message": "find it" }),
+    );
+    client.request(
+        "i2",
+        &json!({ "type": "wait_for_idle", "activeSessionId": active_id }),
+    );
+    let handles: Value = serde_json::from_str(
+        &std::fs::read_to_string(&reattached).expect("the reopened kernel wrote its handles"),
+    )
+    .expect("parse handles");
+    assert_eq!(handles, json!([[pid, true, "hi\n"]]));
+
+    // Close the session, then delete it: the delete kills the shell.
+    client.request("k1", &json!({ "type": "kill", "activeSessionId": active_id }));
     client.request(
         "d1",
-        &json!({ "type": "delete_saved_session",
-                 "sessionPath": sessions_dir.join(format!("{session_id}.jsonl")).to_string_lossy() }),
+        &json!({ "type": "delete_saved_session", "sessionPath": session_file.to_string_lossy() }),
     );
     assert!(
         !group_alive(pid),
         "the session delete left its persistent shell running"
     );
+}
+
+fn write_faux_script(path: &Path, cell: &str) -> PathBuf {
+    std::fs::write(
+        path,
+        json!({ "engine": "faux", "responses": [
+            { "content": [{ "type": "toolCall", "name": "python_repl",
+                            "arguments": { "code": cell } }] },
+            { "text": "done" },
+        ] })
+        .to_string(),
+    )
+    .expect("write faux script");
+    path.to_path_buf()
 }
 
 /// Every live `python -m rlm.repl` kernel pid on the box.
