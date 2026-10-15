@@ -238,7 +238,7 @@ impl ProviderAuth {
             Ok(Ok(())) => outcome,
             _ => match outcome {
                 ProviderAuthOutcome::Status(message) => ProviderAuthOutcome::Status(format!(
-                    "{message} Warning: running sessions may need /reload to use this credential."
+                    "{message} Warning: shut down and restart Prime Agent to update running sessions."
                 )),
                 other => other,
             },

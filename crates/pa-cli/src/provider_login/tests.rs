@@ -317,6 +317,17 @@ async fn a_stored_web_search_key_pairs_with_the_logout_row() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_prime_logout_waits_for_worker_refresh_ack_before_reporting_success() {
+    prime_logout_waits_for_ack(true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_logout_notification_requires_a_full_restart() {
+    prime_logout_waits_for_ack(false).await;
+}
+
+#[cfg(unix)]
+async fn prime_logout_waits_for_ack(ack_success: bool) {
     use std::io::{BufRead, Write};
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
@@ -348,7 +359,7 @@ async fn a_prime_logout_waits_for_worker_refresh_ack_before_reporting_success() 
             writer,
             "{}",
             serde_json::json!({
-                "type": "response", "id": id, "command": "auth_changed", "success": true
+                "type": "response", "id": id, "command": "auth_changed", "success": ack_success
             })
         )
         .expect("notification ack");
@@ -370,10 +381,20 @@ async fn a_prime_logout_waits_for_worker_refresh_ack_before_reporting_success() 
         "logout must wait for all workers to refresh"
     );
     ack_tx.send(()).expect("ack release");
-    assert!(matches!(
-        login.await.expect("logout task"),
-        ProviderAuthOutcome::Status(_)
-    ));
+    let outcome = login.await.expect("logout task");
+    match outcome {
+        ProviderAuthOutcome::Status(message) if ack_success => {
+            assert!(
+                !message.contains("Warning:"),
+                "successful refresh: {message}"
+            );
+        }
+        ProviderAuthOutcome::Status(message) => {
+            assert!(message.contains("Warning: shut down and restart Prime Agent"));
+            assert!(!message.contains("/reload"));
+        }
+        other => panic!("expected logout status, got {other:?}"),
+    }
     server.join().expect("daemon thread");
     assert!(pa_core::auth::AuthStorage::create(&agent_dir)
         .get_all()

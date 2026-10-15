@@ -39,7 +39,7 @@ impl Supervisor {
             return response_failure(
                 Some(command_id),
                 type_name,
-                &format!("Could not update {failures} of {} running sessions. Run /reload in the affected session.", residents.len()),
+                &format!("Could not update {failures} of {} running sessions. Shut down and restart Prime Agent to update running sessions.", residents.len()),
                 None,
             );
         }
