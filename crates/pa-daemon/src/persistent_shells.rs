@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 const REGISTRY_FILE: &str = "persistent-shells.json";
 const FILES_DIR: &str = "persistent-shells";
-/// How long a TERMed shell may exit on its own before its group is KILLed.
+/// How long a shell may exit on its own after SIGTERM before its group gets SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
 /// The kernel activity rows cap the command at the same length.
 const COMMAND_CAP: usize = 512;
@@ -122,8 +122,11 @@ pub(crate) mod test_support {
             "command": "sleep 60",
             "startedAt": "2026-01-01T00:00:00+00:00",
         }] });
-        std::fs::write(artifact_dir.join(super::REGISTRY_FILE), registry.to_string())
-            .expect("write registry");
+        std::fs::write(
+            artifact_dir.join(super::REGISTRY_FILE),
+            registry.to_string(),
+        )
+        .expect("write registry");
         child
     }
 }

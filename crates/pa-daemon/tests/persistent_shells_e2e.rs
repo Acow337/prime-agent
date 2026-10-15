@@ -291,10 +291,16 @@ fn persistent_shell_survives_daemon_shutdown_and_dies_with_session_delete() {
     }
     let deadline = Instant::now() + Duration::from_secs(90);
     while kernel_pids().iter().any(|pid| !baseline.contains(pid)) {
-        assert!(Instant::now() < deadline, "the session kernel outlived shutdown");
+        assert!(
+            Instant::now() < deadline,
+            "the session kernel outlived shutdown"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(group_alive(pid), "the persistent shell died with the daemon");
+    assert!(
+        group_alive(pid),
+        "the persistent shell died with the daemon"
+    );
 
     // A fresh daemon lists the inactive session's shell and kills it on delete.
     let socket = dir.path().join("supervisor-2.sock");
@@ -307,7 +313,10 @@ fn persistent_shell_survives_daemon_shutdown_and_dies_with_session_delete() {
         &json!({ "type": "delete_saved_session",
                  "sessionPath": sessions_dir.join(format!("{session_id}.jsonl")).to_string_lossy() }),
     );
-    assert!(!group_alive(pid), "the session delete left its persistent shell running");
+    assert!(
+        !group_alive(pid),
+        "the session delete left its persistent shell running"
+    );
 }
 
 /// Every live `python -m rlm.repl` kernel pid on the box.
