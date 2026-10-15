@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from review_at_completion_parity import (
-    CASES, children_visible, close_terminal, compare, completion_rows, frame,
+    CASES, children_visible, close_terminal, compare, completion_rows, discover_direct, frame,
 )
 from review_dock_screen import DockScreen
 
@@ -19,6 +19,36 @@ def observations():
 
 
 class EvidenceGuards(unittest.TestCase):
+    def discovery(self, tag, argv, ownership=True):
+        files = {'environ': Mock(), 'cmdline': Mock()}
+        files['environ'].read_bytes.return_value = b'PA_GOAL_FIXTURE_ID=' + tag + b'\0'
+        files['cmdline'].read_bytes.return_value = argv
+
+        class Entry:
+            name = '42'
+
+            def __truediv__(self, key):
+                return files[key]
+
+        scope = Mock(root='/case', direct={}, targets={})
+        scope.ownership.return_value = ownership
+        with patch('review_at_completion_parity.Path') as proc, \
+                patch('review_at_completion_parity.process_identity', return_value=('proc:10', 'S')):
+            proc.return_value.iterdir.return_value = [Entry()]
+            discover_direct(scope, ['/binary', '--daemon-socket', '/case/fixture.sock'])
+        return scope
+
+    def test_constructor_recovery_requires_exact_tag_and_argv(self):
+        argv = b'/binary\0--daemon-socket\0/case/fixture.sock\0'
+        self.assertEqual(self.discovery(b'/case', argv).targets, {42: 'proc:10'})
+        self.assertEqual(self.discovery(b'/other-case', argv).targets, {})
+        self.assertEqual(self.discovery(b'/case', b'/other-binary\0').targets, {})
+
+    def test_reused_identity_is_rejected_after_constructor_recovery(self):
+        argv = b'/binary\0--daemon-socket\0/case/fixture.sock\0'
+        scope = self.discovery(b'/case', argv, ownership=False)
+        self.assertEqual((scope.targets, scope.direct), ({}, {}))
+
     def test_editor_token_does_not_count_as_a_child_menu(self):
         text = '│ @"dir with spaces/only_child.rs"\nmodel · 0 tokens'
         self.assertFalse(children_visible(text))
@@ -84,7 +114,8 @@ class EvidenceGuards(unittest.TestCase):
         scope.live.return_value = []
         server = Mock(commands=[], errors=[])
         observed = {}
-        with patch('review_at_completion_parity.time.monotonic', side_effect=[0, 20]), \
+        with patch('review_at_completion_parity.discover_direct'), \
+                patch('review_at_completion_parity.time.monotonic', side_effect=[0, 20]), \
                 patch('review_at_completion_parity.os.close'):
             with self.assertRaisesRegex(AssertionError, 'ordinary TUI exit'):
                 close_terminal(terminal, scope, server, observed)
@@ -97,9 +128,23 @@ class EvidenceGuards(unittest.TestCase):
         scope = Mock(targets={})
         server = Mock(commands=[], errors=[])
         observed = {}
-        with patch('review_at_completion_parity.os.close', side_effect=OSError('close failed')):
+        with patch('review_at_completion_parity.discover_direct'), \
+                patch('review_at_completion_parity.os.close', side_effect=OSError('close failed')):
             with self.assertRaisesRegex(AssertionError, 'PTY close'):
                 close_terminal(terminal, scope, server, observed)
+        self.assertFalse(observed['cleanup_verified'])
+        server.close.assert_called_once()
+
+    def test_constructor_failure_still_discovers_and_rejects_live_owned_processes(self):
+        scope = Mock(targets={})
+        scope.live.return_value = []
+        scope.wait_gone.side_effect = AssertionError('owned child survived')
+        server = Mock(commands=[], errors=[])
+        observed = {}
+        with patch('review_at_completion_parity.discover_direct') as discover:
+            with self.assertRaisesRegex(AssertionError, 'owned child survived'):
+                close_terminal(None, scope, server, observed)
+        discover.assert_called_once()
         self.assertFalse(observed['cleanup_verified'])
         server.close.assert_called_once()
 

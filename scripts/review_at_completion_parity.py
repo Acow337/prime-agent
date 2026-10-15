@@ -23,7 +23,7 @@ from review_dock_screen import DockScreen
 from review_draft_disconnect_parity import (
     Supervisor, Terminal, digest, env_for, TS_ARCHIVE_SHA256, TS_SOURCE_COMMIT,
 )
-from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
+from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish, process_identity
 
 DIRECTORY = 'dir with spaces'
 CHILD = 'only_child.rs'
@@ -67,6 +67,31 @@ def stable_frame(terminal, server, label, predicate):
     return frame(terminal)
 
 
+def discover_direct(scope, command):
+    """Recover an owned spawn even if its PTY constructor failed before assignment."""
+    expected = [str(arg).encode() for arg in command]
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            identity, state = process_identity(pid)
+            if state == 'Z':
+                continue
+            env = dict(item.split(b'=', 1) for item in (entry / 'environ').read_bytes().split(b'\0') if b'=' in item)
+            argv = (entry / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+            if env.get(TAG.encode()) != str(scope.root).encode() or argv != expected:
+                continue
+            scope.direct[pid] = (identity, expected)
+            scope.targets[pid] = identity
+            if not scope.ownership(pid, identity):
+                scope.direct.pop(pid, None)
+                scope.targets.pop(pid, None)
+        except (OSError, ValueError):
+            continue
+    scope.discover()
+
+
 def discover_hello(binary, kind, root, observed):
     """Learn the real schema; graceful ACK + close + exit, with fallback RED."""
     root.mkdir(parents=True)
@@ -86,6 +111,7 @@ def discover_hello(binary, kind, root, observed):
             assert hello.get('schemaId'), 'actual daemon greeting lacks schema identity'
             observed['hello'] = hello
         finally:
+            discover_direct(scope, command)
             finish(scope, client, process, observed)
             observed['daemon_log'] = (root / 'hello.log').read_text(errors='replace')
     assert observed.get('cleanup_verified'), observed
@@ -97,13 +123,14 @@ def close_terminal(terminal, scope, server, observed):
     observed['cleanup_verified'] = False
     errors = []
     try:
+        discover_direct(scope, [str(scope.binary), '--daemon-socket', str(server.path)])
         if terminal is not None:
             terminal.send('\x15\x0b\x04')  # Delete both sides of cursor, Ctrl+D on empty input.
             deadline = time.monotonic() + 12
             while terminal.process.poll() is None and time.monotonic() < deadline:
                 terminal.pump()
             assert terminal.process.poll() == 0, 'ordinary TUI exit did not complete cleanly'
-            scope.wait_gone(3)
+        scope.wait_gone(3)
     except Exception as error:
         errors.append(str(error))
         observed['fallback_signals'] = []
