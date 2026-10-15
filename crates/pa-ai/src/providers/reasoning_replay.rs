@@ -11,27 +11,31 @@ const REPLAY_RECOVERY: &str = "Switch back to a compatible provider, model and a
 
 pub(crate) const CLAUDE_BINDING_DIAGNOSTICS_BETA: &str = "thinking-binding-controls-2026-08-01";
 
-/// A Claude-native wire bridge; this does not assert model/account/prefix readability.
-/// Those bindings remain authoritative at the provider and must not be forged or relaxed.
-pub(crate) fn is_claude_bridge(source: &AssistantMessage, target: &Model) -> bool {
-    // Bedrock application-profile ARNs omit the underlying model name. Native signed or
-    // redacted reasoning is the transferable representation; let the Claude provider
-    // validate its actual cryptographic/model/account binding instead of guessing the ID.
-    let native_bedrock_payload = source.api == "bedrock-converse-stream"
+fn has_native_bedrock_reasoning(source: &AssistantMessage) -> bool {
+    source.api == "bedrock-converse-stream"
         && source.content.iter().any(|block| {
             matches!(block, AssistantContent::Thinking(thinking)
             if thinking.redacted.unwrap_or(false)
                 || thinking.thinking_signature.as_deref().is_some_and(|signature|
                     !signature.trim().is_empty() && !REASONING_FIELDS.contains(&signature)))
-        });
-    let source_is_claude = source.api == "anthropic-messages" || native_bedrock_payload;
-    let target_is_claude = matches!(
-        target.api.as_str(),
+        })
+}
+
+/// Native state produced by this exact Bedrock destination is replay provenance for
+/// opaque profile identifiers. It establishes representation support, not cryptographic
+/// model/account/prefix readability; those bindings remain authoritative at the provider.
+pub(crate) fn is_claude_replay_destination(model: &Model, context: &Context) -> bool {
+    matches!(
+        model.api.as_str(),
         "anthropic-messages" | "bedrock-converse-stream"
-    ) && crate::providers::bedrock::is_anthropic_claude_model(target);
-    source_is_claude
-        && target_is_claude
-        && (source.provider != target.provider || source.api != target.api)
+    ) && (crate::providers::bedrock::is_anthropic_claude_model(model)
+        || model.api == "bedrock-converse-stream"
+            && context.messages.iter().any(|message| {
+                matches!(message, Message::Assistant(source)
+                    if !matches!(source.stop_reason, StopReason::Error | StopReason::Aborted)
+                        && source.api == model.api && source.provider == model.provider
+                        && source.model == model.id && has_native_bedrock_reasoning(source))
+            }))
 }
 
 /// Report native binding drops without including reasoning or opaque payloads in errors.
@@ -54,8 +58,7 @@ pub(crate) fn validate_input_transformations(
 /// Request native binding diagnostics for signed Claude history, including account changes
 /// invisible to provider/model identifiers. This never selects a drop/relaxation policy.
 pub(crate) fn has_claude_reasoning_replay(model: &Model, context: &Context) -> bool {
-    matches!(model.api.as_str(), "anthropic-messages" | "bedrock-converse-stream")
-        && crate::providers::bedrock::is_anthropic_claude_model(model)
+    is_claude_replay_destination(model, context)
         && context.messages.iter().any(|message| matches!(message, Message::Assistant(source)
             if !matches!(source.stop_reason, StopReason::Error | StopReason::Aborted)
                 && source.content.iter().any(|block| matches!(block, AssistantContent::Thinking(_)))))
@@ -69,6 +72,7 @@ pub(crate) fn has_claude_reasoning_replay(model: &Model, context: &Context) -> b
 // Keep destination checks together so a new channel cannot bypass signature validation.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Result<(), String> {
+    let claude_destination = is_claude_replay_destination(model, context);
     for message in &context.messages {
         let Message::Assistant(assistant) = message else {
             continue;
@@ -81,7 +85,9 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
         }
         let same_protocol = assistant.provider == model.provider && assistant.api == model.api;
         let same_model = same_protocol && assistant.model == model.id;
-        let claude_bridge = is_claude_bridge(assistant, model);
+        let claude_bridge = !same_protocol
+            && claude_destination
+            && (assistant.api == "anthropic-messages" || has_native_bedrock_reasoning(assistant));
         let limitation = |detail: &str| {
             format!(
             "Cannot replay reasoning from {}/{} to {}/{}: {detail}. Original session history is unchanged. {REPLAY_RECOVERY}",
@@ -191,7 +197,7 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
             {
                 return Err(limitation("the Google adapter cannot retain reasoning and thought signatures across this model switch"));
             } else if model.api == "bedrock-converse-stream" && thinking.redacted.unwrap_or(false) {
-                if !crate::providers::bedrock::is_anthropic_claude_model(model)
+                if !claude_destination
                     || thinking
                         .thinking_signature
                         .as_deref()
@@ -230,7 +236,7 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                     "the original Google thought signature is not valid base64",
                 ));
             } else if model.api == "bedrock-converse-stream"
-                && !crate::providers::bedrock::is_anthropic_claude_model(model)
+                && !claude_destination
                 && thinking
                     .thinking_signature
                     .as_deref()
@@ -242,8 +248,7 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                     "the Bedrock adapter cannot replay this reasoning signature for the destination model",
                 ));
             } else if (model.api == "anthropic-messages"
-                || model.api == "bedrock-converse-stream"
-                    && crate::providers::bedrock::is_anthropic_claude_model(model))
+                || model.api == "bedrock-converse-stream" && claude_destination)
                 && thinking
                     .thinking_signature
                     .as_deref()

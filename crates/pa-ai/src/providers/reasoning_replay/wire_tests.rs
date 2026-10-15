@@ -197,3 +197,36 @@ fn openrouter_native_details_replay_without_a_plaintext_catalog_capability() {
     );
     assert_eq!(context.messages, original);
 }
+
+#[test]
+fn opaque_bedrock_profile_replays_its_own_signed_and_redacted_state() {
+    let profile = model(
+        "bedrock-converse-stream",
+        "amazon-bedrock",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/synthetic",
+    );
+    let opaque = base64::engine::general_purpose::STANDARD.encode(b"SYNTHETIC_OPAQUE_BYTES");
+    for (block, expected) in [
+        (
+            json!({"type": "thinking", "thinking": "", "thinkingSignature": "SYNTHETIC_SIGNATURE"}),
+            json!({"reasoningContent": {"reasoningText": {"text": "", "signature": "SYNTHETIC_SIGNATURE"}}}),
+        ),
+        (
+            json!({"type": "thinking", "thinking": "[Reasoning redacted]", "thinkingSignature": opaque, "redacted": true}),
+            json!({"reasoningContent": {"redactedContent": opaque}}),
+        ),
+    ] {
+        let context = history(
+            &profile,
+            &json!([block, {"type": "text", "text": "SYNTHETIC_ANSWER"}]),
+        );
+        let original = context.messages.clone();
+        assert_eq!(validate_reasoning_replay(&profile, &context), Ok(()));
+        assert!(has_claude_reasoning_replay(&profile, &context));
+        assert_eq!(
+            crate::providers::bedrock::convert_messages(&context, &profile, CacheRetention::None),
+            vec![json!({"role": "assistant", "content": [expected, {"text": "SYNTHETIC_ANSWER"}]})]
+        );
+        assert_eq!(context.messages, original);
+    }
+}
