@@ -208,6 +208,7 @@ def run_case(binary, kind, root, hello, case, observed):
         expected_token = APPLIED if case in ('tab', 'enter') else '@"dir with spaces/'
         observed['frames']['after'] = stable_frame(terminal, server,
             'directory action painted', lambda text: expected_token in text
+            and (token not in text if case in ('backspace', 'delete') else True)
             and (children_visible(text) if kind == 'rust' else True))
         assert not server.prompts, 'completion key accidentally submitted a prompt'
         if kind == 'rust':
