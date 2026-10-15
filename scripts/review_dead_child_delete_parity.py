@@ -2,7 +2,9 @@
 """Hosted real TS/Rust RLM child deletion baseline and Rust idempotent retry.
 
 A real kernel admits a child whose model request is held. The ordinary daemon
-kill/delete command must persist its edge boundary. The new dead-PID and
+kill command must stop the worker. Rust recognizes rlmLedgerDelete and persists
+its edge boundary; pinned TS ignores that Rust-native marker (raw ledger
+absence is retained as an explicit difference). The new dead-PID and
 interrupted-cleanup branches are separately exercised by hosted Unix supervisor
 regressions; this fixture does not manufacture a process death or claim parity
 for historical TS retry errors.
@@ -15,11 +17,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from review_ledger_liveness_parity import Provider, PARENT, NAME
 from review_agent_bounce_parity import Client
 from review_draft_disconnect_parity import digest, env_for, TS_ARCHIVE_SHA256
-from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
+from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish, verify_worker, process_identity
 
 
 def delete_contract(rows, child_id):
@@ -67,15 +70,37 @@ def observe(binary, kind, root, observed):
         child_active = row.get('activeSessionId') or row.get('id')
         assert child_active and row.get('parentActiveSessionId') == active, row
         observed['child_before'] = row
+        descriptors = [json.loads(p.read_text()) for p in (root / 'agent/daemon-workers').rglob('*.json')]
+        child_descriptors = [d for d in descriptors if d.get('rootActiveSessionId') == child_active]
+        assert len(child_descriptors) == 1, child_descriptors
+        pid, identity = verify_worker(child_descriptors[0], child_active, binary, path)
+        scope.discover()
+        observed['child_process_identity'] = {'pid': pid, 'start_id': identity}
         payload = {'activeSessionId': child_active, 'rlmLedgerDelete': 'user', 'rlmChildId': child_id}
         observed['delete_response'] = control.call('kill', **payload)
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                current, state = process_identity(pid)
+                stopped = current != identity or state == 'Z'
+            except FileNotFoundError:
+                stopped = True
+            if stopped:
+                break
+            assert time.monotonic() < deadline, 'actual child worker did not exit after kill'
+            threading.Event().wait(0.025)
+        observed['child_worker_stopped'] = True
         def ledger():
             return [json.loads(line) for p in (root / 'agent/rlm-ledger').glob('*.jsonl')
                     for line in p.read_text().splitlines()]
         observed['ledger_after'] = ledger()
-        boundary = delete_contract(observed['ledger_after'], child_id)
-        assert len(boundary) == 1, 'expected exactly one original deletion boundary'
-        if kind == 'rust':
+        if kind == 'ts':
+            assert not [r for r in observed['ledger_after']
+                        if r.get('op') == 'delete' and r.get('childId') == child_id], observed['ledger_after']
+            observed['intentional_difference'] = 'TS does not recognize the Rust-native rlmLedgerDelete kill marker'
+        else:
+            boundary = delete_contract(observed['ledger_after'], child_id)
+            assert len(boundary) == 1, 'expected exactly one original deletion boundary'
             observed['retry_response'] = control.call('kill', **payload)
             observed['ledger_after_retry'] = ledger()
             # No second deletion boundary; usage amendments, if any, retain
