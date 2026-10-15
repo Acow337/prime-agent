@@ -288,7 +288,7 @@ def cache_boundaries(client, config, root, created, child, ledger_path, provider
         assert ledger_path.read_bytes() == unchanged, 'refused wake changed the ledger'
         trace['bucket_contract'] = {'actual_archive_restore_supported': False,
             'restored_child_has_own_usage': None, 'parent_bucket_withdrawn': None}
-        trace['ledger_unchanged_across_artifact_mutations_and_actual_restore'] = True
+        trace['ledger_unchanged_across_boundary_operations'] = True
         return {'artifact': trace['artifact_contract'], 'bucket': trace['bucket_contract']}
     trace['actual_restore_wake'] = {'supported': True, 'receipt': wake}
     assert billing_file.is_file() and not archive.exists(), 'actual catalog wake did not restore transcript'
@@ -301,7 +301,7 @@ def cache_boundaries(client, config, root, created, child, ledger_path, provider
     if kind == 'rust':
         assert trace['bucket_contract'] == {'restored_child_has_own_usage': True, 'parent_bucket_withdrawn': True}, trace
     assert ledger_path.read_bytes() == unchanged, 'actual restore unexpectedly appended ledger'
-    trace['ledger_unchanged_across_artifact_mutations_and_actual_restore'] = True
+    trace['ledger_unchanged_across_boundary_operations'] = True
     return {'artifact': trace['artifact_contract'], 'bucket': trace['bucket_contract']}
 
 
