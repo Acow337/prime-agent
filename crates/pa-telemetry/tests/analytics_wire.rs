@@ -289,10 +289,10 @@ async fn a_synthetic_only_batch_never_opens_a_connection() {
 // mutating this test binary's environment or contacting production.
 #[test]
 fn explicit_harness_markers_suppress_even_unmarked_events_with_telemetry_opted_in() {
-    for (key, value) in [
-        ("PRIME_AGENT_TELEMETRY_ORIGIN", "test"),
-        ("PRIME_AGENT_TELEMETRY_ORIGIN", "eval"),
-        ("PRIME_AGENT_FAUX_SCRIPT", "/unused/script.json"),
+    for (key, value, expected_origin) in [
+        ("PRIME_AGENT_TELEMETRY_ORIGIN", "test", "test"),
+        ("PRIME_AGENT_TELEMETRY_ORIGIN", "eval", "eval"),
+        ("PRIME_AGENT_FAUX_SCRIPT", "/unused/script.json", "test"),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -304,6 +304,7 @@ fn explicit_harness_markers_suppress_even_unmarked_events_with_telemetry_opted_i
                 "PA_TEST_ANALYTICS_ENDPOINT",
                 format!("http://{}", listener.local_addr().unwrap()),
             )
+            .env("PA_TEST_EXPECTED_ORIGIN", expected_origin)
             .env("PRIME_AGENT_TELEMETRY", "1")
             .env("DO_NOT_TRACK", "0")
             .env("PI_OFFLINE", "0")
@@ -329,6 +330,10 @@ async fn synthetic_sink_child() {
     };
     // Refuse remote destinations even if the test helper is run by hand.
     assert!(endpoint.starts_with("http://127.0.0.1:"));
+    assert_eq!(
+        pa_telemetry::base_properties("unknown").get("workload_origin"),
+        Some(&json!(std::env::var("PA_TEST_EXPECTED_ORIGIN").unwrap()))
+    );
     let sink = AnalyticsSink::with_timeout(endpoint, Duration::from_millis(100));
     assert_eq!(
         sink.send_batch(INSTALL_ID, vec![event("agent started")])

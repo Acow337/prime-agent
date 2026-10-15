@@ -74,7 +74,9 @@ dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
 Harnesses running real providers or mock HTTP servers must set
 `PRIME_AGENT_TELEMETRY_ORIGIN=test` or `eval` on the invocation. The
 analytics sink suppresses these workloads even with `PRIME_AGENT_TELEMETRY=1`;
-local mirrors remain available for instrumentation checks. `DO_NOT_TRACK=1`
+local mirrors remain available for instrumentation checks. Known repository
+test launchers stamp the test origin automatically, and faux invocations
+are classified as tests without an origin setting. `DO_NOT_TRACK=1`
 or `PI_OFFLINE=1` still disables all product telemetry, including mirrors.
 Automated mode, custom models, CI, short runs, and low token counts do not
 identify a test. See [workload isolation](../../docs/telemetry-workload-isolation.md)

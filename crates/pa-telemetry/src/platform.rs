@@ -97,10 +97,13 @@ fn build_channel() -> &'static str {
     "release"
 }
 
-/// `PRIME_AGENT_TELEMETRY_ORIGIN=internal|test|eval` wins; otherwise interactive
-/// is `interactive` and headless is `automated` (the mode alone never
-/// identifies internal populations).
+/// Faux invocations are tests; otherwise an explicit workload origin wins,
+/// then interactive/headless classification. Autonomous/headless mode alone
+/// never identifies an eval.
 fn workload_origin(execution_mode: &str) -> &'static str {
+    if std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_some() {
+        return "test";
+    }
     match std::env::var("PRIME_AGENT_TELEMETRY_ORIGIN")
         .ok()
         .as_deref()
