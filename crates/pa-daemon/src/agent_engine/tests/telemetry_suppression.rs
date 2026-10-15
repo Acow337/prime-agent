@@ -10,7 +10,7 @@ fn faux_runs_cannot_install_telemetry_even_with_an_explicit_opt_in() {
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         faux_script: Some(serde_json::json!({"responses": [{"text": "test reply"}]}).to_string()),
         telemetry_disabled: Some(false),
-        ..bare_engine(dir.path()).config.clone()
+        ..bare_engine(dir.path()).config
     })
     .unwrap();
     assert_eq!(engine.config.telemetry_disabled, Some(true));

@@ -1316,8 +1316,8 @@ fn faux_engine_with_local_telemetry(
     reserve_tokens: u64,
 ) -> (AgentSessionEngine, tempfile::TempDir) {
     assert!(
-        cfg!(debug_assertions),
-        "local telemetry injection requires a debug build"
+        pa_core::session_engine::telemetry::telemetry_endpoint().is_none(),
+        "local telemetry injection requires no production endpoint"
     );
     let (mut engine, dir) = faux_engine_with_settings(script, reserve_tokens);
     engine.config.telemetry_disabled = None;
