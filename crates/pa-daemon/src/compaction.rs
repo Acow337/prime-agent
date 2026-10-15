@@ -113,7 +113,13 @@ impl CompactionManager {
                 self.persist_and_emit_ipython_state(message);
             }
         }
-        let end = compaction_end_event(&outcome, custom_instructions.as_deref());
+        let mut end = compaction_end_event(&outcome, custom_instructions.as_deref());
+        {
+            let core = self.core.lock().unwrap();
+            if let Some(store) = core.store.as_ref() {
+                attach_collapse_transcript(&mut end, store);
+            }
+        }
         let _ = self.emit_session_event(end);
         pa_core::session_engine::compaction_trace::trace(
             "manual.end_emitted",
@@ -348,6 +354,20 @@ pub(crate) fn compaction_end_success(
         event["customInstructions"] = json!(custom_instructions);
     }
     event
+}
+
+/// Inject the store's post-compaction walk (the same one `get_messages`
+/// serves, image payloads elided) into a succeeded `compaction_end` result.
+pub(crate) fn attach_collapse_transcript(
+    event: &mut Value,
+    store: &crate::session_store::SessionFile,
+) {
+    let Some(result) = event.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let mut transcript = store.messages();
+    crate::snapshot_stream::elide_snapshot_image_payloads(&mut transcript);
+    result.insert("transcript".to_string(), json!(transcript));
 }
 
 /// The `compaction_end` payload of an unsuccessful compaction: `aborted` marks a cancelled
