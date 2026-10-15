@@ -42,6 +42,7 @@ pub struct RpcState {
     /// The context-rebuilding commands' serialization lane (`compact`,
     /// `refine`): they must not interleave.
     pub session_ops: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) manual_compaction_cancel: Arc<crate::compaction_cancel::CompactionCancellation>,
 }
 
 impl RpcState {
@@ -186,6 +187,8 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
         "prompt" => prompt_commands::prompt(state, &payload).await,
         "steer" | "follow_up" => prompt_commands::steer_or_follow_up(state, &payload, name).await,
         "abort" => {
+            // Cancel preflight/execution before waiting for its selected handle.
+            state.manual_compaction_cancel.abort();
             state.session.handle().await.engine.session.agent().abort();
             state.pump_suspended.store(true, Ordering::SeqCst);
             Ok(ResponseData::Absent)
@@ -349,6 +352,8 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     // Hook preflight owns only snapshots. Revalidate before acquiring the
     // ordinary mutation guards so replacement/model changes cannot make the
     // permit authorize a different compaction.
+    let operation = state.manual_compaction_cancel.register();
+    let signal = operation.signal();
     let handle = state.session.handle().await;
     let model = handle.model.clone();
     let engine = handle.engine.clone();
@@ -360,7 +365,7 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
         }
         result = engine.session.preflight_compaction_hook(
             pa_core::session_engine::compact_session::CompactionTrigger::Manual,
-            instructions.as_deref(), &model, None,
+            instructions.as_deref(), &model, Some(&signal),
         ) => result.map_err(|error| format!("{error:#}"))?,
     };
     let handle = state.session.handle().await;

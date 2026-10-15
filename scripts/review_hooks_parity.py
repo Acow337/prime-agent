@@ -14,6 +14,7 @@ import tempfile
 import threading
 
 from hooks_transport_probe import Fixture, verify_cli, verify_daemon
+from hooks_compaction_probe import verify_compaction_cancellation
 from review_draft_disconnect_parity import TS_ARCHIVE_SHA256, digest
 from review_restore_notice_parity import invoke, texts
 
@@ -157,6 +158,8 @@ def main():
                         and (path.suffix == '.jsonl' or path.name in
                              ('pre.json', 'post.json', 'start.json', 'prompt.json', 'stop.json', 'end.json', 'frames.json')
                              or path.name.startswith('stderr-'))}
+            verify_compaction_cancellation(rust, daemon, root,
+                                           receipt.setdefault('compaction_cancellation', {}))
         receipt['verified'] = True
     except Exception as error:
         receipt['error'] = f'{type(error).__name__}: {error}'

@@ -1351,6 +1351,7 @@ impl SessionEngine for AgentSessionEngine {
                 self,
                 &command,
                 &request.images,
+                aborted,
                 &mut emit,
             ) else {
                 return;
@@ -1434,6 +1435,7 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn abort_in_flight_turn(&self) {
+        self.manual_compaction_cancel.abort();
         // The active run aborts and the in-flight fetch cancels; none in flight: nothing.
         let agent = self.turn_agent.lock().expect("turn agent lock").clone();
         if let Some(agent) = agent {

@@ -116,7 +116,12 @@ fn exit_with(code: i32) -> ! {
 /// Windows delivers no SIGTERM/SIGHUP to a console-less process, so the
 /// stdin-close settle stays the only exit path.
 #[cfg(not(unix))]
-fn spawn_signal_handlers(_session: &Arc<RpcSession>, _writer: LineWriter) {}
+fn spawn_signal_handlers(
+    _session: &Arc<RpcSession>,
+    _writer: LineWriter,
+    _compaction_cancel: Arc<crate::compaction_cancel::CompactionCancellation>,
+) {
+}
 
 /// The async entry: serve the RPC stdio mode until stdin closes or a
 /// signal exits. Returns the process exit code.
@@ -146,6 +151,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         model_ops: Arc::new(tokio::sync::Mutex::new(())),
         session_ops: Arc::new(tokio::sync::Mutex::new(())),
+        manual_compaction_cancel: Default::default(),
     });
     // With no create command, the FIRST `get_available_models` would pay
     // the whole awaited refresh chain; this spawn warms the caches early.
@@ -155,23 +161,33 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
             pa_core::models::ModelRegistry::create(auth, options.agent_dir.join("models.json"));
         let _ = registry.refresh_available_models().await;
     });
-    spawn_signal_handlers(&session, writer.clone());
+    spawn_signal_handlers(
+        &session,
+        writer.clone(),
+        Arc::clone(&state.manual_compaction_cancel),
+    );
     Ok(serve_stdin(state).await)
 }
 
 /// SIGTERM exits 143, SIGHUP 129 (unix; the TS mode handles exactly this
 /// pair): abort the running turn, settle it, dispose the kernel, drain the queued frames, exit.
 #[cfg(unix)]
-fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
+fn spawn_signal_handlers(
+    session: &Arc<RpcSession>,
+    writer: LineWriter,
+    compaction_cancel: Arc<crate::compaction_cancel::CompactionCancellation>,
+) {
     use tokio::signal::unix::{signal, SignalKind};
     let terminate_session = Arc::clone(session);
     let terminate_writer = writer.clone();
+    let terminate_compaction = Arc::clone(&compaction_cancel);
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::terminate()) {
             stream.recv().await;
             // Fire the shutdown broadcast FIRST: a replacement mid-settle
             // aborts and refuses, so the exit never queues behind it.
             terminate_session.fire_shutdown();
+            terminate_compaction.close();
             // Serialize with any in-flight whole-session replacement:
             // the handle read below sees the session that is live NOW.
             let replacement = terminate_session.replacement_lease().await;
@@ -200,6 +216,7 @@ fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
             // Fire the shutdown broadcast FIRST (the settle racing this
             // exit aborts and refuses).
             hangup_session.fire_shutdown();
+            compaction_cancel.close();
             // Serialize with any in-flight replacement (the lease holds
             // until the exit): the abort and the dispose target the
             // session that is live NOW.
@@ -262,6 +279,7 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
             }
         }
     }
+    state.manual_compaction_cancel.close();
     // stdin closed: settle the in-flight handlers, wait the session
     // idle, dispose, drain the queued frames, exit 0.
     while pending.join_next().await.is_some() {}

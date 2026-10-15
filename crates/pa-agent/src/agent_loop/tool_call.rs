@@ -75,6 +75,7 @@ async fn prepare_tool_call_inner(
         let before_result = race_with_abort(
             before_tool_call(
                 BeforeToolCallContext {
+                    resolved_tool_name: tool.name().to_string(),
                     assistant_message: assistant_message.clone(),
                     tool_call: tool_call.clone(),
                     args: validated_args.clone(),
@@ -246,6 +247,7 @@ pub(crate) async fn finalize_executed_tool_call(
         let after_result = race_with_abort(
             after_tool_call(
                 AfterToolCallContext {
+                    resolved_tool_name: prepared.tool.name().to_string(),
                     assistant_message: assistant_message.clone(),
                     tool_call: prepared.tool_call.clone(),
                     args: prepared.args.clone(),

@@ -19,6 +19,9 @@ Tool callback callers can select `ToolHookContextMode` on `AgentOptions` or
 `Omit` supplies an empty context without cloning session history. Prime Agent's
 external command hooks use `Omit` because their protocol needs only invocation
 metadata. This is an additive public configuration API, with no dependency changes.
+Before/after tool callback metadata includes the resolved executor name separately
+from the original model call, so policy adapters can match executable aliases
+without rewriting call history.
 
 `BeforeInputFn` gates submitted batches before their message events or context
 append; `BeforeModelFn` supports deferred initialization. Both receive the active

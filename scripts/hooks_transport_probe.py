@@ -243,7 +243,7 @@ class Client:
         self.frames.append(value)
         return value
 
-    def request(self, command):
+    def send(self, command):
         self.counter += 1
         request_id = str(self.counter)
         if self.private:
@@ -258,6 +258,10 @@ class Client:
             frame = {'type': 'command', 'id': request_id,
                      'protocol': {'name': 'prime-agent.daemon', 'version': 7}, 'command': command}
             self.connection.sendall((json.dumps(frame) + '\n').encode())
+        return request_id
+
+    def request(self, command):
+        request_id = self.send(command)
         while True:
             response = self.receive()
             if response.get('id') == request_id:

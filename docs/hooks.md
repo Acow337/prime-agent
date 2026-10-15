@@ -200,10 +200,15 @@ overflow compaction use `auto`. RPC preflight runs outside transport guards and
 returns a single-use permit bound to the session/model/instructions. The host
 revalidates the session before mutation; consuming the permit cannot run a second
 command under those guards.
+Daemon `/compact` and RPC manual compaction register host cancellation before
+preflight; abort and shutdown cancel a blocked hook, and the permit retains the
+same signal through guarded execution.
 
 The current CLI and daemon constructors expose `python_repl` as their model tool;
 hook support does not add or rename tools. Shared-engine embeddings can register
-other tools. The adapter maps a registered `bash` tool to canonical `Bash`, while
+other tools. Hook matching uses the resolved executor name: the executable
+`python` and `ipython` aliases therefore match `python_repl`, while raw model call
+names and IDs remain unchanged in history. The adapter maps a registered `bash` tool to canonical `Bash`, while
 `edit` remains `edit` rather than pretending to be Codex `apply_patch`. A Codex
 `Bash` matcher therefore does not intercept shell operations performed inside the
 Python kernel. Interception at the outer Python tool does not imply interception

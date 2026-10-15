@@ -355,3 +355,87 @@ async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook
     assert_eq!(std::fs::read(cwd.join("hook-count")).unwrap(), b"x");
     assert!(provider.calls().is_empty());
 }
+
+#[tokio::test]
+async fn permit_retains_host_cancellation_when_executor_omits_signal() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    let fixture = fixture("printf x >> hook-count", 3).await;
+    let model = fixture.provider.get_model();
+    let controller = pa_agent::abort::AbortController::new();
+    let signal = controller.signal();
+    let permit = fixture
+        .session
+        .preflight_compaction_hook(CompactionTrigger::Manual, None, &model, Some(&signal))
+        .await
+        .unwrap();
+    let original = fixture
+        .session
+        .session
+        .lock()
+        .await
+        .retained_entries()
+        .to_vec();
+    controller.abort();
+    let error = fixture
+        .session
+        .compact_with_permit(None, &model, None, None, permit)
+        .await
+        .unwrap_err();
+    assert!(pa_agent::abort::is_abort_error(&error));
+    assert_eq!(
+        fixture.session.session.lock().await.retained_entries(),
+        original.as_slice()
+    );
+    assert_eq!(
+        std::fs::read(fixture.directory.path().join("project/hook-count")).unwrap(),
+        b"x"
+    );
+}
+
+#[tokio::test]
+async fn host_abort_cancels_ready_precompact_command_before_permit() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    let fixture = fixture("cat >/dev/null; touch ready; while :; do sleep 1; done", 3).await;
+    let model = fixture.provider.get_model();
+    let controller = pa_agent::abort::AbortController::new();
+    let signal = controller.signal();
+    let original = fixture
+        .session
+        .session
+        .lock()
+        .await
+        .retained_entries()
+        .to_vec();
+    let preflight = fixture.session.preflight_compaction_hook(
+        CompactionTrigger::Manual,
+        None,
+        &model,
+        Some(&signal),
+    );
+    let cancel_when_ready = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fixture.directory.path().join("project/ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("external precompact became ready");
+        assert!(fixture.session.session.try_lock().is_ok());
+        controller.abort();
+    };
+    let result = tokio::time::timeout(Duration::from_secs(7), async {
+        let (result, ()) = tokio::join!(preflight, cancel_when_ready);
+        result
+    })
+    .await
+    .expect("host abort cancels before the configured ten-second timeout");
+    let error = match result {
+        Ok(_) => panic!("cancelled preflight must not return a permit"),
+        Err(error) => error,
+    };
+    assert!(pa_agent::abort::is_abort_error(&error));
+    assert_eq!(
+        fixture.session.session.lock().await.retained_entries(),
+        original.as_slice()
+    );
+}

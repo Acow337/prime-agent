@@ -64,6 +64,7 @@ impl ToolHooks {
                 "PreToolUse",
                 &context.assistant_message.model,
                 &context.tool_call,
+                &context.resolved_tool_name,
                 context.args,
             );
             Box::pin(async move {
@@ -85,6 +86,7 @@ impl ToolHooks {
                     "PostToolUse",
                     &context.assistant_message.model,
                     &context.tool_call,
+                    &context.resolved_tool_name,
                     context.args,
                 );
                 input["tool_response"] = json!(context.result);
@@ -113,8 +115,15 @@ pub(super) struct Identity {
 }
 
 impl Identity {
-    fn input(&self, event: &str, model: &str, call: &ToolCall, args: Value) -> Value {
-        let tool_name = match call.name.as_str() {
+    fn input(
+        &self,
+        event: &str,
+        model: &str,
+        call: &ToolCall,
+        resolved_tool_name: &str,
+        args: Value,
+    ) -> Value {
+        let tool_name = match resolved_tool_name {
             "bash" => "Bash",
             name => name,
         };
@@ -303,6 +312,7 @@ mod tests {
         let result = pa_agent::types::AgentToolResult::text("unmodified original output");
         let override_result = (hooks.after)(
             pa_agent::types::AfterToolCallContext {
+                resolved_tool_name: "bash".into(),
                 assistant_message,
                 tool_call: ToolCall {
                     id: "call-observed".into(),
@@ -339,5 +349,127 @@ mod tests {
                 "tool_input": {"command": "echo original"}, "tool_response": result,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn python_aliases_match_resolved_tool_for_denials_and_observers() {
+        let _command_guard = crate::hooks::test_command_guard().await;
+        for spelling in ["python_repl", "python", "ipython"] {
+            for deny in [true, false] {
+                let directory = tempfile::tempdir().unwrap();
+                let cwd = directory.path().join("project");
+                let agent_dir = directory.path().join("agent");
+                std::fs::create_dir(&cwd).unwrap();
+                std::fs::create_dir(&agent_dir).unwrap();
+                let event = if deny { "PreToolUse" } else { "PostToolUse" };
+                let command = if deny {
+                    "cat > payload.tmp; mv payload.tmp payload.json; printf 'alias policy reason' >&2; exit 2"
+                } else {
+                    "cat > payload.tmp; mv payload.tmp payload.json"
+                };
+                std::fs::write(
+                    agent_dir.join("hooks.json"),
+                    serde_json::to_vec(&json!({
+                        "hooks": {(event): [{"matcher": "^python_repl$", "hooks": [{
+                            "type": "command", "command": command, "async": !deny
+                        }]}]}
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                trust_fixture(&cwd, &agent_dir);
+                let hooks = ToolHooks::new(cwd.clone(), agent_dir, "alias-session".into(), None);
+                let executed = Arc::new(AtomicBool::new(false));
+                let execution_flag = Arc::clone(&executed);
+                // Use the real bridge's alias resolution, without a live Python kernel.
+                let tool = bridge_tool(ToolDefinition {
+                    name: "python_repl".into(),
+                    label: "Python".into(),
+                    description: "Alias regression".into(),
+                    prompt_snippet: String::new(),
+                    parameters: json!({"type": "object"}),
+                    execution_mode: None,
+                    prepare_arguments: None,
+                    execute: Arc::new(move |_, _, _, _| {
+                        execution_flag.store(true, Ordering::SeqCst);
+                        Box::pin(async { Ok(ToolExecutionResult::text("original output")) })
+                    }),
+                });
+                let model = Model::unknown();
+                let provider = Arc::new(ScriptedProvider::new(model.clone()));
+                provider.push_tool_call_turn(
+                    None,
+                    vec![("alias-call", spelling, json!({"code": "1+1"}))],
+                );
+                provider.push_text_turn("done");
+                let agent = Agent::new(AgentOptions {
+                    initial_state: AgentInitialState {
+                        model: Some(model),
+                        tools: Some(vec![tool]),
+                        ..Default::default()
+                    },
+                    stream_fn: Some(provider.stream_fn()),
+                    before_tool_call: Some(hooks.before),
+                    after_tool_call: Some(hooks.after),
+                    ..Default::default()
+                });
+                agent.prompt("test alias").await.unwrap();
+                assert_eq!(executed.load(Ordering::SeqCst), !deny, "{spelling}");
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !cwd.join("payload.json").exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("canonical matcher must receive every executable alias");
+                let payload: Value =
+                    serde_json::from_slice(&std::fs::read(cwd.join("payload.json")).unwrap())
+                        .unwrap();
+                assert_eq!(payload["tool_name"], "python_repl");
+                assert_eq!(payload["tool_use_id"], "alias-call");
+                assert_eq!(payload["tool_input"], json!({"code": "1+1"}));
+                assert_eq!(payload["hook_event_name"], event);
+                if !deny {
+                    assert_eq!(
+                        payload["tool_response"]["content"],
+                        json!([{"type":"text", "text":"original output"}])
+                    );
+                }
+                let state = agent.state().await;
+                let raw_call = state
+                    .messages
+                    .iter()
+                    .find_map(|message| match message {
+                        AgentMessage::Standard(Message::Assistant(message)) => {
+                            message.content.iter().find_map(|part| match part {
+                                pa_agent::types::AssistantContent::ToolCall(call) => Some(call),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(raw_call.name, spelling);
+                assert_eq!(raw_call.id, "alias-call");
+                assert_eq!(raw_call.arguments, json!({"code": "1+1"}));
+                let result = state
+                    .messages
+                    .iter()
+                    .find_map(|message| match message {
+                        AgentMessage::Standard(Message::ToolResult(result)) => Some(result),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(result.tool_name, spelling);
+                assert_eq!(result.tool_call_id, "alias-call");
+                assert_eq!(result.is_error, deny);
+                assert_eq!(
+                    serde_json::to_value(&result.content).unwrap(),
+                    json!([{"type":"text", "text": if deny {
+                    "Blocked by a PreToolUse hook: alias policy reason"
+                } else { "original output" }}])
+                );
+            }
+        }
     }
 }

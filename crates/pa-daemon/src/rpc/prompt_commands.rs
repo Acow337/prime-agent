@@ -32,6 +32,9 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         .ok_or_else(|| "prompt requires a message".to_string())?;
     let images = protocol::command_images(payload);
     let behavior = protocol::command_streaming_behavior(payload);
+    // Classification expands session-owned templates, so reserve cancellation
+    // before waiting for the handle and discard it for ordinary model prompts.
+    let compact_operation = state.manual_compaction_cancel.register();
     let mut handle = state.session.handle().await;
     let engine = handle.engine.clone();
     let admission = engine
@@ -56,6 +59,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
     };
     let model = handle.model.clone();
     let compact_permit = if command.name == "compact" {
+        let signal = compact_operation.signal();
         // The external preflight must not retain the handle, session_ops or
         // autonomous locks. Revalidate the snapshot before guarded mutation.
         drop(handle);
@@ -66,7 +70,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
             }
             result = engine.session.preflight_compaction_hook(
                 pa_core::session_engine::compact_session::CompactionTrigger::Manual,
-                (!command.args.is_empty()).then_some(command.args.as_str()), &model, None,
+                (!command.args.is_empty()).then_some(command.args.as_str()), &model, Some(&signal),
             ) => result.map_err(|error| format!("{error:#}"))?,
         };
         handle = state.session.handle().await;

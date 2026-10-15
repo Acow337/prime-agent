@@ -214,6 +214,7 @@ impl AgentSession {
         model: &pa_types::ai::Model,
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<CompactionHookPermit> {
+        pa_agent::abort::throw_if_aborted_signal(abort)?;
         let mut permit = CompactionHookPermit {
             session: std::sync::Arc::clone(&self.session),
             instructions: custom_instructions.map(str::to_owned),
@@ -221,6 +222,7 @@ impl AgentSession {
             provider: model.provider.clone(),
             skipped: None,
             veto: None,
+            abort: abort.cloned(),
         };
         if self
             .lifecycle_hooks
@@ -280,6 +282,9 @@ impl AgentSession {
         {
             anyhow::bail!("compaction preflight permit does not match session or inputs");
         }
+        // The host preflight owns cancellation across the serialization gap.
+        // Legacy executor wrappers may omit an explicit signal at consumption.
+        let abort = abort.or(permit.abort.as_ref());
         pa_agent::abort::throw_if_aborted_signal(abort)?;
         if let Some(error) = permit.veto {
             return Err(error);
