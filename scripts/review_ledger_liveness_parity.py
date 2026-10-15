@@ -182,6 +182,12 @@ def catalog_row(view, path):
     return rows[0]
 
 
+def archive_restore_unsupported(response, session_id):
+    return (response.get('type') == 'response' and response.get('command') == 'send_message'
+            and response.get('success') is False
+            and response.get('error') == 'Unknown active session: ' + session_id)
+
+
 def cache_boundaries(client, config, root, created, child, ledger_path, provider, kind, observed,
                      require_current_sidecar):
     parent_file = Path(created['sessionFile'])
@@ -269,8 +275,22 @@ def cache_boundaries(client, config, root, created, child, ledger_path, provider
     trace['warm_bucket_matches_actual_usage'] = parent_before.get('deletedDescendantUsage') == usage
     if kind == 'rust':
         assert trace['warm_bucket_matches_actual_usage'], parent_before
-    wake = client.call('send_message', targetActiveSessionId=own['id'], message='Restore the billing fixture.')
-    trace['actual_restore_wake'] = wake
+    try:
+        wake = client.call('send_message', targetActiveSessionId=own['id'], message='Restore the billing fixture.')
+    except AssertionError:
+        response = client.wire[-1]
+        if kind != 'ts' or not archive_restore_unsupported(response, own['id']):
+            raise
+        # The pinned binary has now actually refused this archived selector.
+        # Retain the refusal; never simulate a restore or call it parity.
+        trace['actual_restore_wake'] = {'supported': False, 'response': response}
+        assert archive.is_file() and not billing_file.exists(), 'refused wake partially restored the file'
+        assert ledger_path.read_bytes() == unchanged, 'refused wake changed the ledger'
+        trace['bucket_contract'] = {'actual_archive_restore_supported': False,
+            'restored_child_has_own_usage': None, 'parent_bucket_withdrawn': None}
+        trace['ledger_unchanged_across_artifact_mutations_and_actual_restore'] = True
+        return {'artifact': trace['artifact_contract'], 'bucket': trace['bucket_contract']}
+    trace['actual_restore_wake'] = {'supported': True, 'receipt': wake}
     assert billing_file.is_file() and not archive.exists(), 'actual catalog wake did not restore transcript'
     restored = client.call('list_saved_sessions', cwd=str(root), scope='all')
     trace['bucket_after_actual_restore'] = restored
@@ -399,8 +419,9 @@ def main(require_current_sidecar=False):
         result['cache_boundary_observations'] = {kind: {key: run['cache_boundaries'][key] for key in
             ('artifact_contract', 'bucket_contract')} for kind, run in result['runs'].items()}
         result['cache_boundary_scope'] = ('Rust regression invariants required; actual TS observations retained. '
-            'Pinned TS omitted the relocated passive child on the first actual hosted read; this is an explicit '
-            'baseline difference, not a claim of full cache-boundary parity.')
+            'Pinned TS omitted relocated passive children, did not expose the warmed deleted-spend bucket, and '
+            'refused the archived selector with Unknown active session in actual hosted reads. These are '
+            'explicit baseline limitations; no full cache-boundary parity is claimed.')
         result['cache_boundary_comparison'] = ('identical' if result['cache_boundary_observations']['ts'] ==
             result['cache_boundary_observations']['rust'] else 'actual TS/Rust difference; raw reads retained')
         result['require_current_rust_lease_exit_sidecar'] = require_current_sidecar
