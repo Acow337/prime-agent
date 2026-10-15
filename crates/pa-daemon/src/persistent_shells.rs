@@ -46,12 +46,18 @@ fn live_shells(artifact_dir: &Path) -> Vec<Shell> {
     registry
         .shells
         .into_iter()
-        .filter(|shell| {
-            matches!(crate::lease::is_process_alive(shell.pid), Ok(true))
-                && crate::lease::get_process_start_id(shell.pid).as_deref()
-                    == Some(shell.start_id.as_str())
-        })
+        .filter(runs_as_registered)
         .collect()
+}
+
+fn pid_alive(pid: u32) -> bool {
+    matches!(crate::lease::is_process_alive(pid), Ok(true))
+}
+
+/// Whether the shell's pid still runs under the recorded start identity.
+fn runs_as_registered(shell: &Shell) -> bool {
+    pid_alive(shell.pid)
+        && crate::lease::get_process_start_id(shell.pid).as_deref() == Some(shell.start_id.as_str())
 }
 
 /// The session's live persistent shells as rows with the kernel bash
@@ -82,20 +88,24 @@ pub(crate) fn kill_session_shells(artifact_dir: &Path) {
             let _ = signal_process_group(shell.pid as i32, Signal::Term);
         }
         let deadline = Instant::now() + TERM_GRACE;
-        while Instant::now() < deadline
-            && shells
-                .iter()
-                .any(|shell| matches!(crate::lease::is_process_alive(shell.pid), Ok(true)))
-        {
+        while Instant::now() < deadline && shells.iter().any(runs_as_registered) {
             std::thread::sleep(Duration::from_millis(50));
         }
-        // Group members that outlive the leader keep the pgid reserved.
-        for shell in &shells {
-            let _ = signal_process_group(shell.pid as i32, Signal::Kill);
-        }
+        kill_groups(&shells);
     }
     let _ = std::fs::remove_file(artifact_dir.join(REGISTRY_FILE));
     let _ = std::fs::remove_dir_all(artifact_dir.join(FILES_DIR));
+}
+
+/// SIGKILL each shell's group unless its pid now runs under another identity.
+/// A dead leader's group still gets it: members that outlive the leader keep
+/// the pgid reserved.
+fn kill_groups(shells: &[Shell]) {
+    for shell in shells {
+        if !pid_alive(shell.pid) || runs_as_registered(shell) {
+            let _ = signal_process_group(shell.pid as i32, Signal::Kill);
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -133,6 +143,8 @@ pub(crate) mod test_support {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
     use super::test_support::registered_sleeper;
     use super::*;
 
@@ -166,5 +178,23 @@ mod tests {
         assert!(!artifacts.path().join(REGISTRY_FILE).exists());
         stranger.kill().unwrap();
         stranger.wait().unwrap();
+    }
+
+    #[test]
+    fn pid_recycled_during_the_grace_is_not_killed() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let mut stranger = registered_sleeper(artifacts.path(), Some("proc:not-this-process"));
+        let raw = std::fs::read(artifacts.path().join(REGISTRY_FILE)).unwrap();
+        let registry: Registry = serde_json::from_slice(&raw).unwrap();
+
+        kill_groups(&registry.shells);
+        assert!(signal_process_group(stranger.id() as i32, Signal::Term));
+
+        let status = stranger.wait().unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(nix::sys::signal::Signal::SIGTERM as i32),
+            "no SIGKILL came first"
+        );
     }
 }
