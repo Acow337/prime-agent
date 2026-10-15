@@ -16,7 +16,7 @@ const UNKNOWN: &str = "unknown";
 const MAX_VERSION_LENGTH: usize = 64;
 
 /// The catalog's property-rule revision (additive rule changes bump it).
-pub const SCHEMA_REVISION: u64 = 3;
+pub const SCHEMA_REVISION: u64 = 4;
 
 /// The `cpu_baseline` values.
 const CPU_AVX2: &str = "avx2";
@@ -97,7 +97,7 @@ fn build_channel() -> &'static str {
     "release"
 }
 
-/// `PRIME_AGENT_TELEMETRY_ORIGIN=internal|test` wins; otherwise interactive
+/// `PRIME_AGENT_TELEMETRY_ORIGIN=internal|test|eval` wins; otherwise interactive
 /// is `interactive` and headless is `automated` (the mode alone never
 /// identifies internal populations).
 fn workload_origin(execution_mode: &str) -> &'static str {
@@ -108,6 +108,7 @@ fn workload_origin(execution_mode: &str) -> &'static str {
     {
         Some("internal") => return "internal",
         Some("test") => return "test",
+        Some("eval") => return "eval",
         _ => {}
     }
     if execution_mode == "interactive" {
