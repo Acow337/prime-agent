@@ -288,3 +288,63 @@ async fn hooks_use_host_durable_identity_instead_of_in_memory_mirror_id() {
         transcript.display().to_string()
     );
 }
+
+#[tokio::test]
+async fn late_durable_history_adoption_marks_resume_without_rearming_navigation() {
+    for windowed in [false, true] {
+        let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
+            "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
+        }]}]}}));
+        let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+        for text in ["first", "second", "third"] {
+            provider.push_text_turn(text);
+        }
+        let engine = create_session(fixture.config(&provider)).await.unwrap();
+        let mut durable = crate::session::manager::SessionManager::in_memory(&fixture.cwd);
+        durable
+            .append_message(SessionAgentMessage::User(pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("prior user input".into()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }))
+            .unwrap();
+        let entries = durable.get_all_entries().to_vec();
+        let path = fixture.cwd.join("restored.jsonl");
+        let mut bytes = Vec::new();
+        for entry in &entries {
+            serde_json::to_writer(&mut bytes, entry).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+        for turn in 0..3 {
+            if turn == 2 {
+                engine.session.mark_compaction_hook();
+            }
+            if windowed {
+                let window = crate::session::window::WindowedSessionStore::open(&path)
+                    .unwrap()
+                    .expect("valid durable history");
+                engine.session.restore_windowed_context(window).await;
+            } else {
+                engine
+                    .session
+                    .rebuild_branch_context(entries.clone())
+                    .await
+                    .unwrap();
+            }
+            engine
+                .prompt("continue", PromptOptions::default())
+                .await
+                .unwrap();
+        }
+        let starts = events(&fixture.cwd.join("starts.jsonl"));
+        assert_eq!(
+            starts
+                .iter()
+                .map(|event| event["source"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("resume"), json!("compact")]
+        );
+        assert_eq!(provider.calls().len(), 3);
+    }
+}

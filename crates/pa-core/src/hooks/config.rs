@@ -151,10 +151,12 @@ fn read_bounded(path: &Path, kind: SourceKind) -> anyhow::Result<Option<Vec<u8>>
     if !metadata.is_file() {
         bail!("hook source must be a regular file");
     }
+    #[cfg(unix)]
     if matches!(kind, SourceKind::Trust) {
-        #[cfg(unix)]
         validate_owner(&metadata, "hook-trust.json")?;
     }
+    #[cfg(not(unix))]
+    let _ = kind;
     let mut bytes = Vec::new();
     file.take(FILE_LIMIT + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > FILE_LIMIT {

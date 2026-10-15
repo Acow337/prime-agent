@@ -36,7 +36,12 @@ impl LifecycleHooks {
     }
 
     pub fn mark_resume(&self) {
-        self.pending_start.store(2, Ordering::Release);
+        // Daemon hosts adopt durable history after engine construction. Only
+        // classify the initial pending start: navigation must not rearm it,
+        // nor replace a pending post-compaction start.
+        let _ = self
+            .pending_start
+            .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
     }
 
     pub fn mark_compact(&self) {

@@ -3,7 +3,7 @@
 Prime Agent implements bounded command hooks for seven lifecycle events: startup,
 prompt admission, tool execution, natural completion, compaction, and shutdown. This is a
 bounded subset of the [Codex hooks contract](https://learn.chatgpt.com/docs/hooks),
-reviewed on 2026-10-12. It is not a complete Codex extension runtime or a complete
+reviewed on 2026-10-15. It is not a complete Codex extension runtime or a complete
 security boundary. Existing tool authorization remains authoritative.
 
 This does **not** restore Pi extension compatibility. The extension subsystem
@@ -11,16 +11,16 @@ removed by PR #3189 remains removed; legacy extension configuration keys remain
 ignored. These hooks accept only the documented bounded command-hook JSON
 contract and do not load or execute old extension modules.
 
-This document records the implemented scope and compatibility decisions for the
-local milestone. The source has received independent static review; the final
-implementation report records executed tests and remaining validation gates. Unsupported events and capabilities must produce diagnostics; they
+This document records the supported API and deliberate compatibility limits.
+Independent static review complements the executed checks described in the
+validation record below. Unsupported events and capabilities must produce diagnostics; they
 must not silently appear to work.
 
 ## Compatibility matrix
 
 | Event | Current Codex contract | Prime Agent implementation |
 | --- | --- | --- |
-| `SessionStart` | Match `source`: `startup`, `resume`, `clear`, `compact`. Text stdout or `hookSpecificOutput.additionalContext` supplies developer context. Common `continue: false` stops before the next model request. | Synchronous control gate, deferred until real work before the first model request. Sources `startup`, `resume`, `compact`; no `clear` event is fabricated. Context/text output is explicitly unsupported. Exit 2 is a callback failure, not a veto. |
+| `SessionStart` | Match `source`: `startup`, `resume`, `clear`, `compact`, `fork`. Text stdout or `hookSpecificOutput.additionalContext` supplies developer context. Common `continue: false` stops before the next model request. | Synchronous control gate, deferred until real work before the first model request. Sources `startup`, `resume`, `compact`; no `clear` or `fork` event is fabricated. Context/text output is explicitly unsupported. Exit 2 is a callback failure, not a veto. |
 | `UserPromptSubmit` | Matcher ignored. Input includes `prompt`, `turn_id`. Text/context output supplements developer context; `decision: "block"` or exit 2 rejects the prompt. | Synchronous admission before user-message context/persistence, including queued user batches and hook continuations. Internal autonomous rows are excluded by provenance. Block/exit 2 requires a nonempty reason; context output is unsupported. |
 | `PreToolUse` | Match canonical tool name and aliases. Input includes tool id, arguments and turn id. Supports deny, context and allow with replacement arguments. Plain stdout ignored. | Synchronous denial only: modern `permissionDecision: "deny"`, legacy `decision: "block"`, or exit 2. Deny/block and exit 2 require nonempty reasons. Allow/rewrite and model-context injection are unsupported and diagnosed; permissions remain unchanged. |
 | `PostToolUse` | Match tool name. Input adds `tool_response`. Synchronous block/exit 2 can replace the model-visible tool result, although effects already happened. Asynchronous handlers cannot control execution. | Requires `async: true`; observation only. No result replacement, approval, continuation or model-context injection. Raw tool output and durable transcripts remain unchanged. |
@@ -306,8 +306,8 @@ Event-specific schema details:
   without `decision`, `reason` or `hookSpecificOutput`.
 - Stop has no `hookSpecificOutput`. A block requires a reason at semantic
   validation time, even though the JSON schema does not require that field.
-- SessionStart's generated source enum contains `fork`, ahead of the release
-  page's source list. It is not grounds to claim released fork support.
+- SessionStart now includes `fork` in both the release page and generated schema.
+  Prime does not emit that source; its supported sources remain listed above.
 - Optional `agent_id` and `agent_type` appear on tool, prompt and compaction
   inputs. Omit absent optional fields rather than emitting JSON null.
 - Background Codex hooks can deliver informational model context at a later
@@ -315,8 +315,7 @@ Event-specific schema details:
 
 Context injection, tool-input rewrites, synchronous post-tool decisions, and unlimited
 Stop continuations remain outside this bounded contract. No developer-role channel
-is fabricated in Prime Agent's provider message types. Publication, pushing, PR
-creation and merging require separate approval for this local task.
+is fabricated in Prime Agent's provider message types.
 
 An invalid or unreadable source is skipped atomically with a diagnostic. It cannot
 disable accepted hooks from another source; in particular, a malformed untrusted
@@ -328,8 +327,8 @@ disables all hooks.
 This subset can veto a **supported root-session model tool invocation** before
 its tool executor runs. It cannot currently establish that an extension-era
 security policy is enforced across Prime Agent. Do not describe it as a complete
-security boundary or as a verified migration of Ian's security hooks. The actual
-hook definitions and policy requirements have not been inspected.
+security boundary or as a verified migration of existing security hooks. Each
+policy and its hook definitions require a separate coverage assessment.
 
 | Path or requirement | Current coverage and consequence |
 | --- | --- |
@@ -377,14 +376,12 @@ Code evidence: [tool admission pipeline](../crates/pa-agent/src/agent_loop/tool_
 [command process authority](../crates/pa-core/src/hooks/process.rs), and
 [user-bash execution](../crates/pa-daemon/src/user_bash.rs).
 
-Covering these gaps would change the agreed implementation scope. This assessment
-adds documentation only; it does not enable fail-closed policy, broaden
-interception, alter permissions, or restore old extensions. Those decisions
-require Kevin's direction before implementation.
+Fail-closed policy, broader interception, permission controls and legacy extension
+support require separate designs and validation; this API does not provide them.
 
 ## Independent implementation review
 
-Static review verified these concrete boundaries in the local source:
+Static review checked these concrete implementation boundaries:
 
 - Configuration uses an immutable lazy snapshot, exact source/cwd hashes and
   descriptor-based trust ownership checks. Nonblocking, no-follow file opening
@@ -402,33 +399,32 @@ Static review verified these concrete boundaries in the local source:
   fallback, including after normal shell exit. Standard input, both output
   streams and child exit are handled concurrently under a deadline.
 
-Tests in the source cover trust changes, unsupported configuration/output, FIFO
-rejection, source/trust symlinks, process bounds and adapter denial/result
-preservation. Their presence is not evidence that they passed: consult the
-implementation report for actual commands and outcomes. Consult the final report for daemon/direct/headless, shutdown and startup/load
-evidence. Subagent command hooks are deliberately excluded; isolation is verified
-with trusted definitions present.
+## Validation record
 
-## Delivery plan and validation
+The initial seven-event implementation was developed against `3e0893260` and
+recorded in commit `3ae7c6c08`. Its historical validation included:
 
-1. Inventory repository and callback ownership; compare the seven requested events
-   against release documentation, schemas and event parsers.
-2. Independently review compatibility and lifecycle ownership before implementation.
-3. Implement bounded configuration, trust, process execution and atomic outputs in
-   private pa-core modules; keep normal authorization authoritative.
-4. Add provider-independent admission/natural-stop seams in pa-agent and lifecycle
-   adapters in pa-core; compose explicit transport teardown at host boundaries.
-5. Test trust, subprocess cleanup, admission, cancellation, continuation limits,
-   compaction and shutdown; independently review locking and raw transcript behavior.
-6. Exercise daemon/direct/headless/subagent paths and measure startup/session load
-   against the unchanged local base; refresh the final report and local patch.
+- 41 focused hook/runtime/adapter tests and 4 final lifecycle regressions,
+  including durable daemon identity.
+- 406 shared session-engine tests, 35 pa-agent tests, 120 worker tests,
+  4 RPC protocol tests, and 45 print/RPC integration tests. Live-provider and
+  kernel-launch cases were excluded where documented by those runs.
+- Binary probes through print JSON, stdio RPC, supervisor JSONL and direct
+  authenticated worker transport; child-worker exclusion was exercised with
+  trusted hook definitions present.
+- Formatting, whitespace and strict Clippy checks for the tested targets.
+  These were not a claim that every workspace target or live environment passed.
 
-The checked-out base is local `origin/main` at `3e0893260`; it was not fetched.
-Work is isolated on `feat/codex-command-hooks`. No dependencies, credentials,
-installations or access settings were added. Existing main-checkout changes remain
-untouched.
+Binary probes used a faux provider and deliberately disabled Python bootstrap.
+They establish lifecycle dispatch, denial, unchanged error results and transcript
+identity on those paths; they do not establish policy coverage inside a live
+Python kernel. The reproducible transport harness and its setup are in
+[`scripts/hooks_transport_probe.py`](../scripts/hooks_transport_probe.py) and
+[its instructions](../scripts/hooks_transport_probe.md).
 
-Validation results are recorded in the adjacent workspace `HOOKS-REPORT.md` after
-running the final implementation. Earlier two-event milestone results do not
-validate this expanded implementation. This document describes the implemented scope; the report distinguishes passed
-checks from remaining release gates.
+The 2026-10-15 integration targets main commit `5f218f780dabc51e26b039580da5d0686cc5616a`.
+The official release documentation and all thirteen linked schemas were checked
+again on that date. Historical test counts and startup/load measurements do not
+validate the integrated revision. Fresh formatting, focused lifecycle/runtime
+checks, transport probes and applicable integration checks must be recorded
+against the exact PR head; consult the PR validation results for their outcomes.

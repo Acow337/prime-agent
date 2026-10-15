@@ -12,7 +12,7 @@ No tool implementations (pa-core), no providers (pa-ai), no session persistence,
 `run_loop` (session inputs -> stream of loop events), `ToolDispatcher` trait. Loop internals `pub(crate)`.
 
 ## Depends on
-pa-types, pa-ai (one-way).
+No workspace dependencies.
 
 Tool callback callers can select `ToolHookContextMode` on `AgentOptions` or
 `AgentLoopConfig`. The default `Full` preserves the callback context contract;

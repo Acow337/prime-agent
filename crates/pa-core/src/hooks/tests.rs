@@ -7,6 +7,7 @@ fn input(event: &str) -> Value {
         "tool_use_id":"call", "tool_input":{"command":"echo normal"}})
 }
 
+#[cfg(unix)]
 fn fixture(config: &Value) -> (tempfile::TempDir, HookRuntime) {
     use sha2::{Digest, Sha256};
     let dir = tempfile::tempdir().unwrap();

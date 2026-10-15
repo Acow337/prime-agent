@@ -293,9 +293,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
-            cell_source_code: None,
             spawned_by_request_id: None,
-            decision_child: false,
         })
         .await
         .expect("spawn the child");
@@ -444,7 +442,6 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
             "receiver_role": "child",
             "receiver_name": "parked-kid",
         }),
-        cell_source_code: None,
     })
     .await
     .expect("the send must wake the passivated child and deliver");
@@ -612,9 +609,7 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
-            cell_source_code: None,
             spawned_by_request_id: None,
-            decision_child: false,
         })
         .await
         .expect("spawn the child");

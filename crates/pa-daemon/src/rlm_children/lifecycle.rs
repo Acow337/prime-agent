@@ -55,6 +55,12 @@ fn custom_message_text(message: &CustomMessage) -> Option<String> {
 impl SupervisorChildSessionsInner {
     /// Create one child session over the supervisor link (no prompt yet);
     /// `model` is the resolved `provider/id` selector.
+    ///
+    /// `launch_env` is the environment the child's worker process runs
+    /// in: the parent worker's own env (filtered) for an `rlm.spawn`
+    /// child — TS runs those in-process inside the parent worker, so
+    /// parity means the child inherits the parent's environment — or
+    /// the minimal TS set for a depth-0 `create_session` root.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_child(
         &self,
@@ -74,6 +80,7 @@ impl SupervisorChildSessionsInner {
         spawned_by_request_id: Option<&str>,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
+        launch_env: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<CreatedChild> {
         let mut config = json!({
             "cwd": cwd,
@@ -81,17 +88,6 @@ impl SupervisorChildSessionsInner {
             "rlmDepth": depth,
             "rlmMaxDepth": identity.rlm_max_depth,
         });
-        // The decision child's runtime kind reaches the worker through the
-        // create config: it builds the decision engine instead of the agent
-        // engine.
-        if runtime_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("kind"))
-            .and_then(Value::as_str)
-            == Some("decision")
-        {
-            config["decisionChild"] = json!(true);
-        }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
             config["model"] = json!(id);
@@ -147,7 +143,7 @@ impl SupervisorChildSessionsInner {
             runtime_metadata,
             lifecycle: Some(DaemonSessionLifecycle::Resident),
             env: None,
-            launch_env: None,
+            launch_env,
             rest: Map::default(),
         };
         let summary = self
@@ -173,6 +169,7 @@ impl SupervisorChildSessionsInner {
         session_dir: &Path,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
+        launch_env: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<CreatedChild> {
         let created = self
             .create_child(
@@ -187,6 +184,7 @@ impl SupervisorChildSessionsInner {
                 /*spawned_by_request_id*/ None,
                 runtime_metadata,
                 identity,
+                launch_env,
             )
             .await?;
         // A failed prompt tears the just-created session down (TS kills the
@@ -496,7 +494,7 @@ impl SupervisorChildSessionsInner {
                 self.refresh_record(record).await;
                 // The run's final rows are attributed before the terminal
                 // notice rides the parent's follow-up route.
-                self.emit_child_usage(record).await;
+                self.emit_final_child_usage(record).await;
                 // TS records the return before delivering the notice: the
                 // pending edge must be on the parent's ledger before the
                 // notice's follow-up turn mints its own request.
@@ -544,7 +542,7 @@ impl SupervisorChildSessionsInner {
                 if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
                     // A dead child keeps whatever rows its file already
                     // holds; capture them before the terminal notice.
-                    self.emit_child_usage(record).await;
+                    self.emit_final_child_usage(record).await;
                     if self
                         .settle_failed(
                             record,
