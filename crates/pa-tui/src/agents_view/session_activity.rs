@@ -1,5 +1,6 @@
 //! The per-session shells and factory-run counts behind the agents-view activity lines.
 use super::{mpsc, AgentsViewMode, DaemonClient, DaemonCommand, SessionActivity, UiInput};
+use crate::bash_view::ShellCounts;
 use anyhow::Result;
 use serde_json::{Map, Value};
 
@@ -7,7 +8,7 @@ use serde_json::{Map, Value};
 /// count.
 pub(super) struct ActivityRead {
     pub(super) active_session_id: String,
-    pub(super) shells: Option<usize>,
+    pub(super) shells: Option<ShellCounts>,
     pub(super) factory_runs: Option<usize>,
 }
 
@@ -28,7 +29,7 @@ pub(super) fn spawn_session_activity_fetch(
             reads.spawn(async move {
                 let shells = async {
                     if !shells_supported {
-                        return Some(0);
+                        return Some(ShellCounts::default());
                     }
                     let reply = client
                         .request_ok(DaemonCommand::ListKernelBash {
@@ -38,7 +39,7 @@ pub(super) fn spawn_session_activity_fetch(
                         })
                         .await;
                     count(reply, |data| {
-                        Some(crate::bash_view::running_shell_count(data))
+                        Some(crate::bash_view::running_shell_counts(data))
                     })
                 };
                 let factory_runs = async {
@@ -75,10 +76,10 @@ pub(super) fn spawn_session_activity_fetch(
 }
 
 /// A session without a running kernel hosts nothing: zero, not a failed read.
-fn count(reply: Result<Value>, count: impl Fn(&Value) -> Option<usize>) -> Option<usize> {
+fn count<T: Default>(reply: Result<Value>, count: impl Fn(&Value) -> Option<T>) -> Option<T> {
     match reply {
         Ok(data) => count(&data),
-        Err(error) if crate::daemon_client::is_kernel_not_running(&error) => Some(0),
+        Err(error) if crate::daemon_client::is_kernel_not_running(&error) => Some(T::default()),
         Err(_) => None,
     }
 }

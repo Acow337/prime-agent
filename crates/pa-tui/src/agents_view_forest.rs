@@ -105,11 +105,11 @@ pub struct SelectionKey {
     pub active_session_id: Option<String>,
 }
 
-/// One live session's own activity counts, keyed by its `activeSessionId`: the shells and
+/// One session's own activity counts (a live one's keyed by its `activeSessionId`): the shells and
 /// factory-run lines render them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionActivity {
-    pub shells: usize,
+    pub shells: crate::bash_view::ShellCounts,
     pub factory_runs: usize,
 }
 
