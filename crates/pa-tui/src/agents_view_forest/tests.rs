@@ -1,5 +1,6 @@
 use super::*;
 use crate::agents_view_state::reconcile_unified_sessions;
+use crate::bash_view::ShellCounts;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -1259,7 +1260,10 @@ fn activity(entries: &[(&str, usize, usize)]) -> HashMap<String, SessionActivity
             (
                 (*active).to_string(),
                 SessionActivity {
-                    shells: *shells,
+                    shells: ShellCounts {
+                        running: *shells,
+                        persistent: 0,
+                    },
                     factory_runs: *factory_runs,
                 },
             )
@@ -1336,5 +1340,88 @@ fn activity_lines_without_subagents_and_without_counts() {
         rows.len(),
         3,
         "b has no lines and a has no shells line: {titles:?}"
+    );
+}
+
+fn shells_lines(rows: &[AgentsViewRow]) -> Vec<(&str, &str)> {
+    rows.iter()
+        .filter(|row| row.kind == RowKind::Shells)
+        .map(|row| (row.identity.as_str(), row.title.as_str()))
+        .collect()
+}
+
+/// A live node's shells line breaks out its persistent shells; without any it keeps the plain
+/// count.
+#[test]
+fn a_live_shells_line_counts_its_persistent_shells() {
+    let roster = vec![
+        roster_entry("a", "idle", &parent_summary("a")),
+        roster_entry("b", "idle", &parent_summary("b")),
+    ];
+    let shells = |running, persistent| SessionActivity {
+        shells: ShellCounts {
+            running,
+            persistent,
+        },
+        factory_runs: 0,
+    };
+    let counts = HashMap::from([
+        ("a-live".to_string(), shells(2, 1)),
+        ("b-live".to_string(), shells(2, 0)),
+    ]);
+    let rows = rows_with_activity(&roster, None, &[], &counts);
+    let mut lines = shells_lines(&rows);
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            ("shells:file:/x/a.jsonl", "$ 2 shells · 1 persistent"),
+            ("shells:file:/x/b.jsonl", "$ 2 shells"),
+        ]
+    );
+}
+
+/// A session without a live kernel shows its catalog row's live persistent shells (every one
+/// running and persistent); a live session counts its kernel rows only, never the catalog's too.
+#[test]
+fn an_inactive_node_shows_its_live_persistent_shells() {
+    let shell = |id: &str| {
+        json!({
+            "id": id,
+            "command": "python -m http.server",
+            "pid": 7,
+            "startedAt": "2026-10-15T00:00:00Z",
+            "status": "running",
+            "persistent": true,
+        })
+    };
+    let roster = vec![roster_entry("live", "idle", &parent_summary("live"))];
+    let saved = vec![
+        json!({
+            "id": "gone",
+            "path": "/x/gone.jsonl",
+            "messageCount": 2,
+            "persistentShells": [shell("s1"), shell("s2")],
+        }),
+        json!({
+            "id": "live",
+            "path": "/x/live.jsonl",
+            "messageCount": 2,
+            "persistentShells": [shell("s3")],
+        }),
+    ];
+    let records = reconcile_unified_sessions(&roster, &saved);
+    let rows = build_rows(
+        &records,
+        None,
+        &HashSet::default(),
+        &HashSet::default(),
+        &compute_rollups(&records),
+        &HashMap::new(),
+        None,
+    );
+    assert_eq!(
+        shells_lines(&rows),
+        vec![("shells:file:/x/gone.jsonl", "$ 2 shells · 2 persistent")]
     );
 }
