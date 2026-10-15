@@ -149,6 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn external_denial_prevents_execution_and_preserves_model_tool_call() {
+        let _command_guard = crate::hooks::test_command_guard().await;
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path().join("project");
         let agent_dir = directory.path().join("agent");
@@ -251,6 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn observer_receives_original_result_without_returning_an_override() {
+        let _command_guard = crate::hooks::test_command_guard().await;
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path().join("project");
         let agent_dir = directory.path().join("agent");

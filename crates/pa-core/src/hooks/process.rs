@@ -27,10 +27,7 @@ impl ProcessGroup {
             // Never fall back to signaling a PID: the shell may already be
             // reaped, allowing its numeric PID to name an unrelated process.
             // ESRCH simply means the owned group has already disappeared.
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+            let _ = crate::platform::process::kill_process_group_only(pid);
         }
     }
 }

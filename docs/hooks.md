@@ -33,6 +33,16 @@ Other Codex events (`PermissionRequest`, `PostCompact`, `SubagentStart`,
 plugin manifests, managed hook policy, inline TOML, and Codex config autoimport
 are outside this milestone. No tool-permission bypass option is introduced.
 
+Daemon user rows are persisted and forwarded only after core admission succeeds,
+including every row in a submitted batch. Accepted text and image content retain
+their exact typed wire representation and appear once. A veto, image-route refusal,
+engine-build failure, or cancellation before admission leaves no attempted user
+row in the transcript. This correctness change also applies with hooks disabled;
+older daemon builds eagerly persisted attempted prompts before these checks.
+SessionStart classifies custom-only setup/goal history as startup; durable
+conversation or its summaries classify as resume. A completed SessionStart stop
+is consumed once; cancellation before completion leaves the event pending.
+
 ## Configuration and trust
 
 The sources are `<agent_dir>/hooks.json` and

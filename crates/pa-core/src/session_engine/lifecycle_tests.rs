@@ -103,6 +103,7 @@ fn events(path: &Path) -> Vec<Value> {
 
 #[tokio::test]
 async fn session_start_is_deferred_and_rearms_only_after_compaction() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
         "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
     }]}]}}));
@@ -143,6 +144,7 @@ async fn session_start_is_deferred_and_rearms_only_after_compaction() {
 
 #[tokio::test]
 async fn denied_prompt_restores_deferred_custom_rows_for_the_next_accepted_turn() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"UserPromptSubmit": [{"hooks": [{
         "type": "command", "command": "cat >/dev/null; if [ ! -f allow ]; then printf '%s' '{\"decision\":\"block\",\"reason\":\"not yet\"}'; fi"
     }]}]}}));
@@ -177,6 +179,7 @@ async fn denied_prompt_restores_deferred_custom_rows_for_the_next_accepted_turn(
 
 #[tokio::test]
 async fn subagent_excludes_every_lifecycle_hook_even_with_shared_trusted_configuration() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let mut hook_map = serde_json::Map::new();
     for event in [
         "SessionStart",
@@ -260,6 +263,7 @@ async fn subagent_excludes_every_lifecycle_hook_even_with_shared_trusted_configu
 
 #[tokio::test]
 async fn hooks_use_host_durable_identity_instead_of_in_memory_mirror_id() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"SessionEnd": [{"hooks": [{
         "type": "command", "command": "cat > ended.json"
     }]}]}}));
@@ -291,6 +295,7 @@ async fn hooks_use_host_durable_identity_instead_of_in_memory_mirror_id() {
 
 #[tokio::test]
 async fn late_durable_history_adoption_marks_resume_without_rearming_navigation() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     for windowed in [false, true] {
         let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
             "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
@@ -346,5 +351,121 @@ async fn late_durable_history_adoption_marks_resume_without_rearming_navigation(
             vec![json!("resume"), json!("compact")]
         );
         assert_eq!(provider.calls().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn session_start_stop_is_consumed_before_the_next_submission() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
+        "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl; printf '%s' '{\"continue\":false,\"stopReason\":\"pause this admission\"}'"
+    }]}]}}));
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    provider.push_text_turn("accepted later");
+    let engine = create_session(fixture.config(&provider)).await.unwrap();
+    let error = engine
+        .prompt("blocked", PromptOptions::default())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("pause this admission"));
+    assert!(provider.calls().is_empty());
+    engine
+        .prompt("accepted", PromptOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(events(&fixture.cwd.join("starts.jsonl")).len(), 1);
+    assert_eq!(provider.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn cancelled_session_start_remains_pending_for_next_submission() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
+        "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
+    }]}]}}));
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    provider.push_text_turn("accepted after cancellation");
+    let engine = create_session(fixture.config(&provider)).await.unwrap();
+    let abort = pa_agent::abort::AbortController::new();
+    abort.abort();
+    assert!(engine
+        .session
+        .lifecycle_hooks
+        .as_ref()
+        .unwrap()
+        .start("test", abort.signal())
+        .await
+        .is_err());
+    assert!(provider.calls().is_empty());
+    engine
+        .prompt("accepted", PromptOptions::default())
+        .await
+        .unwrap();
+    let starts = events(&fixture.cwd.join("starts.jsonl"));
+    assert_eq!(
+        starts
+            .iter()
+            .map(|event| event["source"].clone())
+            .collect::<Vec<_>>(),
+        [json!("startup")]
+    );
+    assert_eq!(provider.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn custom_only_adoption_keeps_startup_source() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    for adoption in ["construction", "branch", "window"] {
+        let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
+            "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
+        }]}]}}));
+        let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+        provider.push_text_turn("first actual conversation");
+        let mut durable = crate::session::manager::SessionManager::in_memory(&fixture.cwd);
+        durable
+            .append_custom_message(
+                "goal_continuation",
+                pa_types::ai::UserContent::Text("setup context".into()),
+                /*display*/ false,
+                None,
+            )
+            .unwrap();
+        let entries = durable.get_all_entries().to_vec();
+        let mut config = fixture.config(&provider);
+        if adoption == "construction" {
+            config.session_manager = Some(durable);
+        }
+        let engine = create_session(config).await.unwrap();
+        if adoption == "branch" {
+            engine
+                .session
+                .rebuild_branch_context(entries)
+                .await
+                .unwrap();
+        } else if adoption == "window" {
+            let path = fixture.cwd.join("restored.jsonl");
+            let mut bytes = Vec::new();
+            for entry in entries {
+                serde_json::to_writer(&mut bytes, &entry).unwrap();
+                bytes.push(b'\n');
+            }
+            std::fs::write(&path, bytes).unwrap();
+            let window = crate::session::window::WindowedSessionStore::open(&path)
+                .unwrap()
+                .unwrap();
+            engine.session.restore_windowed_context(window).await;
+        }
+        engine
+            .prompt("first", PromptOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            events(&fixture.cwd.join("starts.jsonl"))
+                .iter()
+                .map(|event| event["source"].clone())
+                .collect::<Vec<_>>(),
+            [json!("startup")],
+            "{adoption}"
+        );
     }
 }

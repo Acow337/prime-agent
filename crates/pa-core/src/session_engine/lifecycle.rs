@@ -35,7 +35,16 @@ impl LifecycleHooks {
         let _ = self.deferred_rows.set(rows);
     }
 
-    pub fn mark_resume(&self) {
+    pub fn mark_resume_from_history(&self, messages: &[pa_types::session::AgentMessage]) {
+        // Host setup and injected goal/custom rows can precede the first real
+        // prompt. Only durable conversation (including compacted summaries)
+        // establishes a resumed session.
+        if !messages
+            .iter()
+            .any(|message| !matches!(message, pa_types::session::AgentMessage::Custom(_)))
+        {
+            return;
+        }
         // Daemon hosts adopt durable history after engine construction. Only
         // classify the initial pending start: navigation must not rearm it,
         // nor replace a pending post-compaction start.
@@ -71,15 +80,17 @@ impl LifecycleHooks {
         input["source"] = json!(source);
         let outcome = self.runtime.dispatch(input, signal.clone()).await;
         pa_agent::abort::throw_if_aborted_signal(Some(&signal))?;
+        // A completed lifecycle decision is one-shot even when it stops this
+        // admission. Cancellation leaves the pending event available to retry.
+        let _ =
+            self.pending_start
+                .compare_exchange(pending, 0, Ordering::AcqRel, Ordering::Acquire);
         if let Some(reason) = outcome.stop.or(outcome.deny) {
             anyhow::bail!("{reason}");
         }
         if let Some(message) = outcome.message {
             tracing::warn!(%message, "session-start hook message");
         }
-        let _ =
-            self.pending_start
-                .compare_exchange(pending, 0, Ordering::AcqRel, Ordering::Acquire);
         Ok(())
     }
 

@@ -637,10 +637,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     }
     // Session entries cross through the shared wire shape (same conversion
     // the compaction rebuild uses).
-    if !existing_messages.is_empty() {
-        if let Some(hooks) = &tool_hooks {
-            hooks.lifecycle.mark_resume();
-        }
+    if let Some(hooks) = &tool_hooks {
+        hooks.lifecycle.mark_resume_from_history(&existing_messages);
     }
     let initial_messages = if existing_messages.is_empty() {
         None

@@ -502,12 +502,10 @@ impl AgentSession {
             session.adopt_entries(branch_entries);
             crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
         };
-        let messages = rebuilt_loop_messages(rebuilt);
-        if !messages.is_empty() {
-            if let Some(hooks) = &self.lifecycle_hooks {
-                hooks.mark_resume();
-            }
+        if let Some(hooks) = &self.lifecycle_hooks {
+            hooks.mark_resume_from_history(&rebuilt);
         }
+        let messages = rebuilt_loop_messages(rebuilt);
         self.agent.set_messages(messages).await;
         Ok(())
     }

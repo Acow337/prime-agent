@@ -66,6 +66,7 @@ fn serialized_input_is_bounded_without_allocating_the_whole_encoding() {
 #[cfg(unix)]
 #[tokio::test]
 async fn all_vetoes_run_and_first_configured_reason_wins() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let (_dir, runtime) = fixture(&json!({"hooks":{"PreToolUse":[{"hooks":[
         {"type":"command","command":"cat >/dev/null; while [ ! -e second-ran ]; do sleep 0.01; done; printf first >&2; exit 2"},
         {"type":"command","command":"cat >/dev/null; printf ran > second-ran; printf second >&2; exit 2"}
@@ -101,6 +102,7 @@ async fn all_vetoes_run_and_first_configured_reason_wins() {
 #[cfg(unix)]
 #[tokio::test]
 async fn malformed_policy_output_cannot_partly_deny() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let (_dir, runtime) = fixture(&json!({"hooks":{"PreToolUse":[{"hooks":[
         {"type":"command","command":"printf '%s' '{\"decision\":\"block\",\"continue\":false}'"}
     ]}]}}));
@@ -115,6 +117,7 @@ async fn malformed_policy_output_cannot_partly_deny() {
 #[cfg(unix)]
 #[tokio::test]
 async fn observer_queue_is_bounded_and_never_awaits_delivery() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let (_dir, runtime) = fixture(&json!({"hooks":{"PostToolUse":[{"hooks":[
         {"type":"command","command":"cat >/dev/null; sleep 20","async":true,"timeout":1}
     ]}]}}));
@@ -143,6 +146,7 @@ async fn observer_queue_is_bounded_and_never_awaits_delivery() {
 #[cfg(unix)]
 #[tokio::test]
 async fn long_observers_leave_capacity_for_a_synchronous_denial() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let observers: Vec<_> = (0..4)
         .map(|index| {
             json!({
@@ -184,6 +188,7 @@ async fn long_observers_leave_capacity_for_a_synchronous_denial() {
 #[cfg(unix)]
 #[tokio::test]
 async fn execution_uses_the_canonical_directory_bound_to_trust() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let (dir, original) = fixture(&json!({"hooks":{"PreToolUse":[{"hooks":[
         {"type":"command","command":"pwd >&2; exit 2"}
     ]}]}}));
@@ -220,6 +225,7 @@ async fn execution_uses_the_canonical_directory_bound_to_trust() {
 #[cfg(unix)]
 #[tokio::test]
 async fn lifecycle_dispatch_combines_stop_reasons_in_source_order() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let (_dir, runtime) = fixture(&json!({"hooks":{"Stop":[{"matcher":"ignored","hooks":[
         {"type":"command","command":"printf first >&2; exit 2"},
         {"type":"command","command":"printf second >&2; exit 2"}
@@ -258,6 +264,7 @@ fn combined_feedback_is_bounded_on_utf8_boundaries() {
 #[cfg(unix)]
 #[tokio::test]
 async fn session_end_is_joined_once_and_canceled_waiters_do_not_restart_it() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let (_dir, runtime) = fixture(&json!({"hooks":{"SessionEnd":[{"hooks":[
         {"type":"command","command":"printf x >> count; touch started; while [ ! -f release ]; do sleep 0.01; done; touch finished","timeout":3,"async":true}
     ]}]}}));
@@ -301,6 +308,7 @@ async fn session_end_is_joined_once_and_canceled_waiters_do_not_restart_it() {
 #[cfg(unix)]
 #[tokio::test]
 async fn session_end_total_deadline_covers_multiple_command_waves() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let handlers = vec![json!({"type":"command","command":"sleep 20","timeout":3}); 8];
     let (_dir, runtime) = fixture(&json!({"hooks":{"SessionEnd":[{"hooks":handlers}]}}));
     tokio::time::timeout(
@@ -315,6 +323,7 @@ async fn session_end_total_deadline_covers_multiple_command_waves() {
 #[cfg(unix)]
 #[tokio::test]
 async fn finish_cancels_and_joins_synchronous_commands_before_end() {
+    let _command_guard = crate::hooks::test_command_guard().await;
     let (_dir, runtime) = fixture(&json!({"hooks":{
         "PreCompact":[{"hooks":[{"type":"command","command":"printf '%s' $$ > decision-pid; touch decision-ready; sleep 30","timeout":30}]}],
         "SessionEnd":[{"hooks":[{"type":"command","command":"touch ended"}]}]

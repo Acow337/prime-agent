@@ -297,10 +297,8 @@ impl AgentSession {
             session.adopt_window(window);
             session.active_context().messages
         };
-        if !messages.is_empty() {
-            if let Some(hooks) = &self.lifecycle_hooks {
-                hooks.mark_resume();
-            }
+        if let Some(hooks) = &self.lifecycle_hooks {
+            hooks.mark_resume_from_history(&messages);
         }
         self.agent
             .set_messages(

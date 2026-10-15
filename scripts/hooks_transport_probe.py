@@ -365,11 +365,12 @@ def verify_daemon(binary, direct, fixture):
             write_json(child_source, child_config)
             child_digest = hashlib.sha256(os.fsencode(child_source.resolve()) + b'\0' +
                 os.fsencode(child_fixture.cwd.resolve()) + b'\0' + child_source.read_bytes()).hexdigest()
-            child_trust = {'trusted': [child_digest]}
-            trust_path = fixture.agent / 'hook-trust.json'
-            trust = json.loads(trust_path.read_text())
-            trust['trusted'].extend(child_trust['trusted'])
-            write_json(trust_path, trust)
+            parent_source = fixture.cwd / '.prime/hooks.json'
+            parent_digest = hashlib.sha256(os.fsencode(parent_source.resolve()) + b'\0' +
+                os.fsencode(fixture.cwd.resolve()) + b'\0' + parent_source.read_bytes()).hexdigest()
+            # Public config fingerprints: this fixture owns exactly these approvals.
+            write_json(fixture.agent / 'hook-trust.json',
+                       {'version': 1, 'trusted': [parent_digest, child_digest]})
             child_fixture.agent = fixture.agent
             child_sessions = fixture.agent / 'session-artifacts' / 'probe-child'
             child_sessions.mkdir(parents=True)

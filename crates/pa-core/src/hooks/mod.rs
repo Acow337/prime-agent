@@ -28,6 +28,21 @@ static COMMAND_SLOTS: Semaphore = Semaphore::const_new(4);
 // Observers cannot consume the final slot reserved for synchronous decisions.
 static OBSERVER_COMMAND_SLOTS: Semaphore = Semaphore::const_new(3);
 
+// Runtime tests share the production process limits across modules. Isolate their
+// readiness/deadline assertions without changing the limits they exercise.
+#[cfg(all(test, unix))]
+pub(crate) async fn test_command_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static TEST_COMMANDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let guard = TEST_COMMANDS.lock().await;
+    // A preceding test may have dropped a runtime with aborted observers whose
+    // task teardown is still pending. Drain those permits before starting clocks.
+    let observers = OBSERVER_COMMAND_SLOTS.acquire_many(3).await.unwrap();
+    let commands = COMMAND_SLOTS.acquire_many(4).await.unwrap();
+    drop(commands);
+    drop(observers);
+    guard
+}
+
 struct State {
     cwd: PathBuf,
     agent_dir: PathBuf,
