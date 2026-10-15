@@ -198,6 +198,52 @@ pub fn default_heartbeat_name(entry: &HeartbeatEntry) -> &'static str {
     }
 }
 
+/// A heartbeat's primary text (TS `primary`): the label, else the prompt, else
+/// the default name.
+#[must_use]
+pub fn row_primary(entry: &HeartbeatEntry) -> String {
+    entry
+        .job
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let prompt = single_line(&entry.job.prompt);
+            (!prompt.is_empty()).then_some(prompt)
+        })
+        .unwrap_or_else(|| default_heartbeat_name(entry).to_string())
+}
+
+/// The activity dock's heartbeats row: the active heartbeats only (paused
+/// ones never list), soonest next fire first, each `<countdown> <label>`.
+#[must_use]
+pub fn dock_heartbeat_items(entries: &[HeartbeatEntry], now_ms: u64) -> Vec<String> {
+    let mut active: Vec<&HeartbeatEntry> = entries
+        .iter()
+        .filter(|entry| entry.job.is_active())
+        .collect();
+    active.sort_by_key(|entry| {
+        entry
+            .job
+            .next_run_at
+            .as_deref()
+            .and_then(crate::agents_view_state::iso_to_unix_ms)
+            .unwrap_or(i64::MAX)
+    });
+    active
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} {}",
+                next_run_label(entry.job.next_run_at.as_deref(), now_ms),
+                row_primary(entry)
+            )
+        })
+        .collect()
+}
+
 /// Collapse all whitespace runs to single spaces.
 #[must_use]
 pub fn single_line(value: &str) -> String {

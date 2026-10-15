@@ -791,3 +791,27 @@ fn timestamps_cut_to_minutes_and_whitespace_collapses() {
     assert_eq!(format_timestamp("not a date"), "not a date");
     assert_eq!(single_line("a  \n b\t c "), "a b c");
 }
+
+/// The dock's heartbeats row: paused heartbeats never list, and the active ones read
+/// `<countdown> <label>`, soonest next fire first.
+#[test]
+fn the_dock_heartbeat_items_list_active_heartbeats_by_next_fire() {
+    let now = crate::agents_view_state::iso_to_unix_ms("2026-01-01T00:00:00.000Z").unwrap() as u64;
+    let entry = |id: &str, status: &str, next_run_at: &str| {
+        let mut value = job_value(id, "heartbeat", status);
+        value["job"]["label"] = serde_json::json!(format!("{id} job"));
+        value["job"]["nextRunAt"] = serde_json::json!(next_run_at);
+        value
+    };
+    let catalog = parse_heartbeats(&serde_json::json!({
+        "heartbeats": [
+            entry("late", "active", "2026-01-01T02:00:00.000Z"),
+            entry("paused", "paused", "2026-01-01T00:01:00.000Z"),
+            entry("soon", "active", "2026-01-01T00:05:00.000Z"),
+        ],
+    }));
+    assert_eq!(
+        dock_heartbeat_items(&catalog, now),
+        vec!["in 5m soon job", "in 2h late job"]
+    );
+}

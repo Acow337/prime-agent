@@ -2,9 +2,9 @@
 //! detail drill-in's pairs, and the action rows.
 
 use super::{
-    default_heartbeat_name, fill_row, hug_row, human_schedule, next_run_label, plain_cell,
-    session_label, single_line, source_label, status_dot, str_width, truncate_line, HeartbeatEntry,
-    Line, Span, Theme, ThemeColor,
+    fill_row, hug_row, human_schedule, next_run_label, plain_cell, row_primary, session_label,
+    single_line, source_label, status_dot, str_width, truncate_line, HeartbeatEntry, Line, Span,
+    Theme, ThemeColor,
 };
 
 /// The table's column width caps: the schedule expression and the label
@@ -92,23 +92,6 @@ pub(super) fn detail_block_lines(
             )
         })
         .collect()
-}
-
-/// The row's primary text (TS `primary`): the label, else the prompt, else
-/// the default name.
-fn row_primary(entry: &HeartbeatEntry) -> String {
-    entry
-        .job
-        .label
-        .as_deref()
-        .map(str::trim)
-        .filter(|label| !label.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            let prompt = single_line(&entry.job.prompt);
-            (!prompt.is_empty()).then_some(prompt)
-        })
-        .unwrap_or_else(|| default_heartbeat_name(entry).to_string())
 }
 
 /// The table's column geometry: the interval, label, next-run, and status
