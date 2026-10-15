@@ -208,11 +208,7 @@ mod tests {
     }
 
     async fn dispatch(handler: &HostHandlerFn, data: Value) -> anyhow::Result<Value> {
-        handler(HostRequestPayload {
-            data,
-            cell_source_code: None,
-        })
-        .await
+        handler(HostRequestPayload { data }).await
     }
 
     fn wired_agent() -> (

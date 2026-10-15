@@ -796,7 +796,7 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
                     .expect("the engine binds before the first run");
                 engine
                     .record_late_sent_agent_message(&tool_call_id, receipt)
-                    .await;
+                    .await?;
                 Ok(ToolExecutionResult::text("cell done"))
             })
         }),

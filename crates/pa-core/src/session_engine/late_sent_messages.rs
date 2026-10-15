@@ -113,23 +113,26 @@ pub(crate) async fn record(
     agent: &Arc<Agent>,
     tool_call_id: &str,
     message: &KernelSentAgentMessage,
-) {
-    {
+) -> anyhow::Result<()> {
+    let persistence = {
         let mut session = session.lock().await;
         let already = session.late_sent_agent_messages().iter().any(|persisted| {
             persisted.tool_call_id == tool_call_id && persisted.message.id == message.id
         });
-        if !already {
-            // The live tool result below is patched regardless: the running
-            // session should show the receipt; only the rebuild loses it.
-            if let Err(error) = session.append_custom_entry(
-                IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_TYPE,
-                Some(sent_agent_message_entry(tool_call_id, message)),
-            ) {
-                eprintln!("pa-core: late agent-message receipt not persisted: {error:#}");
-            }
+        if already {
+            Ok(())
+        } else {
+            session
+                .append_custom_entry(
+                    IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_TYPE,
+                    Some(sent_agent_message_entry(tool_call_id, message)),
+                )
+                .map(|_| ())
+                .map_err(|error| {
+                    anyhow::anyhow!("late agent-message receipt not persisted: {error}")
+                })
         }
-    }
+    };
     agent
         .mutate_messages(|rows| {
             for row in rows.iter_mut().rev() {
@@ -139,6 +142,7 @@ pub(crate) async fn record(
             }
         })
         .await;
+    persistence
 }
 
 /// Patch every persisted receipt onto the rebuilt tool results (TS
@@ -333,9 +337,15 @@ mod tests {
         let session = Arc::new(Mutex::new(session));
         let agent = agent_with(vec![python_tool_result("call-1", None)]);
 
-        record(&session, &agent, "call-1", &receipt("agentmsg_1")).await;
-        record(&session, &agent, "call-1", &receipt("agentmsg_1")).await;
-        record(&session, &agent, "call-1", &receipt("agentmsg_2")).await;
+        record(&session, &agent, "call-1", &receipt("agentmsg_1"))
+            .await
+            .unwrap();
+        record(&session, &agent, "call-1", &receipt("agentmsg_1"))
+            .await
+            .unwrap();
+        record(&session, &agent, "call-1", &receipt("agentmsg_2"))
+            .await
+            .unwrap();
 
         let entries = {
             let session = session.lock().await;
@@ -355,6 +365,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistence_failure_is_reported_before_or_after_the_result_lands() {
+        for landed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut session = SessionManager::persisted(dir.path(), &dir.path().join("sessions"));
+            session
+                .append_message(pa_types::session::AgentMessage::Assistant(
+                    pa_types::ai::AssistantMessage {
+                        content: vec![],
+                        api: "openai-completions".to_string(),
+                        provider: "fixture".to_string(),
+                        model: "fixture".to_string(),
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
+                        usage: pa_types::ai::Usage::default(),
+                        stop_reason: pa_types::ai::StopReason::Stop,
+                        stop_reason_raw: None,
+                        error_message: None,
+                        timestamp: 0,
+                        rest: serde_json::Map::default(),
+                    },
+                ))
+                .unwrap();
+            let file = session.get_session_file().unwrap().to_path_buf();
+            std::fs::remove_file(&file).unwrap();
+            std::fs::create_dir(&file).unwrap(); // deterministic append failure, even as root
+            let session = Arc::new(Mutex::new(session));
+            let agent = agent_with(if landed {
+                vec![python_tool_result("call-1", None)]
+            } else {
+                vec![]
+            });
+            let error = record(&session, &agent, "call-1", &receipt("agentmsg_1"))
+                .await
+                .expect_err("a failed durable append cannot acknowledge recording");
+            assert!(error.to_string().contains("not persisted"));
+            assert!(session.lock().await.late_sent_agent_messages().is_empty());
+            if landed {
+                let state = agent.state().await;
+                let details = state.messages.iter().find_map(tool_result_details).unwrap();
+                assert_eq!(details["sentAgentMessages"][0]["id"], "agentmsg_1");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn restore_patches_the_rebuilt_tool_results() {
         let dir = tempfile::tempdir().unwrap();
         let session = SessionManager::persisted(dir.path(), &dir.path().join("sessions"));
@@ -365,14 +421,16 @@ mod tests {
             "call-1",
             &receipt("agentmsg_1"),
         )
-        .await;
+        .await
+        .unwrap();
         record(
             &session,
             &agent_with(Vec::new()),
             "call-1",
             &receipt("agentmsg_2"),
         )
-        .await;
+        .await
+        .unwrap();
 
         // The rebuilt engine's rows: the tool result alone, without the
         // receipts (they landed after the cell settled).

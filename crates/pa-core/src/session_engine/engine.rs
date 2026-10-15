@@ -972,18 +972,22 @@ impl SessionEngine {
     /// `_recordLateIpythonSentAgentMessage`): the receipt persists as a
     /// custom entry and the newest matching `python_repl` tool result
     /// carries it in its `sentAgentMessages` details.
+    ///
+    /// # Errors
+    ///
+    /// Returns the persistence failure so the embedding cannot report successful quiescence.
     pub async fn record_late_sent_agent_message(
         &self,
         tool_call_id: &str,
         message: crate::kernel::shared::KernelSentAgentMessage,
-    ) {
+    ) -> anyhow::Result<()> {
         super::late_sent_messages::record(
             self.session.session_handle(),
             self.session.agent(),
             tool_call_id,
             &message,
         )
-        .await;
+        .await
     }
 
     /// Withdraw the queued goal-context turns: a minted continuation waiting

@@ -72,6 +72,9 @@ pub(crate) struct InlineSessionNode {
     /// The session's engine, set right after the build (the host is
     /// passed into the engine config before the engine exists).
     engine: OnceLock<Weak<SessionEngine>>,
+    /// Receipt callbacks must finish before the print tree can report quiescence.
+    pending_receipts: std::sync::atomic::AtomicUsize,
+    late_receipt_error: std::sync::Mutex<Option<String>>,
     /// Fired on every event the quiescence drive waits for: a delivered
     /// message, a child's settle, a re-run, a disposal.
     pub(crate) activity: Notify,
@@ -196,6 +199,8 @@ pub(crate) fn root_node(
         parent: None,
         children: Mutex::new(Vec::new()),
         engine: OnceLock::new(),
+        pending_receipts: std::sync::atomic::AtomicUsize::new(0),
+        late_receipt_error: std::sync::Mutex::new(None),
         activity: Notify::new(),
         recipe: Arc::new(PrintRecipe {
             options: options.clone(),
@@ -242,11 +247,34 @@ pub(crate) fn late_sent_agent_message_sink(
 ) -> pa_core::LateSentAgentMessageHandler {
     let node = Arc::clone(node);
     Arc::new(move |tool_call_id, message| {
-        tokio::spawn(record_late_sent_receipt(
-            Arc::clone(&node),
-            tool_call_id.to_string(),
-            message,
-        ));
+        // Account on the whole ancestor chain before spawning: even a previously
+        // settled child may receive a late callback while the root is parking.
+        let mut pending_nodes = Vec::new();
+        let mut current = Some(Arc::clone(&node));
+        while let Some(current_node) = current {
+            current_node
+                .pending_receipts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            current = current_node.parent_node();
+            pending_nodes.push(current_node);
+        }
+        let node = Arc::clone(&node);
+        let tool_call_id = tool_call_id.to_string();
+        tokio::spawn(async move {
+            let failure = record_late_sent_receipt(node, tool_call_id, message)
+                .await
+                .err()
+                .map(|error| format!("{error:#}"));
+            for pending_node in pending_nodes {
+                if let Some(error) = &failure {
+                    *pending_node.late_receipt_error.lock().unwrap() = Some(error.clone());
+                }
+                pending_node
+                    .pending_receipts
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                pending_node.activity.notify_waiters();
+            }
+        });
     })
 }
 
@@ -256,13 +284,13 @@ async fn record_late_sent_receipt(
     node: Arc<InlineSessionNode>,
     tool_call_id: String,
     message: pa_core::kernel::shared::KernelSentAgentMessage,
-) {
+) -> anyhow::Result<()> {
     let Some(engine) = node.engine.get().and_then(Weak::upgrade) else {
-        return;
+        anyhow::bail!("late receipt arrived without a live print session engine");
     };
     engine
         .record_late_sent_agent_message(&tool_call_id, message)
-        .await;
+        .await
 }
 
 // The quiescence drive
@@ -281,7 +309,13 @@ async fn child_is_unsettled(child: &Arc<InlineChild>) -> bool {
     if child.node.is_disposed() {
         return false;
     }
-    if !child.state.lock().await.settled {
+    if child
+        .node
+        .pending_receipts
+        .load(std::sync::atomic::Ordering::SeqCst)
+        > 0
+        || !child.state.lock().await.settled
+    {
         return true;
     }
     let agent = child.engine.session.agent();
@@ -296,6 +330,13 @@ async fn child_is_unsettled(child: &Arc<InlineChild>) -> bool {
 /// this one predicate: the live session state — not a bookkeeping flag
 /// alone — is the fact (TS `child.isSessionActive`).
 pub(crate) async fn has_unsettled_rlm_work(node: &Arc<InlineSessionNode>) -> bool {
+    if node
+        .pending_receipts
+        .load(std::sync::atomic::Ordering::SeqCst)
+        > 0
+    {
+        return true;
+    }
     for child in node.children.lock().await.iter() {
         if child_is_unsettled(child).await {
             return true;
@@ -333,6 +374,9 @@ pub(crate) async fn drive_to_quiescence(
         let notified = node.activity.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
+        if let Some(error) = node.late_receipt_error.lock().unwrap().clone() {
+            return Err(error);
+        }
         let agent = engine.session.agent();
         let streaming = agent.state().await.is_streaming;
         if !streaming && agent.has_queued_messages() {
@@ -737,6 +781,8 @@ impl RlmSubagentHost for InlineHost {
                 parent: Some(Arc::downgrade(&node)),
                 children: Mutex::new(Vec::new()),
                 engine: OnceLock::new(),
+                pending_receipts: std::sync::atomic::AtomicUsize::new(0),
+                late_receipt_error: std::sync::Mutex::new(None),
                 activity: Notify::new(),
                 recipe: Arc::clone(&recipe),
                 disposed: std::sync::atomic::AtomicBool::new(false),
@@ -1290,10 +1336,96 @@ mod tests {
                         },
                     },
                 )
-                .await;
+                .await?;
                 Ok(pa_agent::types::AgentToolResult::text("cell done"))
             })
         }
+    }
+
+    #[tokio::test]
+    async fn detached_receipt_failure_holds_quiescence_and_wakes_the_error_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = run_options(directory.path());
+        let manager = pa_core::session::manager::SessionManager::in_memory(directory.path());
+        let node = root_node(&options, &manager, None);
+        let notified = node.activity.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let sink = late_sent_agent_message_sink(&node);
+        sink(
+            "call-1",
+            pa_core::kernel::shared::KernelSentAgentMessage {
+                id: "agentmsg_1".to_string(),
+                message: "Ping.".to_string(),
+                delivery_status: pa_core::kernel::shared::SentDeliveryStatus::Delivered,
+                receiver_role: Some(pa_core::kernel::shared::ReceiverRole::Parent),
+                target: pa_core::kernel::shared::SentAgentMessageTarget {
+                    active_session_id: "a1".to_string(),
+                    session_id: "s1".to_string(),
+                    session_name: None,
+                },
+            },
+        );
+        assert!(has_unsettled_rlm_work(&node).await);
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("receipt completion must wake the parked drive");
+        assert_eq!(
+            node.pending_receipts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(node
+            .late_receipt_error
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap()
+            .contains("without a live print session engine"));
+    }
+
+    #[tokio::test]
+    async fn a_receipt_on_an_idle_child_holds_and_wakes_ancestor_quiescence() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = run_options(directory.path());
+        let manager = pa_core::session::manager::SessionManager::in_memory(directory.path());
+        let root = root_node(&options, &manager, None);
+        let mut child = root_node(&options, &manager, None);
+        Arc::get_mut(&mut child).unwrap().parent = Some(Arc::downgrade(&root));
+        let notified = root.activity.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        late_sent_agent_message_sink(&child)(
+            "call-1",
+            pa_core::kernel::shared::KernelSentAgentMessage {
+                id: "agentmsg_1".to_string(),
+                message: "Ping.".to_string(),
+                delivery_status: pa_core::kernel::shared::SentDeliveryStatus::Delivered,
+                receiver_role: Some(pa_core::kernel::shared::ReceiverRole::Parent),
+                target: pa_core::kernel::shared::SentAgentMessageTarget {
+                    active_session_id: "a1".to_string(),
+                    session_id: "s1".to_string(),
+                    session_name: None,
+                },
+            },
+        );
+        // Even with no active child turn in the root's roster, pending work holds it.
+        assert!(has_unsettled_rlm_work(&root).await);
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("a child's completed recorder must wake its ancestor");
+        assert_eq!(
+            root.pending_receipts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(root
+            .late_receipt_error
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap()
+            .contains("without a live print session engine"));
     }
 
     #[tokio::test]

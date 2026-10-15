@@ -216,7 +216,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let mut runtime = SessionRuntime::new(
             &*session.lock().await,
-            Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json"))),
+            Some(Arc::new(AgentCronJobStore::new(
+                dir.path().join("jobs.json"),
+            ))),
             "live-1".to_string(),
             SessionBinding {
                 session_id: "session-1".to_string(),
