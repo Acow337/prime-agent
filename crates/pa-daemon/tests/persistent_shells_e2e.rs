@@ -7,6 +7,8 @@
 #![cfg(target_os = "linux")]
 // Narrowing casts sit at OS boundaries (pid) where the kernel bounds the values.
 #![allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+// Style gate only, not correctness: the live test is one long scenario.
+#![allow(clippy::too_many_lines)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -340,7 +342,10 @@ fn persistent_shell_survives_daemon_shutdown_is_reattached_and_dies_with_session
     assert_eq!(handles, json!([[pid, true, "hi\n"]]));
 
     // Close the session, then delete it: the delete kills the shell.
-    client.request("k1", &json!({ "type": "kill", "activeSessionId": active_id }));
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
     client.request(
         "d1",
         &json!({ "type": "delete_saved_session", "sessionPath": session_file.to_string_lossy() }),
