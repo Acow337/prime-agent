@@ -1498,6 +1498,7 @@ fn family_topology_tracks_restore_and_relocation_without_a_ledger_append() {
     let parent = sessions.join("parent.jsonl");
     let child = sessions.join("child.jsonl");
     fs::write(&parent, "{}").unwrap();
+    let parent = canonical_session_path(&parent);
     fs::write(&child, "{}").unwrap();
     let ledger = ledger_for(&dir);
     ledger
