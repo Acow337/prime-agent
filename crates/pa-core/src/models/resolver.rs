@@ -294,7 +294,12 @@ pub fn scope_patterns_select_reference(
     model_id: &str,
     all_models: &[Model],
 ) -> bool {
-    let Some(reference) = build_fallback_model(provider, model_id, all_models) else {
+    let Some(reference) = all_models
+        .iter()
+        .find(|model| model.provider == provider && model.id == model_id)
+        .cloned()
+        .or_else(|| build_fallback_model(provider, model_id, all_models))
+    else {
         return false;
     };
     patterns.iter().any(|pattern| {
@@ -661,6 +666,17 @@ mod tests {
             model("prime-inference", "z-ai/glm-5.3", "GLM"),
             model("openrouter", "openai/gpt-4o", "GPT-4o"),
         ]
+    }
+
+    #[test]
+    fn a_display_name_pattern_selects_a_cataloged_private_default() {
+        let all = private_prime_inference_models();
+        assert!(scope_patterns_select_reference(
+            &["GLM 5.2 Fast".to_string()],
+            "prime-inference",
+            "internal/glm-5.2-fast",
+            &all,
+        ));
     }
 
     #[test]
