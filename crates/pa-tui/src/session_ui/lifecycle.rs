@@ -156,6 +156,7 @@ impl SessionUi {
             session_file: None,
             pending_selection: None,
             return_to_agents_view: !options.no_session,
+            panel_returns_to_agents_view: false,
             client_auth: options.client_auth.clone(),
             keybindings: options.keybindings.clone(),
             prompt_stash: options.prompt_stash.clone(),
