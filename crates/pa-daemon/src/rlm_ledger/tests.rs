@@ -1489,3 +1489,60 @@ fn the_artifact_index_rechecks_deleted_and_relocated_transcripts_without_an_appe
         .into_owned();
     assert_eq!(ledger.live_edges().unwrap(), expected);
 }
+
+#[test]
+fn family_topology_tracks_restore_and_relocation_without_a_ledger_append() {
+    let dir = temp_dir("topology-disk-change");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    let child = sessions.join("child.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&child, "{}").unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    let archive = crate::session_archive::archive_dir(&dir);
+    fs::create_dir_all(&archive).unwrap();
+    fs::rename(
+        &child,
+        archive.join(crate::session_store::session_file_name("child")),
+    )
+    .unwrap();
+    assert_eq!(
+        ledger.family_topology().unwrap().descendants(&parent),
+        Vec::new()
+    );
+    crate::session_archive::restore_session(&archive, &sessions, "child").unwrap();
+    let restored = ledger.family_topology().unwrap();
+    assert_eq!(restored.descendants(&parent), vec![0]);
+    assert_eq!(
+        restored.canonical_children,
+        vec![canonical_session_path(&child)]
+    );
+    assert!(
+        Arc::ptr_eq(&restored, &ledger.family_topology().unwrap()),
+        "unchanged endpoints reuse the topology"
+    );
+    let relocated = dir.join("session-artifacts/parent/sub/child.jsonl");
+    fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+    fs::rename(&child, &relocated).unwrap();
+    let moved = ledger.family_topology().unwrap();
+    assert_eq!(moved.descendants(&parent), vec![0]);
+    assert_eq!(
+        moved.canonical_children,
+        vec![canonical_session_path(&relocated)]
+    );
+    fs::remove_file(&relocated).unwrap();
+    assert_eq!(
+        ledger.family_topology().unwrap().descendants(&parent),
+        Vec::new()
+    );
+}

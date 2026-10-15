@@ -536,19 +536,20 @@ impl RlmSpawnLedger {
     pub(crate) fn family_topology(&self) -> Result<Arc<FamilyTopology>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
-        Ok(Arc::clone(state.family_topology.get_or_init(|| {
-            Arc::new(self.build_family_topology(&state))
-        })))
-    }
-
-    fn build_family_topology(&self, state: &ReplayState) -> FamilyTopology {
         let mut resolver = LivePathResolver::new(
             self.agent_dir.clone(),
             self.canonical_sessions_dir.clone(),
             &state.artifact_index,
         );
+        // Endpoint liveness and relocation are filesystem state, not ledger
+        // state: restore and top-level artifact sweeps do not append a row.
+        let edges = resolve_live_edges(&state, &mut resolver);
+        let mut cached = state.family_topology.lock().expect("family topology lock");
+        if let Some(topology) = cached.as_ref().filter(|topology| topology.edges == edges) {
+            return Ok(Arc::clone(topology));
+        }
         let mut topology = FamilyTopology {
-            edges: resolve_live_edges(state, &mut resolver),
+            edges,
             ..Default::default()
         };
         for edge in &topology.edges {
@@ -562,7 +563,9 @@ impl RlmSpawnLedger {
             topology.canonical_children.push(child.clone());
             topology.parent_by_child.insert(child, parent);
         }
-        topology
+        let topology = Arc::new(topology);
+        *cached = Some(Arc::clone(&topology));
+        Ok(topology)
     }
 
     fn fold_deleted_descendant_usage(
