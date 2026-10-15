@@ -1651,9 +1651,10 @@ class FactoryExecutor:
             if run.last_error is not None:
                 payload["last_error"] = run.last_error
                 payload["remedy"] = (
-                    f"resume with await rlm.factory.resume('{run.run_id}') to continue the "
-                    "remaining states; the failed state stays error - fix its subagent and "
-                    "start a fresh run to redo it"
+                    f"resume with await rlm.factory.resume('{run.run_id}') to re-admit the "
+                    "failed state's entry as a fresh attempt (same rendered prompt, no extra "
+                    "max_entries); author the state with failure_policy 'continue' to run its "
+                    "dependents past a failure instead"
                 )
         return payload
 
@@ -1683,9 +1684,14 @@ class FactoryExecutor:
     async def resume(self, run_id: str) -> dict[str, Any]:
         """Resume a paused run (escalate, budget, or max_transitions pause).
 
-        A budget or max_transitions pause is reported once per run:
-        resuming after it is an explicit operator decision and no further
-        budget pauses fire. Raises ``ValueError`` when the run is not paused.
+        An escalate pause holds its failed entry unsettled, so resume
+        re-admits that entry first: a fresh attempt of the same rendered
+        prompt in the same entry slot -- no extra ``max_entries`` spend.
+        The failure only ever propagates to dependents under
+        ``failure_policy: "continue"``. A budget or max_transitions
+        pause is reported once per run: resuming after it is an explicit
+        operator decision and no further budget pauses fire. Raises
+        ``ValueError`` when the run is not paused.
         """
         run = self._require_run(run_id)
         if run.state != "paused":
@@ -1700,8 +1706,12 @@ class FactoryExecutor:
         run.pause_reason = None
         self._touch(run)
         self._event(run, "resumed", detail="resumed by caller")
-        # Evaluate settles first: paused runs may still carry transitions to
-        # fire (escalate) before anything can be admitted.
+        # An escalate pause holds its failed entry unsettled: re-admit it
+        # BEFORE anything evaluates or admits, so the retry -- not the
+        # failure's propagation -- is what resume runs.
+        self._readmit_held_entries(run)
+        # Evaluate settles next: a max_transitions pause left transitions
+        # mid-settle, and resume continues after the ones that fired.
         await self._evaluate_settles(run)
         # allow_backoff=False: like run(), resume() must never sleep inside
         # the calling model turn; rate-limited admissions defer to the loop.
@@ -1716,6 +1726,45 @@ class FactoryExecutor:
             "started": started,
             "pending": self._pending_state_ids(run),
         }
+
+    def _readmit_held_entries(self, run: FactoryRun) -> None:
+        """Re-admit every entry an escalate pause holds unsettled.
+
+        An escalate failure never queues its settle (the pause lands before
+        the failure propagates), so a held entry is exactly ``error`` with
+        ``is_settle`` unset -- that predicate is the one held-entry
+        definition. Resume turns each held entry back into a fresh attempt
+        of the SAME entry slot: the errored and cancelled instances re-run
+        their rendered prompt (``attempt`` keeps counting, so spawn labels
+        stay unique) and ``max_entries`` is not spent again. A
+        binding-failure entry has no instances: it
+        re-binds through the readiness pass, and a still-broken upstream
+        settles it into the same pause again.
+        """
+        for state_id in run.order:
+            state = run.states[state_id]
+            for entry in state.entries:
+                if entry.status != "error" or entry.is_settle:
+                    continue
+                entry.status = "running" if entry.instances else "pending"
+                entry.error = None
+                entry.needs_verify = False
+                state.error = None
+                for instance in entry.instances:
+                    if instance.status not in ("error", "cancelled"):
+                        continue  # running and done siblings keep their state
+                    instance.status = "pending"
+                    instance.error = None
+                    instance.answer = None
+                    instance.provisional = False
+                    instance.rate_limit_streak = 0
+                self._event(
+                    run,
+                    "readmitted",
+                    node=state_id,
+                    entry=entry.index,
+                    detail="resume re-admits the failed entry (same rendered prompt)",
+                )
 
     # -- graph, watch, host activity ------------------------------------------
 
@@ -3075,9 +3124,14 @@ class FactoryExecutor:
                     instance=instance.index,
                     detail="entry failed before admission",
                 )
-        # The failed entry settles too: guard-less transitions (the compiled
-        # dag's depends_on edges) fire from error settles so dependents run.
-        self._queue_settle(run, state, entry)
+        if policy != "escalate":
+            # The failed entry settles: guard-less transitions (the compiled
+            # dag's depends_on edges) fire from error settles so dependents
+            # run. Escalate instead HOLDS the failed entry unsettled -- the
+            # pause lands before the failure propagates, no downstream entry
+            # budget is spent on it, and resume() re-admits the entry as a
+            # fresh attempt.
+            self._queue_settle(run, state, entry)
         if run.state != "running":
             # stop() (or another transition) owns the run state now; keep the
             # entry's error but do not overwrite the final state.
@@ -3108,7 +3162,8 @@ class FactoryExecutor:
             await self._milestone(
                 run,
                 "paused",
-                f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}')",
+                f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}') "
+                "to re-admit the failed entry as a fresh attempt",
                 node=state.state_id,
             )
 
@@ -3595,7 +3650,11 @@ async def stop_factory(run_id: str) -> dict[str, Any]:
 
 
 async def resume_factory(run_id: str) -> dict[str, Any]:
-    """Resume a paused run (escalate, budget, or max_transitions pause)."""
+    """Resume a paused run (escalate, budget, or max_transitions pause).
+
+    An escalate pause re-admits the failed entry as a fresh attempt of the
+    same rendered prompt first; see ``FactoryExecutor.resume``.
+    """
     require_factory_enabled()
     return await default_factory_executor().resume(run_id)
 
@@ -4771,11 +4830,12 @@ the cap and fails to bind.
   dotted path into a `json` output; `eq`/`ne` compare JSON-strictly (a
   boolean never equals a number), comparison ops need a numeric value,
   `contains` a non-empty list, `exists` no value, and a missing or
-  unparseable port fails every op except `exists`. A failed settle still
-  fires guard-less transitions, so dependents under `continue` run; their
-  required input over the failed source then fails the dependent entry,
-  while an optional input over the failed source binds the null sentinel
-  and the dependent proceeds.
+  unparseable port fails every op except `exists`. Under `continue` a
+  failed settle still fires guard-less transitions, so dependents run;
+  their required input over the failed source then fails the dependent
+  entry, while an optional input over the failed source binds the null
+  sentinel and the dependent proceeds. Under the default `escalate` the
+  failure never propagates that far (see bounds and policies).
 - **Cycles are legal**: there is no acyclicity requirement — self-loops and
   back edges validate. The one rule is an entry state somewhere; a dag
   whose every node depends on another compiles to no entry states and is
@@ -4803,9 +4863,14 @@ the cap and fails to bind.
   (0..10, same rendered prompt), `budget_ms` (admission to settlement;
   exceeding it fails the attempt without a retry), and `failure_policy` —
   `fail_fast` (cancel every child, run failed), `continue` (entry stays
-  errored; the run finishes and reports failed if any state errored), or
-  `escalate` (the default: pause the run; resuming is the operator's
-  decision).
+  errored; the run finishes and reports failed if any state errored; its
+  failed settle fires guard-less transitions so dependents run), or
+  `escalate` (the default: pause the run BEFORE the failed settle
+  propagates — no transition fires and no downstream entry is spent — and
+  `resume` re-admits the failed entry as a fresh attempt: same rendered
+  prompt, same entry slot; a binding failure over a broken upstream
+  re-binds and pauses again, so stop and fix the upstream or author the
+  dependent's state with `continue`).
 - **Dead configurations fail loudly, never wedge**: a pending entry whose
   input source never settled, a `max_parallel` cap held entirely by
   never-settling residents with work queued, or nothing in flight and
@@ -4923,7 +4988,8 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   conversation once per kind per run, the pause notices with the resume
   call spelled out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);
-  `resume(run_id)` continues a paused run and raises on a non-paused one.
+  `resume(run_id)` continues a paused run and raises on a non-paused one;
+  after an escalate pause it first re-admits the failed entry.
 - The activity lane the daemon and TUI speak is camelCase on the wire
   (`runId`, `specId`, `timeoutMs`); the kernel API here
   (`rlm.factory.*`) is snake_case.

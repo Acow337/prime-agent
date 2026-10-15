@@ -4131,38 +4131,103 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.host.notice_kinds(), ["failed"])
 
     @async_test
-    async def test_escalate_pauses_notifies_and_resume_continues(self) -> None:
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
-        self.store_factory(
+    async def test_escalate_resume_readmits_the_failed_entry(self) -> None:
+        # Defect A (live run fa1a8f1c): resume after an escalate pause fired
+        # the ERRORED settle forward -- the guard-less transition entered the
+        # dependent, its required input failed to bind over the errored
+        # source, and it spent one of its max_entries entries on nothing.
+        # The escalate pause now lands BEFORE the failure propagates, and
+        # resume re-admits the failed entry as a fresh attempt of the same
+        # rendered prompt in the same entry slot.
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-2"] = {"status": "done", "answer": "impl-done"}
+        self.store_machine(
             {
-                "nodes": [
-                    {"id": "a", "subagent": "worker"},
-                    {"id": "b", "subagent": "worker", "depends_on": ["a"]},
+                "states": [
+                    {
+                        "id": "implement",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                    },
+                    {
+                        "id": "review",
+                        "subagent": "worker",
+                        "inputs": [{"name": "result", "type": "text", "from": "implement.result"}],
+                        "max_entries": 4,
+                    },
                 ],
+                "transitions": [{"from": "implement", "to": "review"}],
             }
         )
         result = await self.start()
         paused = await self.settle(result)
         self.assertEqual(paused["state"], "paused")
-        self.assertEqual(self.node_status(paused, "a")["status"], "error")
-        self.assertEqual(self.node_status(paused, "b")["status"], "pending")
-        self.assertEqual(self.host.spawn_calls("b"), [])
+        self.assertEqual(self.node_status(paused, "implement")["status"], "error")
+        self.assertEqual(self.node_status(paused, "review")["entries_used"], 0)
         self.assertIn("paused", self.host.notice_kinds())
-        # resume() restarts the run: b is ready (a is terminal) and finishes.
+        # resume re-admits the failed entry: a fresh attempt of the same
+        # rendered prompt, the same entry slot -- no extra max_entries.
         resumed = await rlm_module.rlm.factory.resume(result["run_id"])
         self.assertEqual(resumed["state"], "running")
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")  # a errored, b done
-        self.assertEqual(self.node_status(final, "b")["status"], "done")
-        self.assertEqual(self.host.notice_kinds(), ["paused", "failed"])
+        self.assertEqual(final["state"], "done")
+        implement = self.node_status(final, "implement")
+        self.assertEqual(implement["status"], "done")
+        self.assertEqual(implement["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in implement["entries"]], ["done"])
+        self.assertEqual(len(self.host.spawn_calls("implement")), 2)
+        review = self.node_status(final, "review")
+        self.assertEqual(review["status"], "done")
+        self.assertEqual(review["entries_used"], 1)
+        self.assertIn("impl-done", self.host.spawn_calls("review")[0]["prompt"])
+        self.assertEqual(self.host.notice_kinds(), ["paused", "finished"])
         # a second resume on the finished run must refuse
         with self.assertRaisesRegex(ValueError, "not paused"):
             await rlm_module.rlm.factory.resume(result["run_id"])
 
     @async_test
+    async def test_escalate_pause_spends_no_downstream_entry(self) -> None:
+        # The pre-propagation pause: the errored settle never fires the
+        # guard-less transition, so the dependent's entry budget is never
+        # spent on the failure. Resume re-admits the failed entry, and its
+        # own failure re-pauses the run with the same reason.
+        self.host.outcomes["implement"] = {"status": "error", "error": "boom"}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "implement",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                    },
+                    {
+                        "id": "review",
+                        "subagent": "worker",
+                        "inputs": [{"name": "result", "type": "text", "from": "implement.result"}],
+                        "max_entries": 4,
+                    },
+                ],
+                "transitions": [{"from": "implement", "to": "review"}],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+        self.assertEqual(paused["state"], "paused")
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        second = await self.settle(result)
+        self.assertEqual(second["state"], "paused")
+        self.assertEqual(second["pause_reason"], "boom")
+        self.assertEqual(self.node_status(second, "review")["entries_used"], 0)
+        self.assertEqual(self.all_events_of(result, "transition_fired"), [])
+        implement = self.node_status(second, "implement")
+        self.assertEqual(implement["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("implement")), 2)
+
+    @async_test
     async def test_resume_defers_rate_limited_admissions(self) -> None:
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
-        self.host.rate_limit_first["b"] = 2
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         self.store_factory(
             {
                 "nodes": [
@@ -4174,6 +4239,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         paused = await self.settle(result)
         self.assertEqual(paused["state"], "paused")
+        # The rate limit hits a's re-admission, not b: escalate holds the
+        # failed entry unsettled and resume() re-admits it first.
+        self.host.rate_limit_first["a"] = 3
         sleep_mark = len(self.sleeps.sleeps)
         resumed = await rlm_module.rlm.factory.resume(result["run_id"])
         # resume() must not sleep in the calling turn: the rate-limited
@@ -4181,11 +4249,14 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(resumed["started"], [])
         self.assertEqual(self.sleeps.sleeps[sleep_mark:], [])
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")  # a errored, b done
+        self.assertEqual(final["state"], "done")  # a redone, b done
+        self.assertEqual(self.node_status(final, "a")["status"], "done")
         self.assertEqual(self.node_status(final, "b")["status"], "done")
-        # b needed 3 admissions total: one deferred at resume, then one
-        # rate-limited retry inside the loop's backoff, then the success.
-        self.assertEqual(len(self.host.spawn_calls("b")), 3)
+        # a needed 4 admissions total: the failed first, one deferred at
+        # resume, one rate-limited retry inside the loop's backoff, then
+        # the success; b then runs once.
+        self.assertEqual(len(self.host.spawn_calls("a")), 4)
+        self.assertEqual(len(self.host.spawn_calls("b")), 1)
         self.assertEqual(self.sleeps.sleeps[sleep_mark:], [1.0])
 
     @async_test
@@ -4193,7 +4264,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # A run that pauses, resumes, and pauses again must record the second
         # pause in the ledger even though the parent notice fires once per
         # kind: status() is the only reader of the repeat.
-        self.host.outcomes["a"] = {"status": "error", "error": "a boom"}
+        # a fails once and its re-admitted retry succeeds, so the second
+        # pause is b's own failure -- the milestone the repeat must record.
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "a boom"}
         self.host.outcomes["b"] = {"status": "error", "error": "b boom"}
         self.store_machine(
             {
@@ -4903,7 +4976,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # contract it validated is pinned here: run-level milestones send
         # {run_id, kind, detail} (no node), node-level ones add "node", and
         # every notice goes through one "factory.progress" host request.
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         self.store_factory(
             {
                 "nodes": [
@@ -4917,20 +4990,20 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(paused["state"], "paused")
         resume = await rlm_module.rlm.factory.resume(result["run_id"])
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")
+        self.assertEqual(final["state"], "done")
         kinds = self.host.notice_kinds()
-        self.assertEqual(kinds, ["paused", "failed"])
-        paused_notice, failed_notice = self.host.notices
+        self.assertEqual(kinds, ["paused", "finished"])
+        paused_notice, finished_notice = self.host.notices
         self.assertEqual(paused_notice["kind"], "paused")
         self.assertEqual(paused_notice["run_id"], result["run_id"])
         self.assertIn("state a failed", paused_notice["detail"])
         self.assertIn("resume", paused_notice["detail"])
         self.assertEqual(paused_notice.get("node"), "a")  # node-level milestone
-        self.assertEqual(failed_notice["kind"], "failed")
-        self.assertEqual(failed_notice["run_id"], result["run_id"])
-        self.assertIsNone(failed_notice.get("node"))  # run-level milestone
+        self.assertEqual(finished_notice["kind"], "finished")
+        self.assertEqual(finished_notice["run_id"], result["run_id"])
+        self.assertIsNone(finished_notice.get("node"))  # run-level milestone
         self.assertEqual(set(paused_notice.keys()), {"run_id", "kind", "detail", "node"})
-        self.assertEqual(set(failed_notice.keys()), {"run_id", "kind", "detail"})
+        self.assertEqual(set(finished_notice.keys()), {"run_id", "kind", "detail"})
         # one host request per notice, typed factory.progress
         self.assertEqual(len(self.host.calls_of("factory.progress")), 2)
 
@@ -4942,7 +5015,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         patcher = patch.object(rlm_module, "host_request", failing)
         patcher.start()
         self.addCleanup(patcher.stop)
-        failing.outcomes["a"] = {"status": "error", "error": "boom"}
+        failing.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         self.store_factory(
             {
                 "nodes": [
@@ -4973,7 +5046,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # the run is not wedged: resume still works end to end.
         await rlm_module.rlm.factory.resume(result["run_id"])
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")
+        self.assertEqual(final["state"], "done")
         self.assertEqual(self.node_status(final, "b")["status"], "done")
 
 
@@ -6247,14 +6320,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # The admission below is gated mid-spawn so a stale loop that wrongly
         # continued would re-admit the SAME pending instance (a duplicate
         # child) while the new loop's admission is still in flight.
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
-        self.host.rate_limit_first["b"] = 1  # resume()'s admission defers once
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         progress_gate = self.host.gate("factory.progress", 1)
         progress_entered = self.host.gate_entered("factory.progress", 1)
-        # rlm.run call #1 is a's admission at run(); #2 is b's first admission
-        # at resume() (rate limited, deferred nonblockingly); the gate holds
-        # call #3 -- the NEW loop's retry admission -- mid-spawn.
-        spawn_gate = self.host.gate("rlm.run", 3)
         self.store_factory(
             {
                 "nodes": [
@@ -6272,26 +6340,35 @@ class FactoryExecutorTest(_ExecutorTestCase):
         old_task = run.task
         self.assertIsNotNone(old_task)
         self.assertFalse(old_task.done())
-        # resume() bumps the generation, fires a->b, defers b's first
-        # admission (rate limited, nonblocking), and starts the new loop.
+        # The rate limit hits a's re-admission: resume()'s admission defers
+        # once, and the new loop's retry is the gated mid-spawn.
+        self.host.rate_limit_first["a"] = 2
+        # rlm.run call #1 is a's admission at run(); #2 is a's re-admission
+        # at resume() (rate limited, deferred nonblockingly); the gate holds
+        # call #3 -- the NEW loop's retry admission -- mid-spawn.
+        spawn_gate = self.host.gate("rlm.run", 3)
+        # resume() bumps the generation, re-admits a's failed entry (the
+        # admission defers, rate limited, nonblocking), and starts the new
+        # loop.
         resumed = await rlm_module.rlm.factory.resume(result["run_id"])
         self.assertEqual(resumed["state"], "running")
         self.assertEqual(resumed["started"], [])
         self.assertIsNot(run.task, old_task)
         # Releasing the milestone lets the old loop continue: with the
         # generation bump it must exit without admitting anything (the new
-        # loop owns b, suspended mid-admission at the spawn gate).
+        # loop owns a's retry, suspended mid-admission at the spawn gate).
         progress_gate.set()
         await old_task
         self.assertTrue(old_task.done())
         spawn_gate.set()
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")
+        self.assertEqual(final["state"], "done")
         self.assertEqual(self.node_status(final, "b")["status"], "done")
-        # b has exactly two admissions: the deferred one at resume() and
-        # the new loop's successful retry. A stale second loop would admit
-        # it once more while the gated spawn was in flight.
-        self.assertEqual(len(self.host.spawn_calls("b")), 2)
+        # a has exactly three admissions: the failed first, the deferred
+        # one at resume() and the new loop's successful retry. A stale
+        # second loop would admit it once more while the gated spawn was
+        # in flight.
+        self.assertEqual(len(self.host.spawn_calls("a")), 3)
         self.assertEqual(self.all_events_of(result, "executor_error"), [])
         self.assertEqual(
             len([e for e in self.all_events_of(result, "state_entry") if e.get("node") == "b"]), 1
