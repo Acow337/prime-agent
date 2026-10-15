@@ -1051,8 +1051,14 @@ impl Supervisor {
         let edges = ledger
             .live_edges()
             .with_context(|| "read the spawn ledger edges".to_string())?;
-        let Some((child_id, session_file)) = resolve_ledger_child(&edges, selector, child_id)
-        else {
+        let (child_id, session_file) = if let Some(resolved) =
+            resolve_ledger_child(&edges, selector, child_id)
+        {
+            ledger
+                .append_delete(&resolved.0, &resolved.1, reason)
+                .with_context(|| format!("tombstone RLM subagent {}", resolved.0))?;
+            resolved
+        } else {
             // A retry after the boundary already stands: an earlier attempt tombstoned the
             // edge and ran its finalize, so only a still-running worker blocks the delete.
             let tombstoned: Vec<_> = ledger
@@ -1061,7 +1067,8 @@ impl Supervisor {
                 .into_iter()
                 .filter(|edge| edge.deleted.is_some())
                 .collect();
-            let Some((_, session_file)) = resolve_ledger_child(&tombstoned, selector, child_id)
+            let Some((deleted_child_id, session_file)) =
+                resolve_ledger_child(&tombstoned, selector, child_id)
             else {
                 anyhow::bail!("stopped RLM subagent \"{selector}\" is not in the spawn ledger");
             };
@@ -1087,11 +1094,10 @@ impl Supervisor {
                     );
                 }
             }
-            return Ok(());
+            // The first attempt may have stopped after appending its tombstone.
+            // Reuse the same finalization without writing a second boundary.
+            (deleted_child_id, session_file)
         };
-        ledger
-            .append_delete(&child_id, &session_file, reason)
-            .with_context(|| format!("tombstone RLM subagent {child_id}"))?;
         // The stopped child's teardown mirrors the resident delete's end state: the usage
         // capture, archived state, and artifact sweep land as a live child's kill leaves them.
         let sessions_dir = crate::paths::sessions_dir(&self.options.agent_dir)

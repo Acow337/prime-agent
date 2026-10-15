@@ -231,11 +231,33 @@ async fn a_retried_delete_after_the_tombstone_is_gated_on_the_worker_process() {
         )
     };
 
+    // The first attempt stopped after the tombstone, before archiving or
+    // sweeping artifacts. A successful retry must finish that cleanup.
+    let artifacts = crate::scheduled_jobs::session_artifact_dir(
+        std::path::Path::new(&child_file),
+        "child-dead",
+    )
+    .expect("artifact directory");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(
+        artifacts.join("unfinished.txt"),
+        "left by interrupted delete",
+    )
+    .unwrap();
     let (pid, start_id) = reaped_pid();
     child_descriptor(&supervisor, &child_file, pid, start_id.as_deref());
     retry()
         .await
         .expect("a dead worker no longer blocks the delete");
+    assert!(!artifacts.exists(), "the retry finishes the artifact sweep");
+    assert_eq!(
+        crate::session_store::read_session_info(std::path::Path::new(&child_file))
+            .expect("session metadata")
+            .state
+            .as_deref(),
+        Some("archived"),
+        "the retry archives the stopped session"
+    );
 
     let mut sleeper = std::process::Command::new("sleep")
         .arg("60")
