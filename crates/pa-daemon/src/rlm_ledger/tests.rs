@@ -1546,3 +1546,38 @@ fn family_topology_tracks_restore_and_relocation_without_a_ledger_append() {
         Vec::new()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn family_topology_rechecks_symlink_targets_without_a_ledger_append() {
+    use std::os::unix::fs::symlink;
+    let dir = temp_dir("topology-symlink");
+    let parent = dir.join("parent.jsonl");
+    let first = dir.join("first.jsonl");
+    let second = dir.join("second.jsonl");
+    let alias = dir.join("alias.jsonl");
+    for file in [&parent, &first, &second] {
+        fs::write(file, "{}").unwrap();
+    }
+    symlink(&first, &alias).unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: alias.to_string_lossy().into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        ledger.family_topology().unwrap().canonical_children,
+        vec![canonical_session_path(&first)]
+    );
+    fs::remove_file(&alias).unwrap();
+    symlink(&second, &alias).unwrap();
+    assert_eq!(
+        ledger.family_topology().unwrap().canonical_children,
+        vec![canonical_session_path(&second)]
+    );
+}

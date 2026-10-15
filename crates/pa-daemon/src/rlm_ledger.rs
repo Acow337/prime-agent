@@ -543,7 +543,15 @@ impl RlmSpawnLedger {
         );
         // Endpoint liveness and relocation are filesystem state, not ledger
         // state: restore and top-level artifact sweeps do not append a row.
-        let edges = resolve_live_edges(&state, &mut resolver);
+        let mut edges = resolve_live_edges(&state, &mut resolver);
+        for edge in &mut edges {
+            edge.child = canonical_session_path(Path::new(&edge.child))
+                .to_string_lossy()
+                .into_owned();
+            edge.parent = canonical_session_path(Path::new(&edge.parent))
+                .to_string_lossy()
+                .into_owned();
+        }
         let mut cached = state.family_topology.lock().expect("family topology lock");
         if let Some(topology) = cached.as_ref().filter(|topology| topology.edges == edges) {
             return Ok(Arc::clone(topology));
@@ -553,8 +561,8 @@ impl RlmSpawnLedger {
             ..Default::default()
         };
         for edge in &topology.edges {
-            let child = canonical_session_path(Path::new(&edge.child));
-            let parent = canonical_session_path(Path::new(&edge.parent));
+            let child = PathBuf::from(&edge.child);
+            let parent = PathBuf::from(&edge.parent);
             topology
                 .children_by_parent
                 .entry(parent.clone())
