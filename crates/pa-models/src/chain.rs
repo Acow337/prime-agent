@@ -26,7 +26,7 @@ pub enum RefreshTrigger {
     Startup,
     /// The hourly timer (interval-gated).
     Hourly,
-    /// The model/plugin picker opened (interval-gated).
+    /// The model picker explicitly opened: force both remote catalogs.
     PickerOpen,
     /// Auth changed (forced — the account's view may be different).
     AuthChange,
@@ -36,7 +36,10 @@ impl RefreshTrigger {
     /// Forced triggers skip the hourly gating window.
     #[must_use]
     pub fn forced(self) -> bool {
-        matches!(self, RefreshTrigger::Startup | RefreshTrigger::AuthChange)
+        matches!(
+            self,
+            RefreshTrigger::Startup | RefreshTrigger::PickerOpen | RefreshTrigger::AuthChange
+        )
     }
 }
 
@@ -185,6 +188,15 @@ impl ModelCatalog {
                 None => self.compiled.as_ref().clone(),
             },
         };
+        // Neither bundled assets nor a remote public aggregate may grant a
+        // private Prime Inference route. Only the authenticated scope may.
+        let base: Vec<Model> = base
+            .into_iter()
+            .filter(|model| {
+                model.provider != "prime-inference"
+                    || !crate::prime_inference::is_private_prime_inference_model_id(&model.id)
+            })
+            .collect();
         let live = credentials
             .and_then(|credentials| self.prime_inference.get(&credentials.as_inference()));
         match live {
@@ -211,26 +223,10 @@ impl ModelCatalog {
         // alive on its own and must never propagate errors.
         tokio::spawn(async move {
             let force = trigger.forced();
-            let refreshed = catalog
-                .provider_cache
-                .refresh(
-                    PUBLIC_SCOPE,
-                    RefreshOptions {
-                        force,
-                        headers: Vec::new(),
-                        is_current: None,
-                    },
-                )
+            catalog
+                .refresh_with_credentials(force, credentials.as_ref())
                 .await;
-            if let Some(credentials) = credentials {
-                let inference = credentials.as_inference();
-                catalog.prime_inference.refresh(&inference, force).await;
-            }
-            tracing::debug!(
-                trigger = ?trigger,
-                refreshed = refreshed.map(|models| models.len()),
-                "catalog refresh settled"
-            );
+            tracing::debug!(trigger = ?trigger, "catalog refresh settled");
         });
     }
 
@@ -281,19 +277,20 @@ impl ModelCatalog {
         force: bool,
         credentials: Option<&PrimeCredentials>,
     ) {
-        self.provider_cache
-            .refresh(
-                PUBLIC_SCOPE,
-                RefreshOptions {
-                    force,
-                    headers: Vec::new(),
-                    is_current: None,
-                },
-            )
-            .await;
+        let provider = self.provider_cache.refresh(
+            PUBLIC_SCOPE,
+            RefreshOptions {
+                force,
+                headers: Vec::new(),
+                is_current: None,
+            },
+        );
         if let Some(credentials) = credentials {
             let inference = credentials.as_inference();
-            self.prime_inference.refresh(&inference, force).await;
+            let inference_refresh = self.prime_inference.refresh(&inference, force);
+            tokio::join!(provider, inference_refresh);
+        } else {
+            provider.await;
         }
     }
 }
@@ -388,6 +385,61 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_private_route_is_available_to_key_only_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = PrimeCredentials {
+            api_key: "sk-key-only".into(),
+            team_id: None,
+        };
+        let scope = crate::prime_inference::scope_key(&account.api_key, "");
+        let snapshot = json!({
+            "url": "http://catalog.test/api/v1/models",
+            "scope": scope,
+            "fetchedAt": 1,
+            "payload": {"data": [{
+                "id": "internal/key-only",
+                "display_name": "Key-only internal",
+                "pricing": {"input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0},
+                "specs": {
+                    "context_window": 128_000,
+                    "max_output_tokens": 4_096,
+                    "supports_reasoning": true,
+                    "modalities": {"input": ["text"], "output": ["text"]}
+                }
+            }]}
+        });
+        std::fs::write(
+            dir.path().join("prime-inference-models-cache.json"),
+            snapshot.to_string(),
+        )
+        .unwrap();
+        let catalog = hermetic_catalog(dir.path());
+        assert!(catalog
+            .resolve(Some(&account))
+            .iter()
+            .any(|model| model.id == "internal/key-only"));
+    }
+
+    #[test]
+    fn bundled_private_routes_never_grant_without_authenticated_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut private = transports::prime_inference_offline_entries()[0].clone();
+        private.id = "internal/bundled-leak".into();
+        let mut data = serde_json::from_str::<serde_json::Value>(&models_json(&["bundled-a"]))
+            .expect("fixture");
+        data["models"]
+            .as_array_mut()
+            .expect("models array")
+            .push(serde_json::to_value(private).expect("model serializes"));
+        std::fs::write(dir.path().join("models.bundled.json"), data.to_string()).unwrap();
+        let catalog = ModelCatalog::with_bundled_dir(None, Some(dir.path().into()));
+        assert!(!catalog
+            .resolve(None)
+            .iter()
+            .any(|model| model.id == "internal/bundled-leak"));
+    }
+
+    #[test]
     fn damaged_cache_file_falls_back_to_bundled() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -445,7 +497,7 @@ mod tests {
         assert!(RefreshTrigger::Startup.forced());
         assert!(RefreshTrigger::AuthChange.forced());
         assert!(!RefreshTrigger::Hourly.forced());
-        assert!(!RefreshTrigger::PickerOpen.forced());
+        assert!(RefreshTrigger::PickerOpen.forced());
     }
 
     /// The compiled Prime Inference entries as a valid snapshot payload
