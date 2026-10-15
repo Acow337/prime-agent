@@ -4441,6 +4441,54 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(len(self.all_events_of(result, "retry")), 1)
 
     @async_test
+    async def test_paused_collect_batch_preserves_the_free_infra_respawn(self) -> None:
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "task failed"}
+        self.host.child_outcomes["child-2"] = {
+            "status": "error", "error": "Child worker unreachable"
+        }
+        self.store_factory({"nodes": [
+            {"id": "a", "subagent": "worker"},
+            {"id": "b", "subagent": "worker"},
+        ]})
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        await run.task  # finish the whole batch, including b after a pauses it
+        self.assertEqual(run.state, "paused")
+        instance = run.states["b"].entries[0].instances[0]
+        self.assertEqual(instance.status, "pending")
+        self.assertTrue(instance.infra_respawned)
+        self.assertEqual(self.host.deleted_targets(), ["child-2"])
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        status = await self.settle(result, max_polls=1000)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("b")), 2)
+        self.assertEqual(self.node_status(status, "b")["entries_used"], 1)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 1)
+
+    @async_test
+    async def test_stop_during_output_capture_preserves_cancelled_entry(self) -> None:
+        self.host.outcomes["work"] = {"status": "done", "answer": "no JSON"}
+        capture_gate = self.host.gate("rlm.collect", 2)
+        capture_entered = self.host.gate_entered("rlm.collect", 2)
+        self.store_factory({"nodes": [{
+            "id": "work", "subagent": "worker",
+            "outputs": [{"name": "data", "type": "json"}],
+        }]})
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        await capture_entered.wait()
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        entry = run.states["work"].entries[0]
+        self.assertEqual(entry.status, "cancelled")
+        capture_gate.set()
+        await run.task
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(entry.status, "cancelled")
+        self.assertFalse(entry.instances[0].provisional)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+
+    @async_test
     async def test_worker_death_recheck_adopts_a_live_settle(self) -> None:
         # The liveness re-check is not a rubber stamp: when the worker
         # answers again during the quiet period, its fresh settle supersedes

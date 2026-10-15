@@ -2967,6 +2967,8 @@ class FactoryExecutor:
         if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
             entry.answer = self._entry_answer(entry)
             capture_failure = await self._capture_outputs(run, state, entry)
+            if entry.status != "running":
+                return  # a stop()/fail_fast pass claimed the entry mid-capture
             if capture_failure is not None:
                 # A declared output that never bound after the capture
                 # retry is the producing entry's task failure, not a silent
@@ -2980,8 +2982,6 @@ class FactoryExecutor:
                     run, state, entry, instance, capture_failure, retry=True
                 )
                 return
-            if entry.status != "running":
-                return  # a stop()/fail_fast pass claimed the entry mid-capture
             entry.status = "done"
             self._queue_settle(run, state, entry)
 
@@ -3042,8 +3042,11 @@ class FactoryExecutor:
             await delete_subagent(old_child)
         except Exception:
             pass
-        if instance.status != "running" or run.state != "running":
+        if instance.status != "running" or run.state not in ("running", "paused"):
             return  # a stop()/fail_fast pass claimed the instance mid-delete
+        # A sibling may have paused the run in this same collect batch.
+        # Preserve the verified death as pending; resume admits it for free
+        # instead of collecting the deleted child again.
         instance.duration_ms = result.duration_ms
         instance.tool_uses = result.tool_use_count or 0
         run.settle_count += 1
