@@ -2,7 +2,8 @@
 """Hosted real TS/Rust RLM child deletion baseline and Rust idempotent retry.
 
 A real kernel admits a child whose model request is held. The ordinary daemon
-kill command must stop the worker. Rust recognizes rlmLedgerDelete and persists
+kill command must close the active child session. Rust stops its separate child
+worker; historical TS hosts the child in its parent worker, which remains alive. Rust recognizes rlmLedgerDelete and persists
 its edge boundary; pinned TS ignores that Rust-native marker (raw ledger
 absence is retained as an explicit difference). The new dead-PID and
 interrupted-cleanup branches are separately exercised by hosted Unix supervisor
@@ -71,25 +72,38 @@ def observe(binary, kind, root, observed):
         assert child_active and row.get('parentActiveSessionId') == active, row
         observed['child_before'] = row
         descriptors = [json.loads(p.read_text()) for p in (root / 'agent/daemon-workers').rglob('*.json')]
-        child_descriptors = [d for d in descriptors if d.get('rootActiveSessionId') == child_active]
+        worker_root = child_active if kind == 'rust' else active
+        child_descriptors = [d for d in descriptors if d.get('rootActiveSessionId') == worker_root]
         assert len(child_descriptors) == 1, child_descriptors
-        pid, identity = verify_worker(child_descriptors[0], child_active, binary, path)
+        pid, identity = verify_worker(child_descriptors[0], worker_root, binary, path)
+        if kind == 'ts':
+            assert row['workerPid'] == pid, 'TS child is not in the verified parent worker'
+        observed['worker_layout'] = 'separate child worker' if kind == 'rust' else 'shared parent worker'
         scope.discover()
         observed['child_process_identity'] = {'pid': pid, 'start_id': identity}
         payload = {'activeSessionId': child_active, 'rlmLedgerDelete': 'user', 'rlmChildId': child_id}
         observed['delete_response'] = control.call('kill', **payload)
-        deadline = time.monotonic() + 15
-        while True:
-            try:
-                current, state = process_identity(pid)
-                stopped = current != identity or state == 'Z'
-            except FileNotFoundError:
-                stopped = True
-            if stopped:
-                break
-            assert time.monotonic() < deadline, 'actual child worker did not exit after kill'
-            threading.Event().wait(0.025)
-        observed['child_worker_stopped'] = True
+        after_list = control.call('list', all=True)
+        observed['sessions_after'] = after_list
+        assert not any(r.get('activeSessionId') == child_active for r in after_list['sessions']), after_list
+        observed['child_session_closed'] = True
+        if kind == 'rust':
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    current, state = process_identity(pid)
+                    stopped = current != identity or state == 'Z'
+                except FileNotFoundError:
+                    stopped = True
+                if stopped:
+                    break
+                assert time.monotonic() < deadline, 'actual child worker did not exit after kill'
+                threading.Event().wait(0.025)
+            observed['child_worker_stopped'] = True
+        else:
+            current, state = process_identity(pid)
+            assert current == identity and state != 'Z', 'TS unexpectedly lost the shared parent worker'
+            observed['shared_parent_worker_alive'] = True
         def ledger():
             return [json.loads(line) for p in (root / 'agent/rlm-ledger').glob('*.jsonl')
                     for line in p.read_text().splitlines()]
