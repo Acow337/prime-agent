@@ -107,7 +107,17 @@ pub fn sweep_sessions(
             continue;
         }
         match move_file(&candidate.path, &destination) {
-            Ok(()) => archived.push(candidate.session_id.clone()),
+            Ok(()) => {
+                // Archive retires the session like a delete: its persistent shells die
+                // with it instead of running on, orphaned, under an archived session.
+                if let Some(artifacts) = crate::scheduled_jobs::session_artifact_dir(
+                    &candidate.path,
+                    &candidate.session_id,
+                ) {
+                    crate::persistent_shells::kill_session_shells(&artifacts);
+                }
+                archived.push(candidate.session_id.clone());
+            }
             Err(error) => {
                 // A failed move leaves the session in place; the sweep retries on its next
                 // pass.
@@ -427,6 +437,32 @@ mod tests {
         assert!(restore_session(&archive, &sessions, id).is_err());
         // A missing id is a typed miss.
         assert!(restore_session(&archive, &sessions, "missing").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archived_session_kills_its_persistent_shells() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sessions = root.path().join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let old = write_session(&sessions, "old");
+        set_mtime_days_ago(&old, 40);
+        let artifacts = root.path().join("session-artifacts").join("old");
+        let mut sleeper =
+            crate::persistent_shells::test_support::registered_sleeper(&artifacts, None);
+
+        let archived = sweep_sessions(
+            &sessions,
+            &root.path().join("sessions-archive"),
+            &HashSet::new(),
+            &policy(Some(30), None),
+            SystemTime::now(),
+        )
+        .expect("sweep");
+
+        assert_eq!(archived, vec!["old".to_string()]);
+        assert!(!sleeper.wait().expect("wait").success());
+        assert!(!artifacts.join("persistent-shells.json").exists());
     }
 
     /// A minimal valid session file: the `session` header line carries the

@@ -64,6 +64,7 @@ pub(crate) mod model_switch;
 mod overflow_compaction;
 pub mod ownership;
 pub mod paths;
+pub(crate) mod persistent_shells;
 pub(crate) mod peer;
 pub(crate) mod peer_client;
 pub(crate) mod peer_tickets;
