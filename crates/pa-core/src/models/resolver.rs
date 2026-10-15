@@ -287,6 +287,41 @@ fn glob_matches(pattern: &str, model: &Model) -> bool {
     }
 }
 
+/// Whether one scope pattern selects the reference model, with the same
+/// exact/fuzzy and glob semantics the scope resolution applies.
+fn pattern_selects_reference(pattern: &str, reference: &Model) -> bool {
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        let glob_pattern = match pattern.rfind(':') {
+            Some(idx) if is_valid_thinking_level(&pattern[idx + 1..]) => &pattern[..idx],
+            _ => pattern,
+        };
+        let case_fold = glob_pattern.to_lowercase();
+        return glob_matches(&case_fold, reference) || glob_matches(glob_pattern, reference);
+    }
+    parse_model_pattern(pattern, std::slice::from_ref(reference), false)
+        .model
+        .is_some()
+}
+
+/// Whether the create-time scope patterns select the given model reference:
+/// the reference is matched as its provider's template rebuild — an
+/// unauthorized private default is in no catalog the patterns could select
+/// it from — and never enters any scope or resolution.
+#[must_use]
+pub fn scope_patterns_select_reference(
+    patterns: &[String],
+    provider: &str,
+    model_id: &str,
+    all_models: &[Model],
+) -> bool {
+    let Some(reference) = build_fallback_model(provider, model_id, all_models) else {
+        return false;
+    };
+    patterns
+        .iter()
+        .any(|pattern| pattern_selects_reference(pattern, &reference))
+}
+
 /// Resolve model patterns to scoped models: exact/fuzzy for plain patterns,
 /// glob expansion for wildcard patterns; `pattern:level` applies a level.
 #[must_use]
@@ -615,7 +650,8 @@ pub fn find_initial_model(options: &InitialModelOptions<'_>) -> Option<Model> {
 
 /// The private-model predicate without a full `Model` value (TS
 /// `isPrivatePrimeInferenceModel({ provider, id })`).
-fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
+#[must_use]
+pub fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
     provider == "prime-inference"
         && super::prime_inference::is_private_prime_inference_model_id(model_id)
 }

@@ -1283,7 +1283,11 @@ async fn a_fresh_scoped_create_waits_for_the_private_default() {
     let layer_a = json!({ "schemaVersion": 1, "models": [] }).to_string();
     let worker = private_default_create_worker(
         dir.path(),
-        vec![catalog_ok_json(&layer_a), catalog_ok_json(&pi), catalog_ok_json(&pi)],
+        vec![
+            catalog_ok_json(&layer_a),
+            catalog_ok_json(&pi),
+            catalog_ok_json(&pi),
+        ],
     )
     .await;
     let data = create_state(&worker, dir.path()).await;

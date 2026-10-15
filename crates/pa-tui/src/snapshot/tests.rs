@@ -2335,3 +2335,22 @@ fn windowed_prompt_time_prefers_the_readable_tail_over_an_older_scalar() {
         );
     }
 }
+
+#[test]
+fn reconstructs_the_model_fallback_message() {
+    let mut attach = slim_attach();
+    attach["snapshot"]["summary"]["modelFallbackMessage"] = json!(
+        "Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3"
+    );
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(
+        view.model_fallback_message.as_deref(),
+        Some("Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3"),
+        "the startup fallback rides the attach summary"
+    );
+    let bare = reconstruct(&attach_data_from_response(slim_attach()).unwrap());
+    assert!(
+        bare.model_fallback_message.is_none(),
+        "a session that starts on its default carries no notice"
+    );
+}

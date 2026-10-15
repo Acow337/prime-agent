@@ -79,6 +79,9 @@ pub struct Reconstructed {
     /// The session's effective service tier (`state.serviceTier`), the
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
+    /// `summary.modelFallbackMessage`: why the session's startup model
+    /// fell back, shown once when the session opens.
+    pub model_fallback_message: Option<String>,
     pub history_before: usize,
     pub(crate) backfill_seam: BackfillSeam,
 }
@@ -415,6 +418,11 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let model_fallback_message = snapshot
+        .get("summary")
+        .and_then(|summary| summary.get("modelFallbackMessage"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let history_before = snapshot
         .get("historyBefore")
         .and_then(Value::as_u64)
@@ -448,6 +456,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         cursor_present,
         queued,
         service_tier,
+        model_fallback_message,
         last_user_prompt_ms,
         history_before,
         backfill_seam,

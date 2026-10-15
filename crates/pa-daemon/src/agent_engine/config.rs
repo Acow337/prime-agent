@@ -94,10 +94,13 @@ pub(crate) struct CreateSessionResources {
 
 /// The create command's `--models` scope inputs: the startup chain picks
 /// the first scoped model (or the saved default when in scope) for a
-/// fresh session; a continuing session keeps its own model.
-#[derive(Clone)]
+/// fresh session; a continuing session keeps its own model. The patterns
+/// stay alongside their resolution: the startup-fallback record names a
+/// default the patterns select even while no catalog entry authorizes it.
+#[derive(Clone, Default)]
 pub(super) struct StartupScope {
     pub(super) scoped_models: Vec<pa_core::models::ScopedModel>,
+    pub(super) patterns: Vec<String>,
     pub(super) is_continuing: bool,
 }
 
