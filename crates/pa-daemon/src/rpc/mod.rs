@@ -151,7 +151,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         model_ops: Arc::new(tokio::sync::Mutex::new(())),
         session_ops: Arc::new(tokio::sync::Mutex::new(())),
-        manual_compaction_cancel: Default::default(),
+        manual_compaction_cancel: Arc::default(),
     });
     // With no create command, the FIRST `get_available_models` would pay
     // the whole awaited refresh chain; this spawn warms the caches early.

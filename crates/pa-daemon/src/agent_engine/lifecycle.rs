@@ -192,7 +192,7 @@ impl AgentSessionEngine {
             reloaded_goal_update: std::sync::Mutex::new(None),
             faux_model: std::sync::OnceLock::new(),
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
-            manual_compaction_cancel: Default::default(),
+            manual_compaction_cancel: crate::compaction_cancel::CompactionCancellation::default(),
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
             progress_notes: std::sync::Mutex::new(None),

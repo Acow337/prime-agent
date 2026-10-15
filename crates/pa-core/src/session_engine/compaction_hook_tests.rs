@@ -429,9 +429,8 @@ async fn host_abort_cancels_ready_precompact_command_before_permit() {
     })
     .await
     .expect("host abort cancels before the configured ten-second timeout");
-    let error = match result {
-        Ok(_) => panic!("cancelled preflight must not return a permit"),
-        Err(error) => error,
+    let Err(error) = result else {
+        panic!("cancelled preflight must not return a permit");
     };
     assert!(pa_agent::abort::is_abort_error(&error));
     assert_eq!(
