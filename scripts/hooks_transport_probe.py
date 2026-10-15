@@ -150,9 +150,17 @@ class Fixture:
         raw = '\n'.join(p.read_text() for p in transcripts)
         require('hook-denied-call' in raw and 'hook-observed-call' in raw,
                 'raw transcript lost original model tool calls')
-        require('transport-veto' in raw, 'denial absent from transcript')
         durable = Path(pre['transcript_path'])
-        header = json.loads(durable.read_text().splitlines()[0])
+        rows = [json.loads(line) for line in durable.read_text().splitlines()]
+        denied = [row['message'] for row in rows if row.get('type') == 'message'
+                  and row.get('message', {}).get('role') == 'toolResult'
+                  and row['message'].get('toolCallId') == 'hook-denied-call']
+        require(len(denied) == 1, 'expected one original denied tool result')
+        require(denied[0]['isError'] is True, 'denial lost error flag')
+        require(denied[0]['content'] == [{'type': 'text',
+                'text': 'Blocked by a PreToolUse hook: transport-veto'}],
+                'denial lost hook attribution or original reason')
+        header = rows[0]
         require(header['id'] == pre['session_id'], 'hook identity differs from durable transcript')
         return {'pre_session_id': pre['session_id'], 'transcript_files': len(transcripts),
                 'frames': len(frames), 'denied_marker_absent': True, 'observer_received_result': True,

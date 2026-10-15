@@ -469,3 +469,104 @@ async fn custom_only_adoption_keeps_startup_source() {
         );
     }
 }
+
+#[tokio::test]
+async fn stop_feedback_is_attributed_persisted_bounded_and_admitted() {
+    let _command_guard = crate::hooks::test_command_guard().await;
+    let reason = "Run remaining validation.\nPreserve these details.";
+    let attributed = format!("Continuation requested by a Stop hook: {reason}");
+    for veto_continuation in [false, true] {
+        let output =
+            serde_json::to_string(&json!({"decision": "block", "reason": reason})).unwrap();
+        let fixture = Fixture::new(&json!({"hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": format!(
+                "{{ cat; printf '\\n'; }} >> stops.jsonl; printf '%s' '{output}'"
+            )}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command":
+                "input=$(cat); printf '%s\\n' \"$input\" >> prompts.jsonl; if [ -f veto ]; then case \"$input\" in *'Continuation requested by a Stop hook:'*) printf '%s' 'continuation veto' >&2; exit 2;; esac; fi"
+            }]}]
+        }}));
+        if veto_continuation {
+            std::fs::write(fixture.cwd.join("veto"), []).unwrap();
+        }
+        let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+        provider.push_text_turn("initial answer");
+        provider.push_text_turn("validation answer");
+        let engine = create_session(fixture.config(&provider)).await.unwrap();
+        let outcome = engine.prompt("begin", PromptOptions::default()).await;
+        if veto_continuation {
+            assert!(outcome
+                .unwrap_err()
+                .to_string()
+                .contains("continuation veto"));
+        } else {
+            outcome.unwrap();
+        }
+        let prompts = events(&fixture.cwd.join("prompts.jsonl"));
+        assert_eq!(
+            prompts
+                .iter()
+                .map(|event| event["prompt"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("begin"), json!(attributed)]
+        );
+        let stops = events(&fixture.cwd.join("stops.jsonl"));
+        assert_eq!(
+            stops
+                .iter()
+                .map(|event| event["stop_hook_active"].clone())
+                .collect::<Vec<_>>(),
+            if veto_continuation {
+                vec![json!(false)]
+            } else {
+                vec![json!(false), json!(true)]
+            }
+        );
+        let calls = provider.calls();
+        assert_eq!(calls.len(), if veto_continuation { 1 } else { 2 });
+        let persisted: Vec<_> = engine
+            .session
+            .entries()
+            .await
+            .into_iter()
+            .filter_map(|entry| match entry {
+                pa_types::session::FileEntry::Message {
+                    message: SessionAgentMessage::User(user),
+                    ..
+                } => Some(user.content),
+                _ => None,
+            })
+            .collect();
+        let feedback: Vec<_> = persisted.into_iter().filter(|content|
+            matches!(content, pa_types::ai::UserContent::Text(text) if text == &attributed)
+        ).collect();
+        assert_eq!(
+            feedback,
+            if veto_continuation {
+                vec![]
+            } else {
+                vec![pa_types::ai::UserContent::Text(attributed.clone())]
+            }
+        );
+        if !veto_continuation {
+            let model_feedback: Vec<_> = calls[1]
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    pa_agent::types::Message::User(user)
+                        if user.content
+                            == pa_agent::types::UserContent::Text(attributed.clone()) =>
+                    {
+                        Some(user.content.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                model_feedback,
+                vec![pa_agent::types::UserContent::Text(attributed.clone())]
+            );
+            assert_eq!(stops[0]["turn_id"], stops[1]["turn_id"]);
+        }
+    }
+}

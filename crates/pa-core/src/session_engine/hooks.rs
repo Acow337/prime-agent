@@ -72,7 +72,7 @@ impl ToolHooks {
                     .await
                     .map(|reason| BeforeToolCallResult {
                         block: true,
-                        reason: Some(reason),
+                        reason: Some(format!("Blocked by a PreToolUse hook: {reason}")),
                     }))
             })
         });
@@ -218,6 +218,20 @@ mod tests {
             .unwrap();
         assert!(tool_result.is_error);
         assert_eq!(tool_result.tool_call_id, "call-original");
+        assert_eq!(tool_result.tool_name, "echo");
+        assert_eq!(
+            serde_json::to_value(&tool_result.content).unwrap(),
+            json!([{"type": "text", "text": "Blocked by a PreToolUse hook: denied by test"}])
+        );
+        let AgentMessage::Standard(Message::Assistant(final_message)) =
+            state.messages.last().unwrap()
+        else {
+            panic!("model must continue after the denied tool call");
+        };
+        assert_eq!(
+            serde_json::to_value(&final_message.content).unwrap(),
+            json!([{"type": "text", "text": "done"}])
+        );
         let call = state
             .messages
             .iter()

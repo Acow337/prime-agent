@@ -210,7 +210,7 @@ impl LifecycleHooks {
             return Ok(Vec::new());
         }
         Ok(vec![AgentMessage::Standard(Message::User(UserMessage {
-            content: UserContent::Text(reason),
+            content: UserContent::Text(format!("Continuation requested by a Stop hook: {reason}")),
             timestamp: super::now_millis() as i64,
         }))])
     }

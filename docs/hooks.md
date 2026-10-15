@@ -231,6 +231,11 @@ The equivalent legacy output is:
 {"decision":"block","reason":"This command requires a different workflow."}
 ```
 
+Model-visible hook text names its source: tool denials use
+`Blocked by a PreToolUse hook: <reason>` and Stop continuations use
+`Continuation requested by a Stop hook: <reason>`. The original reason is
+preserved after the prefix; hook JSON schemas are unchanged.
+
 All events except PostToolUse and SessionEnd require synchronous handlers.
 PostToolUse requires `async: true`; SessionEnd ignores the async setting.
 
