@@ -360,6 +360,65 @@ fn a_settled_compaction_refreshes_the_tray_stats() {
     );
 }
 
+/// Replay both sides of the daemon's atomic custom-row/collapse ordering.
+#[test]
+fn custom_rows_before_and_after_collapse_render_once() {
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor {
+        listener: UnixListener::bind(&socket).expect("bind mock socket"),
+    };
+    let before = json!({
+        "role": "custom", "customType": "notice", "content": "custom before collapse",
+        "display": true, "timestamp": 299,
+    });
+    let after = json!({
+        "role": "custom", "customType": "notice", "content": "custom after collapse",
+        "display": true, "timestamp": 301,
+    });
+    let frames = vec![
+        session_event(&json!({ "type": "compaction_start", "reason": "manual" }), 1),
+        session_event(&json!({ "type": "message_start", "message": before }), 2),
+        session_event(&json!({ "type": "message_end", "message": before }), 3),
+        session_event(
+            &json!({
+                "type": "compaction_end", "reason": "manual",
+                "result": {
+                    "summary": SUMMARY_TEXT, "tokensBefore": 100,
+                    "transcript": [compaction_summary_message(), before],
+                },
+                "aborted": false, "willRetry": false,
+            }),
+            4,
+        ),
+        session_event(&json!({ "type": "message_start", "message": after }), 5),
+        session_event(&json!({ "type": "message_end", "message": after }), 6),
+    ];
+    let handle = std::thread::spawn(move || supervisor.serve(&frames));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps: vec![HeadlessStep::WaitRender {
+            needle: "custom after collapse".to_string(),
+            timeout_ms: 5000,
+        }],
+        width: 100,
+        height: 40,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("custom collapse replay");
+    let commands = handle.join().expect("mock supervisor finished");
+    let frame = outcome.frames.last().expect("a rendered frame");
+    for text in ["custom before collapse", "custom after collapse", SUMMARY_TEXT] {
+        assert_eq!(frame.matches(text).count(), 1, "{text}: {frame}");
+    }
+    assert!(!commands.iter().any(|command| command == "get_messages"));
+}
+
 /// TS and older Rust protocol-7 daemons do not include `result.transcript`.
 /// Both manual and automatic successful compactions still replace the chat
 /// from `get_messages`; the new in-stream path above must continue to skip it.
