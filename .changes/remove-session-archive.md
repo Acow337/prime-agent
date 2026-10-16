@@ -1,0 +1,2 @@
+- Remove the session archive. The daemon no longer moves old sessions into `sessions-archive/`, and the `sessionArchiveMaxAgeDays` and `sessionArchiveMaxSessions` settings are gone. The agents view and `/resume` page through the whole session store instead, so every session stays listed and searchable.
+- Files already in `sessions-archive/` stay where they are and are no longer read. To list them again, move them back into `sessions/`.
