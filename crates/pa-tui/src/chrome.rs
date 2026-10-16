@@ -962,18 +962,27 @@ fn expanded_group_row(
 /// caller clips an oversized one beside the marker).
 fn fitting_items(items: &[String], available: usize) -> usize {
     let separator = str_width(EXPANDED_ITEM_SEPARATOR);
-    (1..=items.len())
-        .rev()
-        .find(|&shown| {
-            let listed: usize = items[..shown].iter().map(|item| str_width(item)).sum();
-            let overflow = if shown < items.len() {
-                str_width(&format!("  +{}", items.len() - shown))
-            } else {
-                0
-            };
-            listed + separator * (shown - 1) + overflow <= available
-        })
-        .unwrap_or(1)
+    let mut listed = 0;
+    let mut fitting = 1;
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            listed += separator;
+        }
+        listed += str_width(item);
+        if listed > available {
+            break;
+        }
+        let shown = index + 1;
+        let overflow = if shown < items.len() {
+            str_width(&format!("  +{}", items.len() - shown))
+        } else {
+            0
+        };
+        if listed + overflow <= available {
+            fitting = shown;
+        }
+    }
+    fitting
 }
 
 /// The footer's tok/sec row: one dim line — the dock's last row —
