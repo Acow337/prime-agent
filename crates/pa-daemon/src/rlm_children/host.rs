@@ -5,8 +5,8 @@
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_model, rlm_child_label, rlm_depth_limit_error, spawn_name_unavailable_error, Arc,
-    ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf,
-    Result, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    ChildCloseReason, ChildObservationSource, ChildRecord, Context, DaemonCommand, Duration, Instant,
+    Mutex, Path, PathBuf, Result, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
     RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
     RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
     SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
@@ -166,6 +166,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     replied_since_task: false,
                     progress_note: None,
                     tool_use_count: None,
+                    live_observation: None,
+                    direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
                     prompt_admitted: false,
                     error: None,
@@ -378,6 +380,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // supervisor's pushed roster: one in-memory read, never a busy
             // child worker round trip. A failed read keeps the last values
             // each record observed; the settle watcher owns worker refreshes.
+            let request_order = this
+                .observation_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(peers) = this.child_roster_rows(&records).await {
                 for record in &records {
                     let (rlm_child_id, active_session_id) = {
@@ -400,7 +405,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             })
                         });
                     if let Some(live) = live {
-                        this.observe_live_state(record, live).await;
+                        this.observe_live_state(
+                            record,
+                            live,
+                            request_order,
+                            ChildObservationSource::Roster,
+                        )
+                        .await;
                     }
                 }
             }

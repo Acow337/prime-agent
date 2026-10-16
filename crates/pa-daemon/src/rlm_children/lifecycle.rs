@@ -3,8 +3,9 @@
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
 use super::{
     anyhow, cap_text, compact_rlm_text, create_rlm_child_failure_message,
-    create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildRecord, Context,
-    CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map, Mutex, ParentIdentity,
+    create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildObservationSource,
+    ChildRecord, Context, CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map,
+    Mutex, ParentIdentity,
     Path, PromptInput, Result, RlmChildTerminalNotice, SupervisorChildSessionsInner, Value,
     ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS, IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS,
     NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS, RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS,
@@ -415,11 +416,25 @@ impl SupervisorChildSessionsInner {
                 return;
             }
         }
-        let active_session_id = record.lock().await.active_session_id.clone();
-        let state = self.child_state(&active_session_id).await;
-        if let Ok(state) = &state {
-            self.observe_live_state(record, state).await;
-        }
+        let (active_session_id, direct_observation) = {
+            let record = record.lock().await;
+            (
+                record.active_session_id.clone(),
+                Arc::clone(&record.direct_observation),
+            )
+        };
+        let state = {
+            let _direct = direct_observation.lock().await;
+            let request_order = self
+                .observation_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let state = self.child_state(&active_session_id).await;
+            if let Ok(state) = &state {
+                self.observe_live_state(record, state, request_order, ChildObservationSource::Direct)
+                    .await;
+            }
+            state
+        };
         let idle = matches!(&state, Ok(state) if !child_busy_flags(state));
         if !idle {
             return;

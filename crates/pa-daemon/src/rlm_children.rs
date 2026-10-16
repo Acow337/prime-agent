@@ -130,6 +130,23 @@ pub(crate) fn durable_child_selector(session_id: Option<&str>, rlm_child_id: &st
     session_id.unwrap_or(rlm_child_id).to_string()
 }
 
+/// Peer rows can contain pushed snapshots or older supervisor pulls.
+/// At equal embedded counters retain a direct observation conservatively;
+/// a greater counter refreshes either source normally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ChildObservationSource {
+    Roster,
+    Direct,
+}
+
+#[derive(Debug)]
+struct ChildObservation {
+    request_order: u64,
+    worker_instance_id: Option<String>,
+    sequence: Option<u64>,
+    source: ChildObservationSource,
+}
+
 /// One tracked child session.
 #[derive(Debug)]
 struct ChildRecord {
@@ -165,6 +182,10 @@ struct ChildRecord {
     /// The child's tool-call count as last observed live; `None` until a
     /// read saw one (the wire omits a zero count, TS parity).
     tool_use_count: Option<u64>,
+    /// Freshness of the last live summary, shared by roster and direct reads.
+    live_observation: Option<ChildObservation>,
+    /// Direct reads establish process generations in capture order.
+    direct_observation: Arc<Mutex<()>>,
     /// The terminal notice was claimed: exactly one of the settle watcher,
     /// the delete path, or a late natural settle delivers it.
     notice_delivered: bool,
@@ -349,6 +370,8 @@ struct SupervisorChildSessionsInner {
     /// The worker's supervisor token: the roster read that joins the
     /// children's live summaries authenticates with it.
     worker_token: String,
+    /// Request-start order for independent roster and child-state connections.
+    observation_requests: std::sync::atomic::AtomicU64,
     /// The parent session's live name (the worker's summary, the TS
     /// `sessionName` of every spawn row's `from` endpoint): `None` until
     /// the worker publishes a summary, and refreshed by every rename.
@@ -427,6 +450,7 @@ impl SupervisorChildSessions {
                 agent_dir,
                 parent_active_session_id,
                 worker_token,
+                observation_requests: std::sync::atomic::AtomicU64::new(0),
                 parent_session_name: std::sync::Mutex::new(None),
                 identity: std::sync::Mutex::new(ParentIdentity::with_default_depth()),
                 children: Mutex::new(Vec::new()),
@@ -712,6 +736,8 @@ impl SupervisorChildSessions {
                 replied_since_task: false,
                 progress_note: None,
                 tool_use_count: None,
+                live_observation: None,
+                direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
                 prompt_admitted: true,
                 error: None,
@@ -909,29 +935,66 @@ impl SupervisorChildSessionsInner {
         )
     }
 
-    /// The child's live summary observed onto its record — the supervisor
-    /// roster join and a refresh's `get_state` alike. A present note or
-    /// count caches; a cleared note keeps the last one a read saw.
+    /// Merge both read paths by the worker's captured counter, not response
+    /// arrival. Request order breaks ties within one process generation.
     pub(super) async fn observe_live_state(
         &self,
         record: &Arc<Mutex<ChildRecord>>,
         summary: &Value,
+        request_order: u64,
+        source: ChildObservationSource,
     ) {
-        let note = summary
-            .get("progressNote")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let count = summary.get("toolUseCount").and_then(Value::as_u64);
-        if note.is_none() && count.is_none() {
-            return;
-        }
+        let observation = ChildObservation {
+            request_order,
+            worker_instance_id: summary
+                .get("workerInstanceId")
+                .and_then(Value::as_str)
+                .filter(|instance| !instance.is_empty())
+                .map(str::to_string),
+            sequence: summary.get("rosterDeltaSequence").and_then(Value::as_u64),
+            source,
+        };
+        let direct_observation = {
+            let record = record.lock().await;
+            Arc::clone(&record.direct_observation)
+        };
+        // A roster read must not initialize a generation while an older
+        // direct request is in flight, and must never wait behind that request.
+        let _roster_guard = match source {
+            ChildObservationSource::Roster => match direct_observation.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(_) => return,
+            },
+            ChildObservationSource::Direct => None,
+        };
         let mut record = record.lock().await;
-        if note.is_some() {
-            record.progress_note = note;
+        if let Some(previous) = &record.live_observation {
+            let fresh = if observation.worker_instance_id == previous.worker_instance_id {
+                match (observation.sequence, previous.sequence) {
+                    (Some(sequence), Some(previous_sequence)) => {
+                        (sequence, source, request_order)
+                            > (previous_sequence, previous.source, previous.request_order)
+                    }
+                    _ => request_order > previous.request_order,
+                }
+            } else {
+                // Only serialized direct reads establish a replacement.
+                source == ChildObservationSource::Direct
+            };
+            if !fresh {
+                return;
+            }
+            if observation.worker_instance_id != previous.worker_instance_id {
+                record.progress_note = None;
+                record.tool_use_count = None;
+            }
         }
-        if count.is_some() {
-            record.tool_use_count = count;
+        if let Some(note) = summary.get("progressNote").and_then(Value::as_str) {
+            record.progress_note = Some(note.to_string());
         }
+        // An omitted count is zero, including after a session replacement.
+        record.tool_use_count = summary.get("toolUseCount").and_then(Value::as_u64);
+        record.live_observation = Some(observation);
     }
 
     pub(crate) async fn emit_child_update(&self, record: &Arc<Mutex<ChildRecord>>) {

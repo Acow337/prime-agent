@@ -1056,6 +1056,51 @@ async fn recent_messages_resolves_by_name_and_reports_the_envelope() {
     assert_eq!(error.to_string(), "agent ghost is not reachable");
 }
 
+#[tokio::test]
+async fn recent_messages_reads_a_degraded_live_sibling_but_not_a_foreign_stub() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(
+        socket.clone(),
+        json!({ "sessions": [
+            { "activeSessionId": "aaa111", "sessionId": "sess-a",
+              "parentActiveSessionId": "parent", "parentSessionId": "sess-parent" },
+            { "id": "sibling", "sessionId": "", "lifecycle": "recovering",
+              "parentActiveSessionId": "parent", "parentSessionId": "sess-parent" },
+            { "id": "foreign", "sessionId": "", "lifecycle": "recovering" },
+        ], "messagesByActiveSessionId": {
+            "sibling": [{ "role": "user", "content": "sibling transcript" }],
+            "foreign": [{ "role": "user", "content": "foreign transcript" }],
+        }}),
+        None,
+    )
+    .await;
+    let observer = LinkAgentObserveController::new(
+        Arc::new(SupervisorLink::new(socket)),
+        "aaa111".to_string(),
+        Arc::new(std::sync::Mutex::new(Some(json!({
+            "activeSessionId": "aaa111", "sessionId": "sess-a",
+            "parentActiveSessionId": "parent", "parentSessionId": "sess-parent",
+        })))),
+        None,
+    );
+    let recent = observer.recent_messages("sibling", 8, 800).await.unwrap();
+    assert_eq!(
+        recent.agent.relationship,
+        Some(AgentFamilyRelationship::Sibling)
+    );
+    assert_eq!(recent.messages.len(), 1);
+    assert_eq!(recent.messages[0].text, "sibling transcript");
+    assert_eq!(
+        observer
+            .recent_messages("foreign", 8, 800)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "agent foreign is not reachable",
+    );
+}
+
 /// The supervisor roster row's own facts ride the observation summary,
 /// with `firstMessage` capped at the TS preview width.
 #[test]

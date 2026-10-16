@@ -563,6 +563,136 @@ async fn a_delayed_roster_reply_keeps_the_newer_settled_observation() {
     assert_eq!(roster[0].tool_use_count, Some(4));
 }
 
+/// A later roster request may still read older pushed state. Sequence
+/// wins over request order; a replacement worker may legitimately reset.
+#[tokio::test]
+async fn child_observations_order_worker_sequences_and_allow_recovery_resets() {
+    let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (sessions, _kill_rx) = sessions_with_roster_peers(peers, 0).await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "child-id".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "worker".to_string(),
+        })
+        .await;
+    let record = sessions.inner.children.lock().await[0].clone();
+    let direct_observation = Arc::clone(&record.lock().await.direct_observation);
+    let direct = direct_observation.lock().await;
+    sessions
+        .inner
+        .observe_live_state(
+            &record,
+            &json!({
+                "workerInstanceId": "initial-roster",
+                "rosterDeltaSequence": 99,
+                "toolUseCount": 99,
+            }),
+            0,
+            ChildObservationSource::Roster,
+        )
+        .await;
+    assert!(record.lock().await.live_observation.is_none());
+    drop(direct);
+    for (request_order, instance, sequence, count, note, source, expected) in [
+        (
+            1,
+            "i1",
+            4,
+            4,
+            "new",
+            ChildObservationSource::Direct,
+            (Some(4), Some("new")),
+        ),
+        (
+            2,
+            "i1",
+            3,
+            3,
+            "old",
+            ChildObservationSource::Roster,
+            (Some(4), Some("new")),
+        ),
+        (
+            3,
+            "i1",
+            4,
+            5,
+            "pushed",
+            ChildObservationSource::Roster,
+            (Some(4), Some("new")),
+        ),
+        (
+            4,
+            "i1",
+            4,
+            4,
+            "equal",
+            ChildObservationSource::Direct,
+            (Some(4), Some("equal")),
+        ),
+        (
+            5,
+            "i1",
+            5,
+            6,
+            "advanced",
+            ChildObservationSource::Roster,
+            (Some(6), Some("advanced")),
+        ),
+        (
+            6,
+            "i2",
+            0,
+            1,
+            "recovered",
+            ChildObservationSource::Direct,
+            (Some(1), Some("recovered")),
+        ),
+        (
+            8,
+            "i1",
+            99,
+            99,
+            "retired",
+            ChildObservationSource::Roster,
+            (Some(1), Some("recovered")),
+        ),
+    ] {
+        sessions
+            .inner
+            .observe_live_state(
+                &record,
+                &json!({
+                    "workerInstanceId": instance,
+                    "rosterDeltaSequence": sequence,
+                    "toolUseCount": count,
+                    "progressNote": note,
+                }),
+                request_order,
+                source,
+            )
+            .await;
+        let record = record.lock().await;
+        assert_eq!(
+            (record.tool_use_count, record.progress_note.as_deref()),
+            expected,
+        );
+    }
+    sessions
+        .inner
+        .observe_live_state(
+            &record,
+            &json!({ "workerInstanceId": "i3", "rosterDeltaSequence": 0 }),
+            7,
+            ChildObservationSource::Direct,
+        )
+        .await;
+    let record = record.lock().await;
+    assert_eq!((record.tool_use_count, &record.progress_note), (None, &None));
+}
+
 #[tokio::test]
 async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
@@ -1475,6 +1605,8 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         replied_since_task: false,
         progress_note: None,
         tool_use_count: None,
+        live_observation: None,
+        direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         prompt_admitted: true,
         error: None,
@@ -1545,6 +1677,8 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         replied_since_task: false,
         progress_note: None,
         tool_use_count: None,
+        live_observation: None,
+        direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         prompt_admitted: true,
         error: None,

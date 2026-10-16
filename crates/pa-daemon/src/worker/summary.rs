@@ -341,6 +341,7 @@ pub(crate) async fn push_roster_delta(context: &RosterPushContext) {
                 .roster_delta_sequence
                 .load(std::sync::atomic::Ordering::SeqCst),
         );
+        summary.worker_instance_id = Some(context.worker_instance_id.clone());
         let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
         let sequence_value = context
             .roster_delta_sequence

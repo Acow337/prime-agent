@@ -522,6 +522,8 @@ fn ledger_child_records(
             replied_since_task: false,
             progress_note: None,
             tool_use_count: None,
+            live_observation: None,
+            direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             prompt_admitted: true,
             error: None,

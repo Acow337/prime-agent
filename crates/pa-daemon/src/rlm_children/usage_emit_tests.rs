@@ -59,6 +59,8 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         replied_since_task: false,
         progress_note: None,
         tool_use_count: None,
+        live_observation: None,
+        direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         prompt_admitted: true,
         error: None,
