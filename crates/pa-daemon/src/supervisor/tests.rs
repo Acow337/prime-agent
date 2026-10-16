@@ -847,32 +847,11 @@ fn saved_session_rows_count_the_sessions_stored_factory_specs() {
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
     assert!(saved_session_row(&info).get("factorySpecs").is_none());
-    let entry = |id: &str, kind: &str| {
-        json!({
-            "id": id, "kind": kind, "title": id, "content": "", "path": "general",
-            "reference": {}, "arguments": {}, "metadata": {}, "source": "agent",
-            "created_at": "2026-10-16T00:00:00Z", "updated_at": "2026-10-16T00:00:00Z",
-            "version": 1,
-        })
-    };
     let harness = pa_core::refinement::get_local_harness_state_dir(
         crate::scheduled_jobs::session_artifact_dir(&path, &info.id).as_deref(),
     )
     .unwrap();
-    std::fs::create_dir_all(&harness).unwrap();
-    std::fs::write(
-        pa_core::refinement::get_harness_state_path(&harness),
-        json!({
-            "schema": 1,
-            "entries": {
-                "factory": { "a": entry("a", "factory"), "b": entry("b", "factory") },
-                "memory": { "m": entry("m", "memory") },
-            },
-            "refinements": [],
-        })
-        .to_string(),
-    )
-    .unwrap();
+    crate::test_support::write_factory_specs(&harness, &["a", "b"]);
     assert_eq!(saved_session_row(&info)["factorySpecs"], json!(2));
     std::fs::remove_dir_all(&root).unwrap();
 }

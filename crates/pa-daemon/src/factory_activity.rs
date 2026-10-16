@@ -89,6 +89,61 @@ impl Worker {
 mod tests {
     use super::*;
 
+    /// A live session without a kernel (not booted yet, or passivated) still answers the unscoped
+    /// graph: no runs, and its own stored specs from its local harness store — never the global
+    /// store's.
+    #[tokio::test]
+    async fn a_live_session_without_a_kernel_answers_its_stored_specs() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        let agent_dir = dir.path().join("agent");
+        let worker = Worker::new(
+            crate::worker::WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: std::path::PathBuf::new(),
+                token: "token".to_string(),
+                worker_instance_id: String::new(),
+                active_session_id: "no-kernel".to_string(),
+                agent_dir: agent_dir.clone(),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                telemetry_disabled: Some(true),
+                script: Some(serde_json::json!({ "responses": [] })),
+            },
+            None,
+        );
+        let created = worker
+            .dispatch(
+                "create",
+                &serde_json::json!({ "cwd": "/tmp", "sessionDir": sessions }),
+            )
+            .await;
+        assert!(created.success, "{created:?}");
+        let artifacts = {
+            let core = worker.core.lock().unwrap();
+            let store = core.store.as_ref().expect("persisted session");
+            crate::scheduled_jobs::session_artifact_dir(&store.path, store.session_id())
+        };
+        crate::test_support::write_factory_specs(
+            &pa_core::refinement::get_local_harness_state_dir(artifacts.as_deref())
+                .expect("local harness dir"),
+            &["a", "b"],
+        );
+        crate::test_support::write_factory_specs(
+            &pa_core::refinement::get_global_harness_state_dir(&agent_dir),
+            &["shared"],
+        );
+        let graph = worker
+            .dispatch("factory_activity", &serde_json::json!({ "action": "graph" }))
+            .await;
+        assert!(graph.success, "{graph:?}");
+        assert_eq!(
+            graph.data,
+            Some(serde_json::json!({ "runs": [], "factorySpecs": 2 }))
+        );
+        let _ = worker.dispatch("kill", &serde_json::json!({})).await;
+    }
+
     /// The opt-in default: no settings file, no factory lane.
     #[test]
     fn the_factory_lane_stays_unadvertised_until_enabled() {
