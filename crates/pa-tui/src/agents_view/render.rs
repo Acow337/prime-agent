@@ -1014,6 +1014,11 @@ impl Renderer {
                                     }
                                 }
                             }
+                            AgentsStep::Notify(notify) => {
+                                if ui_tx.send(UiInput::Notify(notify)).is_err() {
+                                    return;
+                                }
+                            }
                         }
                     }
                     let _ = ui_tx.send(UiInput::Done);

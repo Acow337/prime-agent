@@ -296,7 +296,6 @@ async fn scope_exit_keeps_the_subagents_item(exit_key: &'static str) {
                 crossterm::event::KeyCode::Down,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            HeadlessStep::WaitMs(300),
             HeadlessStep::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
@@ -411,7 +410,6 @@ async fn open_fresh_session_scope(socket: &Path, session_dir: &Path) -> (AgentsV
                 crossterm::event::KeyCode::Down,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            HeadlessStep::WaitMs(300),
             HeadlessStep::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
@@ -511,15 +509,11 @@ async fn a_child_created_under_the_open_empty_scope_appears_live() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
     let (scope, session_file) = open_fresh_session_scope(&supervisor.socket, &session_dir).await;
-    let child_path = write_fixture(
-        &session_dir,
-        "late-child",
-        "late child",
-        Some(Path::new(&session_file)),
-        1,
-        &[("join late", "joined")],
-    );
+    let live_dir = dir.path().join("live");
+    std::fs::create_dir_all(&live_dir).expect("live dir");
 
+    // The plan wakes the child's create once the empty scoped view rendered.
+    let empty_rendered = std::sync::Arc::new(tokio::sync::Notify::new());
     let view = run_scoped_view(
         &supervisor.socket,
         &session_dir,
@@ -529,6 +523,7 @@ async fn a_child_created_under_the_open_empty_scope_appears_live() {
                 needle: "No subagents yet.".to_string(),
                 timeout_ms: 5_000,
             },
+            AgentsStep::Notify(empty_rendered.clone()),
             AgentsStep::WaitRender {
                 needle: "late child".to_string(),
                 timeout_ms: 15_000,
@@ -536,10 +531,19 @@ async fn a_child_created_under_the_open_empty_scope_appears_live() {
             AgentsStep::Key("escape".to_string()),
         ],
     );
-    // The child starts once the empty scoped view is up; the frame order
-    // below proves the view showed the empty scope before the child.
+    // The child's file lives outside the session dir, so the saved catalog
+    // never lists it: the row can only arrive live from the create. The
+    // frame order below proves the view showed the empty scope first.
     let create_child = async {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        empty_rendered.notified().await;
+        let child_path = write_fixture(
+            &live_dir,
+            "late-child",
+            "late child",
+            Some(Path::new(&session_file)),
+            1,
+            &[("join late", "joined")],
+        );
         let (client, _events) =
             pa_tui::daemon_client::DaemonClient::connect_with_retry(&supervisor.socket)
                 .await
