@@ -19,10 +19,12 @@ import subprocess
 import time
 import tempfile
 import threading
+import uuid
 
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
 from review_restore_notice_parity import invoke, probe_from
 from review_draft_disconnect_parity import stop
+from review_kernel_env_parity import process_identity
 
 MARKER = 'MINIMUM_REASONING_RESULT='
 
@@ -96,6 +98,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(wire.encode())
 
 
+def fixture_processes(fixture):
+    """Read only exact fixture-tagged live processes; never signal by PID."""
+    alive = []
+    marker = b'PA_MINIMUM_REASONING_FIXTURE_ID=' + fixture.encode()
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != os.getuid():
+                continue
+            pid = int(entry.name)
+            identity, state = process_identity(pid)
+            if state != 'Z' and marker in (entry / 'environ').read_bytes().split(b'\0'):
+                # A recycled PID must not be attributed to this fixture.
+                current, current_state = process_identity(pid)
+                if current == identity and current_state != 'Z':
+                    alive.append((pid, identity))
+        except (FileNotFoundError, ProcessLookupError):
+            pass  # Exit between proc reads is successful teardown.
+    return alive
+
+
+def wait_fixture_gone(fixture):
+    deadline = time.monotonic() + 35
+    while True:
+        alive = fixture_processes(fixture)
+        if not alive:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError('owned fixture processes remained after shutdown: ' + str(alive))
+        threading.Event().wait(0.025)
+
+
 def summarize_branch(binary, root, cwd, env, session_file, observation):
     entries = [json.loads(line) for line in session_file.read_text().splitlines()]
     target = next(row['id'] for row in entries
@@ -144,10 +179,17 @@ def summarize_branch(binary, root, cwd, env, session_file, observation):
                     'targetId': target, 'summarize': True,
                     'customInstructions': 'Verify mandatory thinking'})
                 assert moved.get('data', {}).get('cancelled') is not True, moved
+                # Stop workers through the supervisor before waiting for exit.
+                # Killing only the supervisor leaves detached workers writing.
+                command('shutdown', {'type': 'shutdown', 'force': True})
         finally:
             if connection is not None:
                 connection.close()
-            stop(process)
+            try:
+                process.wait(timeout=15)
+                assert process.returncode == 0, 'owned daemon failed graceful shutdown'
+            finally:
+                stop(process)
             observation['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')
 
 
@@ -161,7 +203,8 @@ def run_case(binary, label, scenario, root, observation):
     paths = sorted(str(path) for path in library.glob('*/src') if path.is_dir())
     for skill in ('compact', 'refine'):
         assert (library / skill / 'src' / skill / '__init__.py').is_file(), skill + ' skill missing'
-    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
+    fixture = uuid.uuid4().hex
+    env.update(PA_MINIMUM_REASONING_FIXTURE_ID=fixture, HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent),
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(sessions),
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),
@@ -228,6 +271,11 @@ def run_case(binary, label, scenario, root, observation):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        assert not thread.is_alive(), 'fixture provider did not stop'
+        # CLI exit and shutdown acknowledgement precede detached worker exit.
+        # Wait for observable ownership to disappear before rmtree starts.
+        wait_fixture_gone(fixture)
+        observation['cleanup_verified'] = True
 
 
 def main():
