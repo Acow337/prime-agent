@@ -967,11 +967,11 @@ mod tests {
             "sessionName": "sibling-name", "parentActiveSessionId": "parent",
             "parentSessionId": "session-parent", "parentSessionPath": "/parent.jsonl",
         });
-        supervisor.roster.lock().unwrap().write_summary(
-            binding.clone(),
-            Some("sibling"),
-            None,
-        );
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .write_summary(binding.clone(), Some("sibling"), None);
         let summary = supervisor.worker_summary(&resident).await;
         let mut expected = offline_summary("sibling");
         expected["sessionName"] = binding["sessionName"].clone();
@@ -980,11 +980,11 @@ mod tests {
         expected["parentSessionPath"] = binding["parentSessionPath"].clone();
         assert_eq!(summary, expected);
 
-        supervisor.roster.lock().unwrap().write_summary(
-            binding,
-            Some("replacement"),
-            None,
-        );
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .write_summary(binding, Some("replacement"), None);
         assert_eq!(
             supervisor.worker_summary(&resident).await,
             offline_summary("sibling")

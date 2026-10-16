@@ -123,6 +123,7 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
 // The abort gate's arm semantics, pinned on the wire: `run_turn` driven
 // directly (the pickup's delivery-scoped clear never ran), so the final-emit
 // race is deterministic.
+#[derive(Default)]
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
 }
@@ -282,6 +283,7 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
             },
             EngineEvent::Done(Ok(())),
         ],
+        ..GateProbeEngine::default()
     });
     let runner = burst_runner(Arc::clone(&engine));
     runner
