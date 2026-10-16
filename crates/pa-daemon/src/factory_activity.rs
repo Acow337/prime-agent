@@ -205,51 +205,15 @@ mod tests {
         );
         #[cfg(unix)]
         {
-            // A FIFO models storage that has accepted the read but cannot return
-            // bytes yet. On this current-thread runtime, synchronous loading
-            // prevents the other joined future from releasing the writer.
             let harness = pa_core::refinement::get_local_harness_state_dir(artifacts.as_deref())
                 .expect("local harness dir");
             let state_path = pa_core::refinement::get_harness_state_path(&harness);
-            let raw = std::fs::read(&state_path).expect("harness state");
-            std::fs::remove_file(&state_path).expect("replace state with FIFO");
-            assert!(std::process::Command::new("mkfifo")
-                .arg(&state_path)
-                .status()
-                .expect("mkfifo")
-                .success());
-            let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            let fifo_path = state_path.clone();
-            let fifo_raw = raw.clone();
-            let writer = std::thread::spawn(move || {
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(fifo_path)
-                    .expect("open FIFO writer");
-                opened_tx.send(()).expect("reader opened");
-                // Failure rescue only: always release the blocked reader before
-                // reporting a runtime stall, so the test cannot hang on the old path.
-                let responsive = release_rx
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .is_ok();
-                file.write_all(&fifo_raw).expect("write harness state");
-                responsive
-            });
             let payload = serde_json::json!({ "action": "graph" });
-            let (slow_graph, ()) =
-                tokio::join!(worker.dispatch("factory_activity", &payload), async {
-                    opened_rx.await.expect("storage read started");
-                    let _ = release_tx.send(());
-                });
-            let responsive = writer.join().expect("FIFO writer");
-            std::fs::remove_file(&state_path).expect("remove FIFO");
-            std::fs::write(&state_path, raw).expect("restore harness state");
-            assert!(
-                responsive,
-                "the storage read must not block the async executor"
-            );
+            let slow_graph = crate::test_support::assert_async_file_read(
+                &state_path,
+                worker.dispatch("factory_activity", &payload),
+            )
+            .await;
             assert_eq!(
                 slow_graph.data,
                 Some(serde_json::json!({ "runs": [], "factorySpecs": 2 }))

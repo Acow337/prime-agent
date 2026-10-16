@@ -330,6 +330,7 @@ impl Supervisor {
                 Vec::new()
             }
         };
+        let persistent_shells = Arc::new(persistent_shells);
         // The passive ledger children stream too (items only, no progress - the
         // saved phase above owns the progress counts).
         let mut merged: Vec<_> = passive
@@ -337,8 +338,19 @@ impl Supervisor {
             .map(crate::rlm_roster::passive_child_info)
             .filter(|info| !scope_current || info.cwd == cwd)
             .collect();
-        for info in &merged {
-            let row = saved_session_row(info, &persistent_shells);
+        let passive_rows =
+            match saved_session_rows(merged.clone(), Arc::clone(&persistent_shells)).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    return vec![response_line(&response_failure(
+                        Some(command_id),
+                        "list_saved_sessions",
+                        &format!("{error:#}"),
+                        None,
+                    ))]
+                }
+            };
+        for row in passive_rows {
             let mut item = json!({
                 "id": command_id,
                 "type": "session_list_item",
@@ -387,10 +399,18 @@ impl Supervisor {
         // The streamed rows already reached the client; the terminal response is
         // the authoritative array (the scan never re-orders after streaming).
         let mut lines = Vec::new();
-        let sessions: Vec<Value> = infos
-            .iter()
-            .map(|info| saved_session_row(info, &persistent_shells))
-            .collect();
+        let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
+        let sessions = match saved_session_rows(infos, persistent_shells).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                return vec![response_line(&response_failure(
+                    Some(command_id),
+                    "list_saved_sessions",
+                    &format!("{error:#}"),
+                    None,
+                ))]
+            }
+        };
         let mut data = json!({ "sessions": sessions, "remaining": remaining });
         if let Some(next_cursor) = next_cursor {
             data["nextCursor"] = json!(next_cursor);
@@ -402,7 +422,6 @@ impl Supervisor {
         )));
         // Telemetry: how many served rows carry a usage summary (a count only,
         // never session payload).
-        let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
         self.note_saved_sessions_listed(rows_with_usage);
         lines
     }
@@ -835,6 +854,22 @@ fn offline_summary(worker_id: &str) -> Value {
         "messageCount": 0,
         "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
     })
+}
+
+/// Build catalog rows off the async executor: each row reads its local harness
+/// store to count factory specs, including passive children and final responses.
+pub(super) async fn saved_session_rows(
+    infos: Vec<crate::session_store::SessionInfo>,
+    persistent_shells: Arc<std::collections::HashMap<String, Vec<Value>>>,
+) -> Result<Vec<Value>> {
+    tokio::task::spawn_blocking(move || {
+        infos
+            .iter()
+            .map(|info| saved_session_row(info, &persistent_shells))
+            .collect()
+    })
+    .await
+    .map_err(|error| anyhow!("saved-session row reader failed: {error}"))
 }
 
 pub(super) fn saved_session_row(

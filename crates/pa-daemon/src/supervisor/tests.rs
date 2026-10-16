@@ -836,8 +836,8 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
 
 /// A catalog row carries the session's own stored factory specs (its local harness store's factory
 /// entries), read from disk without a kernel; a session without any carries no field.
-#[test]
-fn saved_session_rows_count_the_sessions_stored_factory_specs() {
+#[tokio::test]
+async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
     let root = std::env::temp_dir().join(format!("pa-saved-fs-{}", uuid::Uuid::new_v4()));
     let sessions = root.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -858,6 +858,20 @@ fn saved_session_rows_count_the_sessions_stored_factory_specs() {
         saved_session_row(&info, &std::collections::HashMap::new())["factorySpecs"],
         json!(2)
     );
+    #[cfg(unix)]
+    {
+        let state_path = pa_core::refinement::get_harness_state_path(&harness);
+        let rows = crate::test_support::assert_async_file_read(
+            &state_path,
+            super::sessions::saved_session_rows(
+                vec![info],
+                Arc::new(std::collections::HashMap::new()),
+            ),
+        )
+        .await
+        .expect("asynchronous catalog rows");
+        assert_eq!(rows[0]["factorySpecs"], json!(2));
+    }
     std::fs::remove_dir_all(&root).unwrap();
 }
 
