@@ -623,19 +623,6 @@ impl Supervisor {
         // write (its counter raises the resident's stale-delta watermark).
         self.write_roster_summary_for_resident(&resident, &summary)
             .await;
-        // The new root's passive family renders immediately from the ledger edges, then
-        // one bounded background hydration fills each seeded row's display fields. The root
-        // is the CREATE response's session file (a mid-replay get_state must not skip it).
-        if let Some(root) = summary
-            .get("sessionFile")
-            .and_then(Value::as_str)
-            .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
-        {
-            let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
-            if !seeded.is_empty() {
-                self.spawn_seeded_hydration(seeded);
-            }
-        }
         Ok(summary)
     }
 

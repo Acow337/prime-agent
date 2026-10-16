@@ -478,3 +478,64 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         .expect("parent still resident");
     assert_eq!(parent_entry["summary"]["activeSessionId"], parent_active_id);
 }
+
+#[test]
+fn open_resume_publishes_the_family_in_the_first_subscribe_snapshot() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let (root_path, live) = write_synthetic_family(&agent_dir, 2);
+    assert_eq!(live, 2, "two passive ledger children");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+
+    let root_session_path = root_path.to_string_lossy().to_string();
+    let created = client.send_command(
+        "c1",
+        &json!({
+            "type": "create",
+            "sessionPath": root_session_path,
+            "config": { "cwd": dir.path().to_string_lossy() },
+        }),
+    );
+    assert_eq!(created["success"], true, "resume create failed: {created}");
+    let root_active_id = created["data"]["activeSessionId"]
+        .as_str()
+        .expect("root active session id")
+        .to_string();
+
+    let subscribed = client.send_command("r1", &json!({ "type": "roster_subscribe" }));
+    assert_eq!(
+        subscribed["success"], true,
+        "subscribe failed: {subscribed}"
+    );
+    let snapshot = subscribed["data"]["roster"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for child_id in ["sub-0000", "sub-0001"] {
+        let entry = snapshot
+            .iter()
+            .find(|entry| entry["summary"]["rlmChildId"] == json!(child_id))
+            .unwrap_or_else(|| {
+                panic!("child {child_id} missing from the FIRST snapshot: {snapshot:?}")
+            });
+        assert_eq!(entry["summary"]["runtimeKind"], "subagent");
+        assert_eq!(
+            entry["summary"]["parentSessionPath"],
+            root_session_path.as_str(),
+            "the family edge keys the seeded row to the root"
+        );
+        assert_eq!(
+            entry["summary"]["sessionName"],
+            child_id.replace("sub-", "worker-")
+        );
+    }
+    let root_entry = snapshot
+        .iter()
+        .find(|entry| entry["summary"]["activeSessionId"] == json!(root_active_id.as_str()))
+        .expect("the reopened root's own row in the same snapshot");
+    assert_eq!(root_entry["status"], "idle");
+}
