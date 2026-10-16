@@ -216,7 +216,12 @@ impl Supervisor {
                 Err(error) => return WakeOutcome::Failed(error.to_string()),
             },
         };
-        let resolved = crate::session_catalog::resolve_saved_session(&sessions_dir, selector, &cwd);
+        let resolved = crate::session_catalog::resolve_saved_session(
+            &sessions_dir,
+            &self.options.agent_dir.join("sessions-archive"),
+            selector,
+            &cwd,
+        );
         let info = match resolved {
             Ok(Some(info)) => info,
             // The saved-session catalog misses RLM children (they persist in
