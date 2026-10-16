@@ -834,6 +834,49 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
     assert!(row.get("deletedDescendantUsage").is_none());
 }
 
+/// A catalog row carries the session's own stored factory specs (its local harness store's factory
+/// entries), read from disk without a kernel; a session without any carries no field.
+#[test]
+fn saved_session_rows_count_the_sessions_stored_factory_specs() {
+    let root = std::env::temp_dir().join(format!("pa-saved-fs-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    let path = sessions.join(format!("{}.jsonl", session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    let info = crate::session_store::read_session_info(&path).unwrap();
+    assert!(saved_session_row(&info).get("factorySpecs").is_none());
+    let entry = |id: &str, kind: &str| {
+        json!({
+            "id": id, "kind": kind, "title": id, "content": "", "path": "general",
+            "reference": {}, "arguments": {}, "metadata": {}, "source": "agent",
+            "created_at": "2026-10-16T00:00:00Z", "updated_at": "2026-10-16T00:00:00Z",
+            "version": 1,
+        })
+    };
+    let harness = pa_core::refinement::get_local_harness_state_dir(
+        crate::scheduled_jobs::session_artifact_dir(&path, &info.id).as_deref(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&harness).unwrap();
+    std::fs::write(
+        pa_core::refinement::get_harness_state_path(&harness),
+        json!({
+            "schema": 1,
+            "entries": {
+                "factory": { "a": entry("a", "factory"), "b": entry("b", "factory") },
+                "memory": { "m": entry("m", "memory") },
+            },
+            "refinements": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(saved_session_row(&info)["factorySpecs"], json!(2));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn saved_session_rows_carry_the_persisted_thinking_level() {
     let dir = std::env::temp_dir().join(format!("pa-saved-tl-{}", uuid::Uuid::new_v4()));
