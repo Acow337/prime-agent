@@ -338,3 +338,53 @@ fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
     mode.handle_shell_view_key("enter");
     assert!(mode.pending_shell_action.is_none());
 }
+
+#[test]
+fn persistent_shells_head_the_list_above_every_section() {
+    let mut mode = fresh_mode(vec![
+        roster_entry("r", "running", &parent_summary("r")),
+        roster_entry("i", "idle", &parent_summary("i")),
+    ]);
+    mode.apply_saved_loaded(vec![
+        saved_catalog_row("/x/old-a.jsonl", "old-a", "old session a"),
+        saved_catalog_row("/x/old-b.jsonl", "old-b", "old session b"),
+    ]);
+    mode.rebuild_rows();
+    mode.selected = mode
+        .rows
+        .iter()
+        .position(|row| row.summary.get("sessionId").and_then(Value::as_str) == Some("i"))
+        .expect("idle row");
+    mode.sync_selected_row_state();
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": "cargo watch", "sessionId": "i", "status": "running" },
+        { "id": "s2", "command": "sleep 600", "sessionId": "gone", "status": "running" },
+    ]}));
+
+    assert_eq!(
+        mode.rows[mode.selected].summary["sessionId"], "i",
+        "the late shells keep the selection on its session"
+    );
+    let (lines, _) = mode.render_frame(100, 40);
+    let texts: Vec<String> = lines.iter().map(flat).collect();
+    let position = |needle: &str| {
+        texts
+            .iter()
+            .position(|text| text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} in:\n{}", texts.join("\n")))
+    };
+    let shells = position("Persistent shells (2)");
+    assert!(
+        texts[shells + 1].contains("$ cargo watch") && texts[shells + 2].contains("$ sleep 600"),
+        "the shell rows sit under their heading:\n{}",
+        texts.join("\n")
+    );
+    assert_eq!(texts[shells + 3].trim(), "");
+    assert_eq!(position("Running (1)"), shells + 4);
+    assert!(position("Running (1)") < position("Idle (1)"));
+    assert!(position("Idle (1)") < position("Inactive (2)"));
+    assert!(
+        mode.click_rows.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "the row order is the display order"
+    );
+}
