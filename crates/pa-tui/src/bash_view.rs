@@ -295,11 +295,12 @@ impl BashView {
         self.fetch_error = fetch;
     }
 
-    /// A landed registry update supersedes a shown error; the host calls
-    /// this only when the registry itself changed.
+    /// A changed registry supersedes a kill error. A fetch error keeps its
+    /// retry state until output lands; metadata alone cannot satisfy a fetch.
     pub fn clear_error(&mut self) {
-        self.error = None;
-        self.fetch_error = false;
+        if !self.fetch_error {
+            self.error = None;
+        }
     }
 
     /// The selected row's index (first when unset).

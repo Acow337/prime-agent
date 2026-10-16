@@ -1129,3 +1129,36 @@ fn replacing_the_entire_view_rejects_previous_output_and_errors() {
         );
     }
 }
+
+#[test]
+fn registry_changes_preserve_failed_tail_fetches_and_their_retry() {
+    let mut view = BashView::new(activities(), 40);
+    let action = view.open("a");
+    let BashViewAction::OpenDetail { generation, .. } = action else {
+        panic!("open detail")
+    };
+    view.set_error(
+        "Bash output: unavailable".to_string(),
+        true,
+        Some(generation),
+    );
+    let mut refreshed = activities();
+    refreshed[0].command = "changed metadata".to_string();
+    view.apply_activities(refreshed);
+    view.clear_error();
+    let text = frame_text(&view.render(&theme(), 70, &kb())).join("\n");
+    assert!(text.contains("Bash output: unavailable"), "{text}");
+    assert_eq!(
+        view.handle_key("up", &kb()),
+        BashViewAction::OpenDetail {
+            id: "a".to_string(),
+            generation,
+        }
+    );
+    view.set_output("a", "recovered output", generation);
+    let text = frame_text(&view.render(&theme(), 70, &kb())).join("\n");
+    assert!(
+        text.contains("recovered output") && !text.contains("unavailable"),
+        "{text}"
+    );
+}
