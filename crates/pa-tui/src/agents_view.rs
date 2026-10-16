@@ -143,6 +143,9 @@ pub enum AgentsStep {
     Click { row: usize, col: usize },
     /// A raw SGR mouse sequence, decoded by the same parser the terminal's reports flow through.
     Mouse(String),
+    /// Wake the waiter once the plan reaches this step (every preceding step, barriers included,
+    /// has run): hands control back to a test whose next action must follow a rendered state.
+    Notify(std::sync::Arc<tokio::sync::Notify>),
 }
 
 #[derive(Debug, Default)]
@@ -207,6 +210,8 @@ enum UiInput {
     },
     /// A decoded SGR mouse report (the click grammar's input).
     Mouse(crate::mouse::MouseEvent),
+    /// The headless plan's `Notify` step, popped in plan order.
+    Notify(std::sync::Arc<tokio::sync::Notify>),
     Resize,
     Settled,
     Done,
@@ -909,6 +914,7 @@ async fn run_agents_view_surface(
                 UiInput::Paste(text) => {
                     mode.handle_paste(&text);
                 }
+                UiInput::Notify(notify) => notify.notify_one(),
                 // `Settled` is the plan's own settle no-op; `WaitRender` never reaches the batch
                 // pop (the pre-pass at the loop head owns it).
                 UiInput::Resize | UiInput::Settled | UiInput::WaitRender { .. } => {}
