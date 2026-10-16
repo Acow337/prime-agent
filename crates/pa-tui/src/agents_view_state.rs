@@ -355,6 +355,18 @@ fn json_model(model: &Value) -> Value {
     serde_json::json!({ "id": model_id, "provider": provider })
 }
 
+/// A session with no messages and no name. A name makes an empty session intentional: it lists
+/// and ranks like any other session, while an unnamed one hides once inactive and sinks in its
+/// section.
+pub(crate) fn is_unnamed_empty(summary: &Value) -> bool {
+    summary
+        .get("messageCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
+        && get_str(summary, "sessionName").is_none()
+}
+
 /// Hide abandoned empty catalog rows (TS `filterEmptyAgentsViewSessions`): an inactive row with
 /// no messages, name, usage, or transcript stays out unless it is the view's anchor.
 pub fn filter_empty_sessions(records: &[UnifiedRecord], preserved: &[&str]) -> Vec<UnifiedRecord> {
@@ -394,12 +406,7 @@ pub fn filter_empty_sessions(records: &[UnifiedRecord], preserved: &[&str]) -> V
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
                 > 0
-            || summary
-                .get("messageCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                > 0
-            || get_str(&summary, "sessionName").is_some()
+            || !is_unnamed_empty(&summary)
             || get_str(&summary, "firstMessage")
                 .is_some_and(|text| !text.trim().is_empty() && text.trim() != "(no messages)")
             || summary
