@@ -315,7 +315,7 @@ impl SessionEngine for AgentSessionEngine {
     /// boundaries).
     fn consume_compact_auto_refine(
         &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
+    ) -> anyhow::Result<Option<pa_core::session_engine::refine::CommittedRefinement>> {
         self.consume_compact_auto_refine_round()
     }
 
@@ -1223,7 +1223,7 @@ impl SessionEngine for AgentSessionEngine {
     fn run_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
-    ) -> anyhow::Result<Value> {
+    ) -> anyhow::Result<pa_core::session_engine::refine::CommittedRefinement> {
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
         let api_key = self.resolve_request_api_key(&model);
@@ -1234,19 +1234,20 @@ impl SessionEngine for AgentSessionEngine {
             .blocking_lock()
             .clone()
             .expect("session built by ensure_core_session");
-        let result = self.runtime.block_on(async {
-            core.session
-                .refine(
-                    &options,
-                    pa_core::session_engine::refine::RefinementSource::User,
-                    &model,
-                    api_key,
-                    global_harness_dir,
-                )
+        let committed = self.runtime.block_on(async {
+            let pending = core.session.start_refinement(
+                options,
+                pa_core::session_engine::refine::RefinementSource::User,
+                model,
+                api_key,
+                global_harness_dir,
+            );
+            drop(core);
+            pending
                 .await
+                .map_err(|error| anyhow::anyhow!("refinement task failed: {error}"))?
         })?;
-        serde_json::to_value(&result)
-            .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))
+        Ok(committed)
     }
 
     fn rlm_max_depth_status(&self) -> Value {
