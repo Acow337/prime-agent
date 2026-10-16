@@ -3,13 +3,14 @@
 //! file, while an unparseable or blank first line leaves the fold to decide
 //! (TS never invalidates on a parse failure).
 
+use std::cmp::Reverse;
 use std::fs;
-use std::path::Path;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use crate::session_store::{
-    parse_session_header_line, read_first_line_bounded_from, read_session_info_from, SessionInfo,
-    SESSION_LIST_HEADER_READ_MAX_BYTES,
+    parse_session_header_line, persist_info_sidecar, read_first_line_bounded_from,
+    read_session_info_from, SessionInfo, SESSION_LIST_HEADER_READ_MAX_BYTES,
 };
 
 /// The bounded header read's verdict for one roster file.
@@ -54,13 +55,37 @@ fn bounded_header_gate(file: &mut fs::File) -> HeaderGate {
 
 /// One file's roster row: `None` when the file produces none. One open serves
 /// the gate and the fold, pinning both to the same inode (a rename racing two
-/// handles could judge one file and fold another).
+/// handles could judge one file and fold another). A fold the sidecar did not
+/// cover backfills it, so the next cold process loads this row cheaply.
 fn roster_session_info(path: &Path) -> Option<SessionInfo> {
     let mut file = fs::File::open(path).ok()?;
     match bounded_header_gate(&mut file) {
         HeaderGate::NotAHeader => None,
-        HeaderGate::Header | HeaderGate::Unjudged => read_session_info_from(&mut file, path),
+        HeaderGate::Header | HeaderGate::Unjudged => {
+            let (info, sidecar_behind) = read_session_info_from(&mut file, path)?;
+            if sidecar_behind {
+                persist_info_sidecar(path);
+            }
+            Some(info)
+        }
     }
+}
+
+/// One walk over the store: the folded rows, the files after the walk, and
+/// the cursor that resumes after the last walked file (`None` at the end).
+pub struct SessionPage {
+    pub infos: Vec<SessionInfo>,
+    pub remaining: usize,
+    pub next_cursor: Option<String>,
+}
+
+/// The walk order's key: newest mtime first, the file name breaking ties, so
+/// the order is total and a cursor names one position in it.
+type WalkKey = (Reverse<u128>, String);
+
+fn parse_cursor(cursor: &str) -> Option<WalkKey> {
+    let (modified_ns, name) = cursor.split_once(':')?;
+    Some((Reverse(modified_ns.parse().ok()?), name.to_string()))
 }
 
 /// List every valid session file in a directory, most recently modified first.
@@ -68,43 +93,64 @@ fn roster_session_info(path: &Path) -> Option<SessionInfo> {
 /// cross-core cacheline/futex costs on a loaded box (425ms vs 137ms over 1412 files).
 #[must_use]
 pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
-    list_sessions_with(session_dir, |_, _, _| true)
+    list_sessions_with(session_dir, None, None, |_, _, _| true).infos
 }
 
-/// [`list_sessions`] with the saved-catalog stream's per-file callback:
-/// `on_row` receives rows as each fold completes, so rows reach the client
-/// DURING the scan; the metadata pass runs first, so the first row is the
-/// newest session. `false` stops the scan.
+/// [`list_sessions`] as a page with the saved-catalog stream's per-file
+/// callback. The enumeration (names and mtimes) always covers the whole
+/// store; the fold walks only the files after `cursor`, at most `limit` of
+/// them. `on_row` receives rows as each fold completes, so rows reach the
+/// client DURING the scan, newest first. `false` stops the scan.
 pub fn list_sessions_with(
     session_dir: &Path,
+    cursor: Option<&str>,
+    limit: Option<usize>,
     mut on_row: impl FnMut(usize, usize, &SessionInfo) -> bool,
-) -> Vec<SessionInfo> {
-    let Ok(read) = fs::read_dir(session_dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<(std::path::PathBuf, SystemTime)> = read
+) -> SessionPage {
+    let mut files: Vec<(WalkKey, PathBuf)> = fs::read_dir(session_dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
         .filter_map(|path| {
             let modified = fs::metadata(&path).and_then(|m| m.modified()).ok()?;
-            Some((path, modified))
+            let modified_ns = modified
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos());
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some(((Reverse(modified_ns), name), path))
         })
         .collect();
-    files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
-    let total = files.len();
+    files.sort_unstable();
+    let start = cursor
+        .and_then(parse_cursor)
+        .map_or(0, |after| files.partition_point(|(key, _)| *key <= after));
+    let files = &files[start..];
+    let walk = limit.map_or(files.len(), |limit| limit.max(1).min(files.len()));
     let mut infos = Vec::new();
-    for (index, (path, _)) in files.into_iter().enumerate() {
-        if let Some(info) = roster_session_info(&path) {
+    let mut walked = 0;
+    for (index, (_, path)) in files[..walk].iter().enumerate() {
+        walked = index + 1;
+        if let Some(info) = roster_session_info(path) {
             // `false` stops the scan: the consumer is gone, so the remaining
             // folds serve nobody — the scan returns the rows it has.
-            if !on_row(index, total, &info) {
+            if !on_row(index, walk, &info) {
                 break;
             }
             infos.push(info);
         }
     }
-    infos
+    let remaining = files.len() - walked;
+    let next_cursor = (remaining > 0).then(|| {
+        let ((Reverse(modified_ns), name), _) = &files[walked - 1];
+        format!("{modified_ns}:{name}")
+    });
+    SessionPage {
+        infos,
+        remaining,
+        next_cursor,
+    }
 }
 
 #[cfg(test)]
@@ -112,7 +158,7 @@ mod tests {
     use super::*;
     use crate::session_store::{read_session_info, session_file_name, SessionFile};
     use serde_json::json;
-    use std::path::PathBuf;
+    use std::time::SystemTime;
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pa-daemon-scan-{}", uuid::Uuid::new_v4()));
@@ -284,10 +330,11 @@ mod tests {
                 .unwrap();
         }
         let mut seen: Vec<(usize, usize, Option<String>)> = Vec::new();
-        let rows = list_sessions_with(&dir, |index, total, info| {
+        let rows = list_sessions_with(&dir, None, None, |index, total, info| {
             seen.push((index, total, info.name.clone()));
             true
-        });
+        })
+        .infos;
         assert_eq!(rows.len(), 3);
         assert_eq!(seen.len(), 3, "every row emitted as its fold completes");
         assert_eq!(
@@ -320,11 +367,42 @@ mod tests {
         write_session(&dir, "/repo/b", Some("second"), 1);
         write_session(&dir, "/repo/c", Some("third"), 1);
         let mut emitted = 0usize;
-        let rows = list_sessions_with(&dir, |_, _, _| {
+        let rows = list_sessions_with(&dir, None, None, |_, _, _| {
             emitted += 1;
             emitted < 2
-        });
+        })
+        .infos;
         assert_eq!(emitted, 2, "the scan stops at the consumer's false");
         assert_eq!(rows.len(), 1, "only the emitted row returns: {rows:?}");
+    }
+
+    #[test]
+    fn a_page_cursor_resumes_after_its_file_even_once_that_file_is_deleted() {
+        let dir = temp_dir();
+        let base = SystemTime::now() - std::time::Duration::from_hours(1);
+        let paths: Vec<PathBuf> = (0..5)
+            .map(|index| {
+                let path = write_session(&dir, "/repo/x", Some(&format!("row {index}")), 1);
+                let file = fs::File::options().write(true).open(&path).unwrap();
+                let modified = base + std::time::Duration::from_secs(60 * index);
+                file.set_times(std::fs::FileTimes::new().set_modified(modified))
+                    .unwrap();
+                path
+            })
+            .collect();
+        let names = |page: &SessionPage| {
+            page.infos
+                .iter()
+                .map(|info| info.name.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        let first = list_sessions_with(&dir, None, Some(2), |_, _, _| true);
+        assert_eq!(names(&first), ["row 4", "row 3"]);
+        assert_eq!(first.remaining, 3);
+        fs::remove_file(&paths[3]).unwrap();
+        let second =
+            list_sessions_with(&dir, first.next_cursor.as_deref(), Some(2), |_, _, _| true);
+        assert_eq!(names(&second), ["row 2", "row 1"], "no file skipped");
+        assert_eq!(second.remaining, 1);
     }
 }
