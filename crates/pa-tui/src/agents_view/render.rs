@@ -269,10 +269,10 @@ impl AgentsViewMode {
             return Vec::new();
         }
         if self.rows.is_empty() {
-            let text = if self.query.trim().is_empty() {
-                "No sessions yet."
-            } else {
-                "No sessions match your search."
+            let text = match (self.query.trim().is_empty(), self.scope_active) {
+                (false, _) => "No sessions match your search.",
+                (true, true) => "No subagents yet.",
+                (true, false) => "No sessions yet.",
             };
             return vec![vec![self.theme.fg(ThemeColor::Dim, text.to_string())]];
         }
