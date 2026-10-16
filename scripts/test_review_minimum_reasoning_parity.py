@@ -12,16 +12,29 @@ from review_minimum_reasoning_parity import fixture_processes, wait_fixture_gone
 
 
 class CleanupTests(unittest.TestCase):
-    def processes(self, env, identities):
+    def processes(self, env, identities, command=b'/fixture/binary\0'):
         with patch('pathlib.Path.iterdir', return_value=[Path('/proc/789')]), \
                 patch('pathlib.Path.stat', return_value=SimpleNamespace(st_uid=os.getuid())), \
-                patch('pathlib.Path.read_bytes', return_value=env), \
+                patch('pathlib.Path.read_bytes', side_effect=[command, env]), \
                 patch('review_minimum_reasoning_parity.process_identity', side_effect=identities):
-            return fixture_processes('fixture')
+            return fixture_processes('fixture', Path('/fixture/binary'))
+
+    def test_unrelated_runner_service_does_not_require_environment_access(self):
+        with patch('pathlib.Path.iterdir', return_value=[Path('/proc/789')]), \
+                patch('pathlib.Path.stat', return_value=SimpleNamespace(st_uid=os.getuid())), \
+                patch('pathlib.Path.read_bytes', side_effect=[b'/runner/Runner.Worker\0', PermissionError('denied')]) as reads, \
+                patch('review_minimum_reasoning_parity.process_identity', return_value=('proc:123', 'S')):
+            self.assertEqual(fixture_processes('fixture', Path('/fixture/binary')), [])
+            self.assertEqual(reads.call_count, 1)
 
     def test_matching_fixture_waits_despite_process_state_change(self):
         self.assertEqual(self.processes(b'PA_MINIMUM_REASONING_FIXTURE_ID=fixture\0',
             [('proc:123', 'S'), ('proc:123', 'R')]), [(789, 'proc:123')])
+
+    def test_exact_tagged_python_repl_is_owned(self):
+        self.assertEqual(self.processes(b'PA_MINIMUM_REASONING_FIXTURE_ID=fixture\0',
+            [('proc:123', 'S'), ('proc:123', 'S')], b'/venv/bin/python3\0-m\0rlm.repl\0'),
+            [(789, 'proc:123')])
 
     def test_foreign_and_partial_fixture_tags_are_not_owned(self):
         for tag in ('foreign', 'fixture-other'):
@@ -39,7 +52,7 @@ class CleanupTests(unittest.TestCase):
 
     def test_unreadable_same_user_process_does_not_claim_cleanup(self):
         with self.assertRaises(PermissionError):
-            self.processes(b'', [PermissionError('denied')])
+            self.processes(PermissionError('denied'), [('proc:123', 'S')])
 
     def test_branch_shutdown_ack_and_control_close_precede_process_wait(self):
         events = []
@@ -73,7 +86,7 @@ class CleanupTests(unittest.TestCase):
         with patch('review_minimum_reasoning_parity.fixture_processes',
                    side_effect=[[(789, 'proc:123')], []]) as processes, \
                 patch('review_minimum_reasoning_parity.threading.Event', return_value=event):
-            wait_fixture_gone('fixture')
+            wait_fixture_gone('fixture', Path('/fixture/binary'))
             self.assertEqual(processes.call_count, 2)
             event.wait.assert_called_once_with(0.025)
 
@@ -82,7 +95,7 @@ class CleanupTests(unittest.TestCase):
                    return_value=[(789, 'proc:123')]), \
                 patch('review_minimum_reasoning_parity.time.monotonic', side_effect=[0, 36]):
             with self.assertRaisesRegex(AssertionError, 'processes remained'):
-                wait_fixture_gone('fixture')
+                wait_fixture_gone('fixture', Path('/fixture/binary'))
 
 
 if __name__ == '__main__':

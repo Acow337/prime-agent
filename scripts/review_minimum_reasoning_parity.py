@@ -98,7 +98,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(wire.encode())
 
 
-def fixture_processes(fixture):
+def fixture_processes(fixture, binary):
     """Read only exact fixture-tagged live processes; never signal by PID."""
     alive = []
     marker = b'PA_MINIMUM_REASONING_FIXTURE_ID=' + fixture.encode()
@@ -110,6 +110,13 @@ def fixture_processes(fixture):
                 continue
             pid = int(entry.name)
             identity, state = process_identity(pid)
+            command = (entry / 'cmdline').read_bytes().split(b'\0')
+            # The runner also owns non-dumpable service processes whose environ
+            # is unreadable. They cannot belong to this binary/REPL fixture.
+            if command[0] != str(binary).encode() and not (
+                    b'python' in Path(command[0].decode()).name.encode()
+                    and command[1:3] == [b'-m', b'rlm.repl']):
+                continue
             if state != 'Z' and marker in (entry / 'environ').read_bytes().split(b'\0'):
                 # A recycled PID must not be attributed to this fixture.
                 current, current_state = process_identity(pid)
@@ -120,10 +127,10 @@ def fixture_processes(fixture):
     return alive
 
 
-def wait_fixture_gone(fixture):
+def wait_fixture_gone(fixture, binary):
     deadline = time.monotonic() + 35
     while True:
-        alive = fixture_processes(fixture)
+        alive = fixture_processes(fixture, binary)
         if not alive:
             return
         if time.monotonic() >= deadline:
@@ -274,7 +281,7 @@ def run_case(binary, label, scenario, root, observation):
         assert not thread.is_alive(), 'fixture provider did not stop'
         # CLI exit and shutdown acknowledgement precede detached worker exit.
         # Wait for observable ownership to disappear before rmtree starts.
-        wait_fixture_gone(fixture)
+        wait_fixture_gone(fixture, binary)
         observation['cleanup_verified'] = True
 
 
