@@ -15,6 +15,13 @@ impl AgentsViewMode {
     ) -> (Vec<Line>, Option<(usize, usize)>) {
         // The frame height feeds the page step (TS reads `ui.terminal.rows` live at key time).
         self.last_height = height;
+        if let Some(view) = &self.shell_view {
+            self.click_rows.clear();
+            self.hover_row = None;
+            let mut lines = view.render(&self.theme, width, &self.keybindings);
+            lines.resize_with(height, Vec::new);
+            return (lines, None);
+        }
         let mut lines: Vec<Line> = Vec::new();
         // The splash counts agent-kind rows only — nested subagent and summary rows never
         // inflate the header.
@@ -275,6 +282,7 @@ impl AgentsViewMode {
         enum DisplayItem<'a> {
             Spacer,
             Heading(Section),
+            ShellsHeading(usize),
             Row(usize, &'a AgentsViewRow),
             /// One note line of the selected row's expansion; one item per
             /// line so the viewport clips at line granularity.
@@ -339,6 +347,23 @@ impl AgentsViewMode {
                         }
                     }
                 }
+            }
+            let shells: Vec<(usize, &AgentsViewRow)> = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.kind == RowKind::PersistentShell)
+                .collect();
+            if !shells.is_empty() {
+                if !display.is_empty() {
+                    display.push(DisplayItem::Spacer);
+                }
+                display.push(DisplayItem::ShellsHeading(shells.len()));
+                display.extend(
+                    shells
+                        .into_iter()
+                        .map(|(index, row)| DisplayItem::Row(index, row)),
+                );
             }
         } else {
             for (index, row) in self.rows.iter().enumerate() {
@@ -423,6 +448,12 @@ impl AgentsViewMode {
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
                     )]);
                 }
+                DisplayItem::ShellsHeading(count) => {
+                    lines.push(vec![self.theme.fg(
+                        ThemeColor::Muted,
+                        truncate_text(&format!("Persistent shells ({count})"), width),
+                    )]);
+                }
                 DisplayItem::Row(index, row) => {
                     // The row's frame position carries the hover (operator directive
                     // 2026-09-29): the light band rides the row the mouse rests on.
@@ -502,6 +533,13 @@ impl AgentsViewMode {
         if matches!(row.kind, RowKind::Shells | RowKind::FactoryRuns) {
             let text = format!("{}{}", "  ".repeat(row.depth), row.title);
             let line = pad_line(vec![crate::Span::raw(truncate_text(&text, width))], width);
+            return finish_session_row(theme, line, selected, hovered, width);
+        }
+        if row.kind == RowKind::PersistentShell {
+            let line = pad_line(
+                vec![crate::Span::raw(Self::persistent_shell_text(row, width))],
+                width,
+            );
             return finish_session_row(theme, line, selected, hovered, width);
         }
         if row.kind == RowKind::SubagentSummary {
