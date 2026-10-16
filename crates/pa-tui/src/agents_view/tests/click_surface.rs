@@ -323,3 +323,18 @@ fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
     assert_eq!(mode.selected, selected);
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
+
+#[test]
+fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
+    let (mut mode, _) = mode_with_row("holder", "mock-1");
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [{
+        "id": "orphan", "command": "sleep 60", "sessionId": "deleted",
+        "status": "unverified", "persistent": true,
+    }]}));
+    let row = mode.persistent_shell_rows(&[]).remove(0);
+    assert!(AgentsViewMode::persistent_shell_text(&row, 100).contains("ownership unverified"));
+    mode.open_persistent_shell(&row);
+    mode.pending_shell_action.take();
+    mode.handle_shell_view_key("enter");
+    assert!(mode.pending_shell_action.is_none());
+}

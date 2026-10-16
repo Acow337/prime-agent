@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use pa_core::platform::process::{signal_process_group, Signal};
+use pa_core::platform::process::{process_group_exists, signal_process_group, Signal};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -72,6 +72,11 @@ fn runs_as_registered(shell: &Shell) -> bool {
         && crate::lease::get_process_start_id(shell.pid).as_deref() == Some(shell.start_id.as_str())
 }
 
+/// An extant group with no verified leader is not safely attributable to this record.
+fn group_unverified(shell: &Shell) -> bool {
+    !runs_as_registered(shell) && process_group_exists(shell.pid as i32).unwrap_or(true)
+}
+
 /// One shell as a row with the kernel bash activity row field names.
 fn activity_row(shell: &Shell, status: &str) -> Value {
     json!({
@@ -98,17 +103,24 @@ pub(crate) fn live_shell_rows_by_session(agent_dir: &Path) -> HashMap<String, Ve
     rows
 }
 
-/// Every registered shell machine-wide with its assigned `sessionId`: running
-/// while its pid runs as registered, else finished with its recorded exit
-/// code (none when it died before recording one).
+/// Every registered shell with its assigned `sessionId`: running while its
+/// leader runs as registered, unverified when a group remains without that
+/// proof, otherwise finished with its recorded exit code (if any).
 pub(crate) fn shell_rows(agent_dir: &Path) -> Vec<Value> {
     registered_shells(agent_dir)
         .iter()
         .map(|shell| {
             let running = runs_as_registered(shell);
-            let mut row = activity_row(shell, if running { "running" } else { "finished" });
+            let status = if running {
+                "running"
+            } else if group_unverified(shell) {
+                "unverified"
+            } else {
+                "finished"
+            };
+            let mut row = activity_row(shell, status);
             row["sessionId"] = json!(shell.session_id);
-            if !running {
+            if status == "finished" {
                 row["exitCode"] = json!(std::fs::read_to_string(shell_file(
                     agent_dir, &shell.id, "rc"
                 ))
@@ -139,33 +151,42 @@ pub(crate) fn output_tail(agent_dir: &Path, id: &str, lines: usize) -> Option<St
     Some(all[all.len().saturating_sub(lines)..].join("\n"))
 }
 
-/// Kill the shell `id`: group TERM while its pid runs as registered, then
-/// [`kill_group`] after [`TERM_GRACE`] or once the leader exited. Its record
-/// and files stay for the kernel that owns them; `false` for an unknown shell.
-pub(crate) fn kill_shell(agent_dir: &Path, id: &str) -> bool {
+/// Kill a shell only while the recorded leader identity still proves ownership.
+/// A durable leaderless group may belong to a reused PGID: refuse and retain it.
+pub(crate) fn kill_shell(agent_dir: &Path, id: &str) -> Result<bool, String> {
     let Some(shell) = find_shell(agent_dir, id) else {
-        return false;
+        return Ok(false);
     };
-    if runs_as_registered(&shell) {
-        let _ = signal_process_group(shell.pid as i32, Signal::Term);
+    if !runs_as_registered(&shell) {
+        return if group_unverified(&shell) {
+            Err("Cannot verify persistent shell group ownership; no signal sent".to_string())
+        } else {
+            Ok(true)
+        };
+    }
+    if !signal_process_group(shell.pid as i32, Signal::Term) {
+        return Err("Could not signal persistent shell group".to_string());
     }
     let deadline = Instant::now() + TERM_GRACE;
     while Instant::now() < deadline && runs_as_registered(&shell) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    kill_group(&shell);
-    true
+    kill_group(&shell)?;
+    Ok(true)
 }
 
-/// SIGKILL the shell's group unless its pid now runs under another identity.
-/// A dead leader's group still gets it: members that outlive the leader keep
-/// the pgid reserved, because a dead pid can only be some other process's
-/// pgid if a new process with that pid created the group. So an existing
-/// group whose leader is dead holds the original shell's stragglers, and a
-/// group that no longer exists makes the kill fail with ESRCH.
-fn kill_group(shell: &Shell) {
-    if !pid_alive(shell.pid) || runs_as_registered(shell) {
-        let _ = signal_process_group(shell.pid as i32, Signal::Kill);
+/// A missing or changed leader no longer proves the durable group's identity.
+fn kill_group(shell: &Shell) -> Result<(), String> {
+    if runs_as_registered(shell) {
+        if signal_process_group(shell.pid as i32, Signal::Kill) {
+            Ok(())
+        } else {
+            Err("Could not signal persistent shell group".to_string())
+        }
+    } else if group_unverified(shell) {
+        Err("Cannot verify persistent shell group ownership; no further signal sent".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -174,16 +195,17 @@ fn kill_group(shell: &Shell) {
 pub(crate) async fn respond(
     command_id: &str,
     type_name: &str,
-    run: impl FnOnce() -> Option<Value> + Send + 'static,
+    run: impl FnOnce() -> Result<Option<Value>, String> + Send + 'static,
 ) -> Value {
     let response = match tokio::task::spawn_blocking(run).await {
-        Ok(Some(data)) => response_success(Some(command_id), type_name, Some(data)),
-        Ok(None) => response_failure(
+        Ok(Ok(Some(data))) => response_success(Some(command_id), type_name, Some(data)),
+        Ok(Ok(None)) => response_failure(
             Some(command_id),
             type_name,
             "Unknown persistent shell",
             None,
         ),
+        Ok(Err(error)) => response_failure(Some(command_id), type_name, &error, None),
         Err(error) => response_failure(Some(command_id), type_name, &error.to_string(), None),
     };
     response_line(&response)
@@ -300,8 +322,8 @@ mod tests {
         let id = format!("{:032}", stranger.id());
 
         assert!(live_shell_rows_by_session(root.path()).is_empty());
-        assert_eq!(shell_rows(root.path())[0]["status"], "finished");
-        assert!(kill_shell(root.path(), &id));
+        assert_eq!(shell_rows(root.path())[0]["status"], "unverified");
+        assert!(kill_shell(root.path(), &id).is_err());
 
         assert_eq!(
             fatal_signal_after_own_term(stranger),
@@ -316,7 +338,7 @@ mod tests {
         let (mut leader, member, id) = registered_group(root.path());
         std::fs::write(shell_file(root.path(), &id, "out"), "line\n").unwrap();
 
-        assert!(kill_shell(root.path(), &id));
+        let _outcome = kill_shell(root.path(), &id);
 
         assert!(!leader.wait().unwrap().success(), "the leader was killed");
         assert_eq!(
@@ -326,22 +348,29 @@ mod tests {
         );
         assert_eq!(shell_rows(root.path())[0]["status"], "finished");
         assert_eq!(output_tail(root.path(), &id, 1).as_deref(), Some("line"));
-        assert!(!kill_shell(root.path(), "unknown"));
+        assert_eq!(kill_shell(root.path(), "unknown"), Ok(false));
     }
 
     #[test]
-    fn exited_leaders_group_is_killed() {
+    fn exited_leaders_group_is_unverified_and_never_signalled() {
         let root = tempfile::tempdir().unwrap();
         let (mut leader, member, id) = registered_group(root.path());
         leader.kill().unwrap();
         leader.wait().unwrap();
+        // The same observable state also describes an unrelated group after
+        // durable PID/PGID reuse. No old leader start-id can distinguish them.
+        let record = shell_file(root.path(), &id, "json");
+        let mut stale: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        stale["startId"] = json!("proc:old-unrelated-leader");
+        std::fs::write(&record, stale.to_string()).unwrap();
 
-        assert!(kill_shell(root.path(), &id));
-
+        assert_eq!(shell_rows(root.path())[0]["status"], "unverified");
+        assert!(kill_shell(root.path(), &id).is_err());
+        assert!(record.exists());
         assert_eq!(
             fatal_signal_after_own_term(member),
-            Some(NixSignal::SIGKILL as i32),
-            "the dead leader's group got SIGKILL"
+            Some(NixSignal::SIGTERM as i32),
+            "no earlier KILL reached the unverified group"
         );
     }
 
@@ -351,7 +380,7 @@ mod tests {
         let mut stranger = registered_sleeper(root.path(), "s1", Some("proc:not-this-process"));
         let shells = registered_shells(root.path());
 
-        kill_group(&shells[0]);
+        assert!(kill_group(&shells[0]).is_err());
         assert!(signal_process_group(stranger.id() as i32, Signal::Term));
 
         let status = stranger.wait().unwrap();

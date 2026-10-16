@@ -136,7 +136,7 @@ impl AgentsViewMode {
                     summary: serde_json::json!({
                         "shellId": id,
                         "command": shell.get("command").and_then(Value::as_str).map(single_line),
-                        "running": shell.get("status").and_then(Value::as_str) == Some("running"),
+                        "status": shell.get("status").and_then(Value::as_str),
                     }),
                     title: assignment,
                     model: String::new(),
@@ -165,8 +165,10 @@ impl AgentsViewMode {
             tail.push_str(" -> ");
             tail.push_str(&row.title);
         }
-        if row.summary.get("running").and_then(Value::as_bool) != Some(true) {
-            tail.push_str(" \u{b7} finished");
+        match row.summary.get("status").and_then(Value::as_str) {
+            Some("running") => {}
+            Some("unverified") => tail.push_str(" \u{b7} ownership unverified"),
+            _ => tail.push_str(" \u{b7} finished"),
         }
         let room = width
             .saturating_sub(2 + crate::width::str_width(&tail))

@@ -829,7 +829,7 @@ impl Supervisor {
                 // The machine-wide persistent shells, each with its assigned session id.
                 let agent_dir = self.options.agent_dir.clone();
                 let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
-                    Some(json!({ "activities": crate::persistent_shells::shell_rows(&agent_dir) }))
+                    Ok(Some(json!({ "activities": crate::persistent_shells::shell_rows(&agent_dir) })))
                 })
                 .await;
                 (vec![line], false)
@@ -840,8 +840,10 @@ impl Supervisor {
                 let agent_dir = self.options.agent_dir.clone();
                 let (shell_id, lines) = (shell_id.clone(), *lines as usize);
                 let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
-                    crate::persistent_shells::output_tail(&agent_dir, &shell_id, lines)
-                        .map(|tail| json!({ "shellId": shell_id, "tail": tail }))
+                    Ok(
+                        crate::persistent_shells::output_tail(&agent_dir, &shell_id, lines)
+                            .map(|tail| json!({ "shellId": shell_id, "tail": tail })),
+                    )
                 })
                 .await;
                 (vec![line], false)
@@ -851,7 +853,7 @@ impl Supervisor {
                 let shell_id = shell_id.clone();
                 let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
                     crate::persistent_shells::kill_shell(&agent_dir, &shell_id)
-                        .then(|| json!({ "shellId": shell_id }))
+                        .map(|known| known.then(|| json!({ "shellId": shell_id })))
                 })
                 .await;
                 (vec![line], false)
