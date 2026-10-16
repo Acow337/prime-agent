@@ -138,7 +138,11 @@ def validate(observed):
     assert isinstance(message['id'], str) and message['id'], message
     assert message['deliveryStatus'] in ('delivered', 'queued'), message
     assert message['target']['sessionId'] == observed['parent_session_id'], message
-    assert message['target']['activeSessionId'] == observed['parent_session_id'], message
+    # TS print hosts allocate a runtime activeSessionId distinct from the
+    # durable UUID. The durable target and child-parent edge below identify
+    # the recipient; retain the volatile runtime ID without equating the two.
+    active_id = message['target'].get('activeSessionId')
+    assert isinstance(active_id, str) and active_id.strip(), message
     assert rows[0]['file'] != observed['parent_session_file'], 'receipt must belong to child'
     handle = observed['spawn_handle']
     assert handle['rlm_child_id'] and handle['rlm_child_id'] in Path(handle['session_dir']).parts, handle

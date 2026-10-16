@@ -45,6 +45,18 @@ class LateReceiptGuards(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):
                 late_entries(Path(directory))
 
+    def test_runtime_and_durable_parent_ids_may_differ(self):
+        changed = self.good()
+        changed['late_entries'][0]['entry']['data']['message']['target']['activeSessionId'] = 'runtime-parent'
+        self.assertEqual(validate(changed), validate(self.good()))
+        for active_id in ['', '   ', None, 42]:
+            changed['late_entries'][0]['entry']['data']['message']['target']['activeSessionId'] = active_id
+            with self.assertRaises(AssertionError):
+                validate(changed)
+        del changed['late_entries'][0]['entry']['data']['message']['target']['activeSessionId']
+        with self.assertRaises(AssertionError):
+            validate(changed)
+
     def test_actual_late_payload_and_readiness_are_required(self):
         validate(self.good())
         for key, value in [('child_result_seen_before_release', False),
