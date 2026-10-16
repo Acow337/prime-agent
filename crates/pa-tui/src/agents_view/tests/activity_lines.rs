@@ -65,3 +65,31 @@ fn enter_on_a_nested_factory_line_opens_the_child_with_the_factory_panel() {
     assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns));
     assert_eq!(opened.expanded_ancestors, vec!["p".to_string()]);
 }
+
+/// Each node's child lines sit one indent step past its row: the session's at column 4, an
+/// expanded subagent's at column 8.
+#[test]
+fn child_lines_sit_one_indent_step_past_their_row() {
+    let mut mode = mode_with_parent_and_child();
+    mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
+    with_activity(&mut mode, "p-live", 2, 0);
+    with_activity(&mut mode, "c-live", 1, 0);
+    let (lines, _) = mode.render_frame(120, 36);
+    let column = |needle: &str| {
+        lines
+            .iter()
+            .map(flat)
+            .find_map(|line| line.find(needle).map(|at| line[..at].chars().count()))
+            .unwrap_or_else(|| panic!("no {needle:?} line"))
+    };
+    assert_eq!(
+        [
+            column("\u{2022} p name"),
+            column("\u{25be} 1 subagents"),
+            column("worker one"),
+            column("$ 1 shells"),
+            column("$ 2 shells"),
+        ],
+        [0, 4, 6, 8, 4]
+    );
+}
