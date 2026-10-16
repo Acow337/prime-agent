@@ -5,11 +5,12 @@
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_model, rlm_child_label, rlm_depth_limit_error, spawn_name_unavailable_error, Arc,
-    ChildCloseReason, ChildObservationSource, ChildRecord, Context, DaemonCommand, Duration, Instant,
-    Mutex, Path, PathBuf, Result, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
-    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
-    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
-    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
+    ChildCloseReason, ChildObservationSource, ChildRecord, Context, DaemonCommand, Duration,
+    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmCreateSessionHandle,
+    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
+    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
+    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    RENAME_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with

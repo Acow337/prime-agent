@@ -690,7 +690,10 @@ async fn child_observations_order_worker_sequences_and_allow_recovery_resets() {
         )
         .await;
     let record = record.lock().await;
-    assert_eq!((record.tool_use_count, &record.progress_note), (None, &None));
+    assert_eq!(
+        (record.tool_use_count, &record.progress_note),
+        (None, &None)
+    );
 }
 
 #[tokio::test]

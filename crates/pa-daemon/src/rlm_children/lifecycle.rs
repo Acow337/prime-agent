@@ -5,12 +5,11 @@ use super::{
     anyhow, cap_text, compact_rlm_text, create_rlm_child_failure_message,
     create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildObservationSource,
     ChildRecord, Context, CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map,
-    Mutex, ParentIdentity,
-    Path, PromptInput, Result, RlmChildTerminalNotice, SupervisorChildSessionsInner, Value,
-    ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS, IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS,
-    NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS, RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS,
-    WATCH_MAX_UNREACHABLE_POLLS, WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS,
-    WATCH_WAIT_SLICE_MS,
+    Mutex, ParentIdentity, Path, PromptInput, Result, RlmChildTerminalNotice,
+    SupervisorChildSessionsInner, Value, ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS,
+    IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS, NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS,
+    RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS, WATCH_MAX_UNREACHABLE_POLLS,
+    WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS, WATCH_WAIT_SLICE_MS,
 };
 
 /// Parsed ids of one created child session.
@@ -430,8 +429,13 @@ impl SupervisorChildSessionsInner {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = self.child_state(&active_session_id).await;
             if let Ok(state) = &state {
-                self.observe_live_state(record, state, request_order, ChildObservationSource::Direct)
-                    .await;
+                self.observe_live_state(
+                    record,
+                    state,
+                    request_order,
+                    ChildObservationSource::Direct,
+                )
+                .await;
             }
             state
         };
