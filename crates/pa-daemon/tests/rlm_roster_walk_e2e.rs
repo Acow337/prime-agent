@@ -81,6 +81,22 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     panic!("supervisor socket never appeared");
 }
 
+fn drain_boot_seed(socket: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (mut client, hello) = Client::connect(socket);
+        if hello["updateResume"]["complete"] == true {
+            // Restore completion follows adoption, which has already enqueued the boot seed.
+            let subscribed =
+                client.send_command("boot-seed", &json!({ "type": "roster_subscribe" }));
+            assert_eq!(subscribed["success"], true, "{subscribed}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "boot adoption never settled");
+        std::thread::yield_now();
+    }
+}
+
 /// Gate registration requests while other worker-to-supervisor traffic keeps flowing.
 struct RegistrationGate {
     socket: PathBuf,
@@ -612,6 +628,7 @@ fn open_resume_publishes_the_family_in_the_first_subscribe_snapshot() {
     let (root_path, live) = write_synthetic_family(&agent_dir, 2);
     assert_eq!(live, 2, "two passive ledger children");
     let _daemon = spawn_daemon(&socket, &agent_dir);
+    drain_boot_seed(&socket);
     let backend = dir.path().join("backend.sock");
     let registration = RegistrationGate::bind(&socket, &backend);
     let (mut client, hello) = Client::connect(&backend);
@@ -692,6 +709,7 @@ fn a_disconnected_create_still_seeds_its_family_before_registration() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (root, _) = write_synthetic_family(&agent_dir, 1);
     let _daemon = spawn_daemon(&socket, &agent_dir);
+    drain_boot_seed(&socket);
     let registration = RegistrationGate::bind(&socket, &backend);
     let (mut opener, _) = Client::connect(&backend);
     let create = json!({
