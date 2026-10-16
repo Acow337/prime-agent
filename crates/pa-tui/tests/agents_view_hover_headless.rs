@@ -541,3 +541,141 @@ async fn a_slow_shells_read_never_stacks_the_poll() {
         "a list_kernel_bash arrived while another was unanswered"
     );
 }
+
+/// A cycle held across a session handoff belongs to the returning view, not the old UI channel.
+#[tokio::test]
+async fn a_held_shells_read_survives_the_agents_view_handoff() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    let _guard = RUN_LOCK.lock().await;
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("handoff.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind mock socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept view connection");
+        let (read, mut write) = stream.into_split();
+        let hello = json!({
+            "type": "daemon_hello",
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "serverCapabilities": ["kernel_bash_activity"],
+        });
+        write
+            .write_all(format!("{hello}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(read).lines();
+        let mut shells_requests = 0;
+        let mut heartbeat_requests = 0;
+        let mut held_shell = None;
+        let mut held_catalog = None;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line.is_empty() {
+                break;
+            }
+            let envelope: Value = serde_json::from_str(&line).unwrap();
+            let id = envelope["id"].as_str().unwrap().to_string();
+            let command = envelope["command"]["type"].as_str().unwrap();
+            let mut replies = Vec::new();
+            match command {
+                "roster_subscribe" => replies.push((id, json!({
+                    "roster": [roster_row("p", "idle", &parent_summary("p"))],
+                }))),
+                "list_saved_sessions" => held_catalog = Some(id),
+                "list_kernel_bash" => {
+                    shells_requests += 1;
+                    if shells_requests == 1 {
+                        held_shell = Some(id);
+                    } else {
+                        replies.push((id, shells_reply(2)));
+                    }
+                }
+                "heartbeats_list" => {
+                    heartbeat_requests += 1;
+                    replies.push((id, json!({"heartbeats": []})));
+                    if heartbeat_requests == 2 {
+                        replies.push((
+                            held_shell.take().expect("the first view issued its poll"),
+                            shells_reply(1),
+                        ));
+                    }
+                }
+                "roster_unsubscribe" => replies.push((id, Value::Null)),
+                other => panic!("unexpected command: {other}"),
+            }
+            // The first view can open only after the server observed its unanswered shells read.
+            if shells_requests > 0
+                && let Some(id) = held_catalog.take()
+            {
+                replies.push((id, json!({"sessions": [saved_row(
+                    "/tmp/sessions/old.jsonl", "old", "archived run",
+                )]})));
+            }
+            for (id, data) in replies {
+                let response_command = if data.get("activities").is_some() {
+                    "list_kernel_bash"
+                } else if data.get("sessions").is_some() {
+                    "list_saved_sessions"
+                } else {
+                    command
+                };
+                let reply = json!({
+                    "type": "response", "id": id, "command": response_command,
+                    "success": true, "data": data,
+                });
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        }
+        shells_requests
+    });
+    let first = run_agents_view(
+        view_options(&socket),
+        AgentsViewUiMode::Headless(AgentsHeadlessPlan {
+            steps: vec![
+                AgentsStep::WaitRender {
+                    needle: "archived run".to_string(),
+                    timeout_ms: 2500,
+                },
+                AgentsStep::Key("home".to_string()),
+                AgentsStep::Key("enter".to_string()),
+            ],
+            width: 120,
+            height: 36,
+        }),
+        None,
+    )
+    .await
+    .expect("the first view opens its session");
+    assert_eq!(
+        first.outcome.selection,
+        Some(SessionSelection::Attach("p-live".to_string()))
+    );
+    let second = run_agents_view(
+        view_options(&socket),
+        AgentsViewUiMode::Headless(AgentsHeadlessPlan {
+            steps: vec![AgentsStep::WaitRender {
+                needle: "$ 1 shells".to_string(),
+                timeout_ms: 2500,
+            }],
+            width: 120,
+            height: 36,
+        }),
+        Some(first.link.expect("the handoff retains the roster connection")),
+    )
+    .await
+    .expect("the returning view consumes the held cycle");
+    assert!(
+        second
+            .outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("$ 1 shells"))
+    );
+    assert_eq!(
+        server.await.unwrap(),
+        1,
+        "re-entry must not issue a second shells request"
+    );
+}
