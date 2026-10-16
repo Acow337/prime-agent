@@ -118,13 +118,13 @@ fn the_list_renders_columned_rows_and_one_hint() {
         .expect("a column header row");
     assert!(header.contains("Label"));
     assert!(header.contains("Status"));
-    // The fixture's next run is long past, so the one-second floor renders ("in 1s").
+    // The fixture's next run is long past, so the one-second floor renders ("1s").
     let row = text
         .iter()
         .find(|row| row.contains("every 10m"))
         .expect("a columned row");
     assert!(row.contains("tick user-1"));
-    assert!(row.contains("in 1s"));
+    assert!(row.contains("1s"));
     assert!(row.contains("paused"));
     assert!(!text.iter().any(|row| row.starts_with("  created")));
     assert_eq!(
@@ -265,16 +265,16 @@ fn the_next_run_label_is_natural_language() {
     let now = crate::agents_view_state::iso_to_unix_ms("2026-06-01T12:00:00.000Z")
         .expect("the base parses") as u64;
     let label = |next_run_at: &str| next_run_label(Some(next_run_at), now);
-    assert_eq!(label("2026-06-01T12:00:45.000Z"), "in 45s");
-    assert_eq!(label("2026-06-01T12:05:00.000Z"), "in 5m");
-    assert_eq!(label("2026-06-01T22:00:00.000Z"), "in 10h");
+    assert_eq!(label("2026-06-01T12:00:45.000Z"), "45s");
+    assert_eq!(label("2026-06-01T12:05:00.000Z"), "5m");
+    assert_eq!(label("2026-06-01T22:00:00.000Z"), "10h");
     // Unit boundaries round up into the next unit.
-    assert_eq!(label("2026-06-01T12:00:59.500Z"), "in 1m");
-    assert_eq!(label("2026-06-01T12:01:00.000Z"), "in 1m");
-    assert_eq!(label("2026-06-01T13:00:00.000Z"), "in 1h");
-    assert_eq!(label("2026-06-02T12:00:00.000Z"), "in 1d");
-    assert_eq!(label("2026-06-03T12:00:00.000Z"), "in 2d");
-    assert_eq!(label("2026-06-01T11:59:30.000Z"), "in 1s");
+    assert_eq!(label("2026-06-01T12:00:59.500Z"), "1m");
+    assert_eq!(label("2026-06-01T12:01:00.000Z"), "1m");
+    assert_eq!(label("2026-06-01T13:00:00.000Z"), "1h");
+    assert_eq!(label("2026-06-02T12:00:00.000Z"), "1d");
+    assert_eq!(label("2026-06-03T12:00:00.000Z"), "2d");
+    assert_eq!(label("2026-06-01T11:59:30.000Z"), "1s");
     assert_eq!(next_run_label(None, now), "\u{2014}");
     assert_eq!(label("soon-ish"), "soon-ish");
 }
@@ -812,6 +812,6 @@ fn the_dock_heartbeat_items_list_active_heartbeats_by_next_fire() {
     }));
     assert_eq!(
         dock_heartbeat_items(&catalog, now),
-        vec!["in 5m soon job", "in 2h late job"]
+        vec!["5m soon job", "2h late job"]
     );
 }

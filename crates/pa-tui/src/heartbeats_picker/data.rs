@@ -264,11 +264,11 @@ pub fn format_timestamp(value: &str) -> String {
     }
 }
 
-/// The next-run label in natural language ("in 45s", "in 5m", "in 10h"):
+/// The next-run label as a bare countdown ("45s", "5m", "10h"):
 /// rounded seconds under a minute, then rounded minutes, hours, and days,
-/// with a one-second floor. The `in ` prefix is the operator's wording
-/// (2026-09-26 directive) — TS renders the bare countdown, superseded
-/// here. A missing next run keeps the `—` placeholder; an unparseable
+/// with a one-second floor. Bare countdown, no `in ` prefix (operator
+/// directive 2026-10-17, reversing the 2026-09-26 wording; matches TS).
+/// A missing next run keeps the `—` placeholder; an unparseable
 /// value renders raw.
 #[must_use]
 pub fn next_run_label(next_run_at: Option<&str>, now_ms: u64) -> String {
@@ -281,16 +281,16 @@ pub fn next_run_label(next_run_at: Option<&str>, now_ms: u64) -> String {
     let delta = ((at - now_ms as i64).max(0) as f64) / 1000.0;
     let seconds = (delta.round() as i64).max(1);
     if seconds < 60 {
-        return format!("in {seconds}s");
+        return format!("{seconds}s");
     }
     let minutes = ((seconds as f64) / 60.0).round() as i64;
     if minutes < 60 {
-        return format!("in {minutes}m");
+        return format!("{minutes}m");
     }
     let hours = ((minutes as f64) / 60.0).round() as i64;
     if hours < 24 {
-        return format!("in {hours}h");
+        return format!("{hours}h");
     }
     let days = ((hours as f64) / 24.0).round() as i64;
-    format!("in {days}d")
+    format!("{days}d")
 }
