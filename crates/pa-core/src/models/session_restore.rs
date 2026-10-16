@@ -64,7 +64,13 @@ pub async fn resolve_model_scope_from_models_with_readiness(
                 && !scoped
                     .iter()
                     .any(|scoped| scoped.model.provider == provider && scoped.model.id == model_id)
-                && scope_patterns_select_reference(patterns, provider, model_id, registry.get_all())
+                && scope_patterns_select_reference(
+                    patterns,
+                    provider,
+                    model_id,
+                    &available,
+                    registry.get_all(),
+                )
         });
     if !default_missing {
         return scoped;

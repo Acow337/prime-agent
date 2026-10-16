@@ -40,7 +40,7 @@ impl AgentSessionEngine {
         })
         .or_else(|| all.first().cloned());
         if let (Some(model), Some(default)) = (&resolved, &default) {
-            self.record_startup_default_fallback(model, default, &scope, &all);
+            self.record_startup_default_fallback(model, default, &scope, &available, &all);
         }
         resolved
     }
@@ -50,6 +50,7 @@ impl AgentSessionEngine {
         model: &Model,
         default: &(String, String),
         scope: &StartupScope,
+        available_models: &[Model],
         all_models: &[Model],
     ) {
         let (provider, model_id) = default;
@@ -60,10 +61,8 @@ impl AgentSessionEngine {
             .session_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let Some(session_file) = session_file else {
-            return;
-        };
+            .clone()
+            .unwrap_or_default();
         let mut decision = self
             .restored_model
             .lock()
@@ -79,6 +78,7 @@ impl AgentSessionEngine {
                 &scope.patterns,
                 provider,
                 model_id,
+                available_models,
                 all_models,
             );
         if !wanted {

@@ -281,7 +281,8 @@ impl SessionEngine for AgentSessionEngine {
             .session_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()?;
+            .clone()
+            .unwrap_or_default();
         if decision.session_file != current {
             return None;
         }

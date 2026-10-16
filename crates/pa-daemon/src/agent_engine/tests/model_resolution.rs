@@ -1299,33 +1299,67 @@ async fn a_fresh_scoped_create_waits_for_the_private_default() {
 
 #[tokio::test]
 async fn a_fresh_scoped_create_falls_back_with_a_recorded_message() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let worker = private_default_create_worker(dir.path(), Vec::new()).await;
-    let created = worker
-        .dispatch(
-            "create",
-            &json!({
-                "sessionPath": dir.path().join("race-session.jsonl"),
-                "cwd": dir.path(),
-            }),
-        )
-        .await;
-    assert!(created.success, "create failed: {created:?}");
-    let summary = created.data.expect("create summary");
-    let state = worker
-        .dispatch(
-            "get_connection_state",
-            &json!({ "activeSessionId": "race-create" }),
-        )
-        .await;
-    let data = state.data.expect("state data");
-    assert_eq!(
-        data["model"]["id"], "z-ai/glm-5.3",
-        "the fallback is the first scoped model: {data}"
-    );
-    assert_eq!(
-        summary["modelFallbackMessage"],
-        "Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3",
-        "the fallback is on the record: {summary}"
-    );
+    for no_session in [false, true] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worker = private_default_create_worker(dir.path(), Vec::new()).await;
+        let mut payload = json!({ "cwd": dir.path() });
+        if no_session {
+            payload["noSession"] = json!(true);
+        } else {
+            payload["sessionPath"] = json!(dir.path().join("race-session.jsonl"));
+        }
+        let created = worker.dispatch("create", &payload).await;
+        assert!(created.success, "create failed: {created:?}");
+        let summary = created.data.expect("create summary");
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "race-create" }),
+            )
+            .await;
+        let data = state.data.expect("state data");
+        assert_eq!(
+            data["model"]["id"], "z-ai/glm-5.3",
+            "the fallback is the first scoped model: {data}"
+        );
+        assert_eq!(
+            summary["modelFallbackMessage"],
+            "Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3",
+            "the fallback is on the record (noSession={no_session}): {summary}"
+        );
+        let attached = worker
+            .dispatch("attach", &json!({ "activeSessionId": "race-create" }))
+            .await;
+        assert!(attached.success, "attach failed: {attached:?}");
+        let snapshot = attached.data.expect("attach data");
+        assert_eq!(
+            snapshot["snapshot"]["summary"]["modelFallbackMessage"],
+            summary["modelFallbackMessage"],
+            "the attach summary delivers the warning to the TUI"
+        );
+        if no_session {
+            let path = dir.path().join("authorized-session.jsonl");
+            let mut target =
+                crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+            target.set_path(path.clone());
+            target.append_model_change("prime-inference", "z-ai/glm-5.3");
+            target.rewrite().unwrap();
+            let switched = worker
+                .dispatch(
+                    "switch_session",
+                    &json!({ "activeSessionId": "race-create", "sessionPath": path }),
+                )
+                .await;
+            assert!(switched.success, "switch failed: {switched:?}");
+            let attached = worker
+                .dispatch("attach", &json!({ "activeSessionId": "race-create" }))
+                .await;
+            assert!(attached.success, "attach failed: {attached:?}");
+            let snapshot = attached.data.expect("replacement attach data");
+            assert!(
+                snapshot["snapshot"]["summary"]["modelFallbackMessage"].is_null(),
+                "navigation must not replay the old in-memory warning: {snapshot}"
+            );
+        }
+    }
 }
