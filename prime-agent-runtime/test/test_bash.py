@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import resource
+import shlex
 import signal
 import socket
 import subprocess
@@ -1402,6 +1403,206 @@ async def _poll_journal(path: str, count: int, timeout: float = 2.0) -> list[dic
             return records
         await asyncio.sleep(0.05)
     return records
+
+
+@unittest.skipUnless(os.name == "posix", "persistent shells are POSIX-only")
+class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        agent_dir = tempfile.mkdtemp()
+        self.journal = os.path.join(agent_dir, "journal.jsonl")
+        self.home = os.path.join(agent_dir, "persistent-shells")
+        self.pgids: list[int] = []
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "PRIME_AGENT_CODING_AGENT_DIR": agent_dir,
+                "RLM_SESSION_ID": "own-session",
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
+    def tearDown(self):
+        # Persistent shells survive by design: never leak one out of a test.
+        for pgid in self.pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def records(self):
+        records = []
+        for name in self.files():
+            if name.endswith(".json"):
+                with open(os.path.join(self.home, name)) as f:
+                    records.append(json.load(f))
+        return records
+
+    def files(self):
+        try:
+            return sorted(os.listdir(self.home))
+        except FileNotFoundError:
+            return []
+
+    def handle_for(self, pid):
+        return next((h for h in bash_module.persistent_shells() if h.pid == pid), None)
+
+    async def wait_for(self, predicate, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline)
+            await asyncio.sleep(0.05)
+
+    async def test_persistent_shell_survives_its_kernel_and_is_reattached(self):
+        journal = self.journal
+        child = (
+            "from rlm import bash\n"
+            "import asyncio, sys\n"
+            "async def main():\n"
+            "    await bash('true')\n"
+            "    done = bash('echo first; sleep 1.5; echo second; exit 3', persistent=True)\n"
+            "    held = bash('sleep 60', persistent=True)\n"
+            "    print(done.pid, held.pid)\n"
+            "asyncio.run(main())\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", child],
+            env={
+                **os.environ,
+                "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        done_pid, held_pid = (int(pid) for pid in out.split())
+        self.pgids += [done_pid, held_pid]
+        # The kernel exited (atexit ran): only the one-shot bash() was journaled.
+        with open(journal) as f:
+            journaled = {json.loads(line)["pid"] for line in f}
+        self.assertEqual(len(journaled), 1)
+        self.assertNotIn(done_pid, journaled)
+        self.assertNotIn(held_pid, journaled)
+        os.killpg(held_pid, 0)
+        self.assertEqual({r["sessionId"] for r in self.records()}, {"own-session"})
+
+        bash_module._rehydrate_persistent_shells()
+        done, held = self.handle_for(done_pid), self.handle_for(held_pid)
+        self.assertTrue(done.running and held.running)
+        self.assertIn("persistent", repr(done))
+        rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
+        self.assertTrue(rows[held_pid]["persistent"])
+        self.assertEqual(rows[held_pid]["status"], "running")
+        self.assertEqual(done.output(), "first\n")
+
+        result = await done
+        self.assertEqual(result.exit_code, 3)
+        self.assertEqual(result.output, "first\nsecond\n")
+        self.assertFalse(done.running)
+        self.assertEqual(done.output(), "first\nsecond\n")
+        self.assertEqual([r["pid"] for r in self.records()], [held_pid])
+        self.assertEqual(len(self.files()), 2)
+
+        held.kill()
+        await held
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(held_pid, 0)
+        self.assertEqual(self.files(), [])
+
+    async def test_fresh_persistent_shell_reports_through_files(self):
+        go = os.path.join(os.path.dirname(self.home), "go")
+        handle = bash(f"while [ ! -e {shlex.quote(go)} ]; do sleep 0.01; done; echo hi; exit 4", persistent=True)
+        self.pgids.append(handle.pid)
+        rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
+        self.assertTrue(rows[handle.pid]["persistent"])
+        self.assertEqual([(r["pid"], r["sessionId"]) for r in self.records()], [(handle.pid, "own-session")])
+        open(go, "w").close()
+        result = await handle
+        self.assertEqual((result.exit_code, result.output), (4, "hi\n"))
+        await self.wait_for(lambda: self.files() == [])
+        self.assertEqual(handle.output(), "hi\n")
+        plain = bash("true")
+        rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
+        self.assertFalse(rows[plain.pid]["persistent"])
+        await plain
+
+    async def test_persistent_requires_a_saved_session(self):
+        with mock.patch.dict(os.environ):
+            del os.environ["RLM_SESSION_ID"]
+            with self.assertRaises(RuntimeError):
+                bash("true", persistent=True)
+
+    def write_record(self, record, rc=None):
+        os.makedirs(self.home, exist_ok=True)
+        with open(os.path.join(self.home, f"{record['id']}.out"), "w") as f:
+            f.write("old output\n")
+        if rc is not None:
+            with open(os.path.join(self.home, f"{record['id']}.rc"), "w") as f:
+                f.write(f"{rc}\n")
+        with open(os.path.join(self.home, f"{record['id']}.json"), "w") as f:
+            json.dump(record, f)
+
+    def record(self, shell_id, pid, start_id, session_id="own-session"):
+        return {"id": shell_id, "pid": pid, "startId": start_id, "command": "sleep 60",
+                "startedAt": "2026-01-01T00:00:00+00:00", "sessionId": session_id}
+
+    def sleeper(self):
+        proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(proc.wait)
+        self.pgids.append(proc.pid)
+        return proc
+
+    async def test_another_sessions_shells_are_left_alone(self):
+        live = self.sleeper()
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        self.write_record(self.record("1" * 32, live.pid, bash_module._process_start_id(live.pid), "other"))
+        self.write_record(self.record("2" * 32, gone.pid, "proc:1", "other"), rc=0)
+        self.write_record(self.record("3" * 32, gone.pid, "proc:1", "other"))
+        before = self.files()
+
+        bash_module._rehydrate_persistent_shells()
+
+        claimed = {h._activity_id for h in bash_module.persistent_shells()}
+        self.assertFalse(claimed & {"1" * 32, "2" * 32, "3" * 32})
+        self.assertEqual(self.files(), before)
+        self.assertIsNone(live.poll())
+
+    async def test_recycled_pid_is_never_claimed_or_signalled(self):
+        stranger = self.sleeper()
+        self.write_record(self.record("a" * 32, stranger.pid, "proc:not-this-process"))
+        self.write_record(self.record("b" * 32, stranger.pid, "proc:not-this-process"), rc=7)
+
+        bash_module._rehydrate_persistent_shells()
+        # The shell that finished while no kernel ran surfaces once, finished.
+        surfaced = [h for h in bash_module.persistent_shells() if h._activity_id == "b" * 32]
+        self.assertEqual(len(surfaced), 1)
+        result = await surfaced[0]
+        self.assertEqual((result.exit_code, result.output), (7, "old output\n"))
+        self.assertNotIn("a" * 32, [h._activity_id for h in bash_module.persistent_shells()])
+        self.assertIsNone(stranger.poll())
+        await self.wait_for(lambda: self.files() == [])
+
+    async def test_reattached_shell_whose_pid_is_recycled_finishes_without_a_signal(self):
+        stranger = self.sleeper()
+        self.write_record(self.record("d" * 32, stranger.pid, bash_module._process_start_id(stranger.pid)))
+        bash_module._rehydrate_persistent_shells()
+        handle = self.handle_for(stranger.pid)
+        self.assertTrue(handle.running)
+        # The shell died without a status and its pid now names another process.
+        handle._start_id = "proc:not-this-process"
+        self.assertEqual((await asyncio.wait_for(handle, 10)).exit_code, -1)
+        self.assertIsNone(stranger.poll())
+        await self.wait_for(lambda: self.files() == [])
+
+    async def test_dead_entry_is_swept(self):
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        self.write_record(self.record("c" * 32, gone.pid, "proc:1"))
+        bash_module._rehydrate_persistent_shells()
+        self.assertIsNone(self.handle_for(gone.pid))
+        self.assertEqual(self.files(), [])
 
 
 if __name__ == "__main__":
