@@ -360,9 +360,9 @@ fn a_settled_compaction_refreshes_the_tray_stats() {
     );
 }
 
-/// TS and older Rust protocol-7 daemons do not include result.transcript.
+/// TS and older Rust protocol-7 daemons do not include `result.transcript`.
 /// Both manual and automatic successful compactions still replace the chat
-/// from get_messages; the new in-stream path above must continue to skip it.
+/// from `get_messages`; the new in-stream path above must continue to skip it.
 #[test]
 fn legacy_compaction_results_refresh_the_transcript() {
     std::env::remove_var("TMUX");
