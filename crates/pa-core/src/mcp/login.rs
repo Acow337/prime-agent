@@ -11,7 +11,7 @@ use crate::auth::{AuthStorage, OAuthIntegration};
 
 use super::oauth::{mcp_login, McpLoginUi, McpOAuthConfig};
 use super::oauth_http::OAuthHttp;
-use super::McpManager;
+use super::{McpManager, McpServerConfig};
 
 /// One server's login execution: the resolved OAuth config plus the auth store. Detached from the
 /// manager on purpose — the flow awaits UI input, so no manager lock may be held across it.
@@ -51,12 +51,21 @@ impl McpManager {
         if !integration.uses_oauth {
             return None;
         }
-        let url = integration.config_url().map(str::to_string)?;
+        let McpServerConfig::Http {
+            url,
+            client_id,
+            callback_port,
+            ..
+        } = &integration.config
+        else {
+            unreachable!("uses_oauth implies an http config");
+        };
         Some(McpOAuthConfig {
             server: integration.server.clone(),
             label: integration.label.clone(),
-            url,
-            client_id: None,
+            url: url.clone(),
+            client_id: client_id.clone(),
+            callback_port: *callback_port,
             scopes: None,
         })
     }
@@ -164,6 +173,7 @@ impl McpOAuth {
             label: server,
             url: endpoint.clone(),
             client_id: None,
+            callback_port: None,
             scopes: None,
         };
         let http = Arc::clone(&self.http);
@@ -329,6 +339,8 @@ mod tests {
             disabled_tools: None,
             startup_timeout_ms: None,
             call_timeout_ms: None,
+            client_id: None,
+            callback_port: None,
         }
     }
 
@@ -358,6 +370,26 @@ mod tests {
                 r#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600}"#,
             ),
         ])
+    }
+
+    #[test]
+    fn oauth_config_threads_client_id_and_callback_port() {
+        let agent = tempfile::tempdir().unwrap();
+        let user_servers: HashMap<String, McpServerConfig> = serde_json::from_value(json!({
+            "slack": {
+                "type": "http",
+                "url": "https://fixture.example/mcp",
+                "oauth": true,
+                "clientId": "slack-client",
+                "callbackPort": 3118
+            }
+        }))
+        .unwrap();
+        let http = Arc::new(fixture_http());
+        let manager = manager(agent.path(), Some(user_servers), http);
+        let config = manager.lock().unwrap().oauth_config("slack").unwrap();
+        assert_eq!(config.client_id.as_deref(), Some("slack-client"));
+        assert_eq!(config.callback_port, Some(3118));
     }
 
     /// `begin_login` -> persisted endpoint-bound credentials -> `is_authed`
