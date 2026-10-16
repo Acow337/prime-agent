@@ -832,11 +832,17 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
         object.insert("thinkingLevel".to_string(), json!(level));
     }
     // Persistent `bash()` shells outlive the session's kernel: an inactive row still
-    // shows the live ones (kernel activity row shape).
+    // shows the live ones (kernel activity row shape). Its stored factory specs are
+    // durable harness entries, readable without a kernel too.
     if let Some(dir) = crate::scheduled_jobs::session_artifact_dir(&info.path, &info.id) {
         let shells = crate::persistent_shells::live_shell_rows(&dir);
         if !shells.is_empty() {
             object.insert("persistentShells".to_string(), json!(shells));
+        }
+        let specs = pa_core::refinement::get_local_harness_state_dir(Some(&dir))
+            .map_or(0, |harness| pa_core::refinement::local_factory_spec_count(&harness));
+        if specs > 0 {
+            object.insert("factorySpecs".to_string(), json!(specs));
         }
     }
     row

@@ -3,7 +3,8 @@
 //! One session-addressed command reaches this session's kernel factory
 //! executor (the bridge registered by the pa-core session engine): the
 //! payload's `action` rides the out-of-band kernel frame, and the kernel's
-//! reply returns verbatim (the run registry stays kernel-owned). The
+//! reply returns verbatim (the run registry stays kernel-owned) — the
+//! unscoped graph plus the engine's stored-spec count. The
 //! `run` action's model preflight (the allowlist pin, request auth)
 //! happens in the session engine before the frame — a doomed run fails
 //! before any child spawns.
