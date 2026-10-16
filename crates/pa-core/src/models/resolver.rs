@@ -647,7 +647,7 @@ pub fn find_initial_model(options: &InitialModelOptions<'_>) -> Option<Model> {
 /// The private-model predicate without a full `Model` value (TS
 /// `isPrivatePrimeInferenceModel({ provider, id })`).
 #[must_use]
-pub fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
+pub(super) fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
     provider == "prime-inference"
         && super::prime_inference::is_private_prime_inference_model_id(model_id)
 }
