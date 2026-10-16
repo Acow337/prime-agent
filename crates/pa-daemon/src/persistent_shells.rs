@@ -341,8 +341,9 @@ mod tests {
         let _outcome = kill_shell(root.path(), &id);
 
         assert!(!leader.wait().unwrap().success(), "the leader was killed");
+        let member_status = member.wait_with_output().unwrap().status;
         assert_eq!(
-            fatal_signal_after_own_term(member),
+            member_status.signal(),
             Some(NixSignal::SIGTERM as i32),
             "the group's TERM reached the member"
         );
