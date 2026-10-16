@@ -1556,10 +1556,11 @@ fn family_topology_tracks_restore_and_relocation_without_a_ledger_append() {
         archive.join(crate::session_store::session_file_name("child")),
     )
     .unwrap();
-    assert_eq!(
-        ledger.family_topology().unwrap().descendants(&parent),
-        Vec::new()
-    );
+    assert!(ledger
+        .family_topology()
+        .unwrap()
+        .descendants(&parent)
+        .is_empty());
     crate::session_archive::restore_session(&archive, &sessions, "child").unwrap();
     let restored = ledger.family_topology().unwrap();
     assert_eq!(restored.descendants(&parent), vec![0]);
@@ -1581,10 +1582,11 @@ fn family_topology_tracks_restore_and_relocation_without_a_ledger_append() {
         vec![canonical_session_path(&relocated)]
     );
     fs::remove_file(&relocated).unwrap();
-    assert_eq!(
-        ledger.family_topology().unwrap().descendants(&parent),
-        Vec::new()
-    );
+    assert!(ledger
+        .family_topology()
+        .unwrap()
+        .descendants(&parent)
+        .is_empty());
 }
 
 #[cfg(unix)]
