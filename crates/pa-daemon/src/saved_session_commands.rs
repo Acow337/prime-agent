@@ -147,6 +147,7 @@ pub(crate) fn remove_session_artifacts(session_path: &Path) {
     let Some(artifacts) = crate::scheduled_jobs::session_artifact_dir(session_path, stem) else {
         return;
     };
+    crate::persistent_shells::kill_session_shells(&artifacts);
     let _ = std::fs::remove_dir_all(artifacts);
 }
 

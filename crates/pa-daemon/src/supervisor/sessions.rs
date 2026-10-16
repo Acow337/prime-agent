@@ -831,6 +831,14 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
     }
+    // Persistent `bash()` shells outlive the session's kernel: an inactive row still
+    // shows the live ones (kernel activity row shape).
+    if let Some(dir) = crate::scheduled_jobs::session_artifact_dir(&info.path, &info.id) {
+        let shells = crate::persistent_shells::live_shell_rows(&dir);
+        if !shells.is_empty() {
+            object.insert("persistentShells".to_string(), json!(shells));
+        }
+    }
     row
 }
 

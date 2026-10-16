@@ -480,6 +480,12 @@ impl AgentsViewMode {
         }
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
+        // The activity lines' glyph sits in the summary line's marker slot; no cost cell.
+        if matches!(row.kind, RowKind::Shells | RowKind::FactoryRuns) {
+            let text = format!("{}{}", "  ".repeat(row.depth), row.title);
+            let line = pad_line(vec![crate::Span::raw(truncate_text(&text, width))], width);
+            return finish_session_row(theme, line, selected, hovered, width);
+        }
         if row.kind == RowKind::SubagentSummary {
             let indent = "  ".repeat(row.depth);
             let marker = if row.expanded { "\u{25be}" } else { "\u{25b8}" };

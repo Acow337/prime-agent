@@ -68,6 +68,7 @@ impl AgentsViewMode {
             &self.expanded_parents,
             &self.program_shown_parents,
             &rollups,
+            &self.session_activity,
             self.options.anchor_session_id.as_deref(),
         );
         // The entry anchor's row may be nested: arm the same ancestor expansion below so this
@@ -94,7 +95,7 @@ impl AgentsViewMode {
             while added {
                 added = false;
                 for row in &rows {
-                    if row.kind == RowKind::SubagentSummary {
+                    if !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
                         continue;
                     }
                     let session_id = row.summary.get("sessionId").and_then(Value::as_str);
@@ -112,6 +113,7 @@ impl AgentsViewMode {
                         &self.expanded_parents,
                         &self.program_shown_parents,
                         &rollups,
+                        &self.session_activity,
                         self.options.anchor_session_id.as_deref(),
                     );
                 }
@@ -497,6 +499,7 @@ impl AgentsViewMode {
                 has_children: false,
                 status_message: None,
                 cwd,
+                panel: None,
             });
             self.running = false;
             return;
