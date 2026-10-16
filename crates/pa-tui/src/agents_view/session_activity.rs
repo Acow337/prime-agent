@@ -1,9 +1,10 @@
 //! The per-session shells and factory counts behind the agents-view activity lines.
-use super::{mpsc, AgentsViewMode, DaemonClient, DaemonCommand, SessionActivity, UiInput};
+use super::{AgentsViewMode, DaemonClient, DaemonCommand, SessionActivity};
 use crate::bash_view::ShellCounts;
 use crate::factory_view::FactoryCounts;
 use anyhow::Result;
 use serde_json::{Map, Value};
+use tokio::sync::oneshot;
 
 /// One session's counts from one cycle: `None` is a failed read, which keeps that session's last
 /// count.
@@ -18,12 +19,12 @@ pub(super) struct ActivityRead {
 /// session answered.
 pub(super) fn spawn_session_activity_fetch(
     client: &DaemonClient,
-    ui_tx: mpsc::UnboundedSender<UiInput>,
     sessions: Vec<String>,
-) {
+) -> oneshot::Receiver<Vec<ActivityRead>> {
     let shells_supported = client.supports_server_capability("kernel_bash_activity");
     let factory_supported = client.supports_server_capability("factory_activity");
     let client = client.clone();
+    let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
         let mut reads = tokio::task::JoinSet::new();
         for active_session_id in sessions {
@@ -73,8 +74,9 @@ pub(super) fn spawn_session_activity_fetch(
             });
         }
         let reads = reads.join_all().await;
-        let _ = ui_tx.send(UiInput::SessionActivityLoaded(reads));
+        let _ = tx.send(reads);
     });
+    rx
 }
 
 /// A session without a running kernel hosts nothing: zero, not a failed read.
