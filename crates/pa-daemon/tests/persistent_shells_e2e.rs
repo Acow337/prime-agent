@@ -2,8 +2,9 @@
 //! `bash(..., persistent=True)` survives the daemon's shutdown (it is neither
 //! journaled for the orphan reaper nor killed by the kernel's exit hook), shows
 //! on the INACTIVE session's saved-catalog row, is re-attached by the kernel of
-//! the reopened session, and dies with the session's delete. The live-kernel
-//! test skips (with a note) without a kernel install.
+//! the reopened session, and keeps running after the session's delete, its
+//! record still assigned to the deleted session. The live-kernel test skips
+//! (with a note) without a kernel install.
 #![cfg(target_os = "linux")]
 // Narrowing casts sit at OS boundaries (pid) where the kernel bounds the values.
 #![allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -48,7 +49,7 @@ impl Drop for Daemon {
     }
 }
 
-/// Persistent shells survive everything but their session's delete: never leak one.
+/// Persistent shells outlive their session: never leak one.
 struct GroupGuard(i32);
 
 impl Drop for GroupGuard {
@@ -199,21 +200,28 @@ fn inactive_session_row_lists_only_its_live_persistent_shells() {
     let _guard = GroupGuard(sleeper.id() as i32);
     let mut gone = Command::new("true").spawn().expect("spawn true");
     gone.wait().expect("reap true");
-    let entry = |id: &str, pid: u32, start_id: Option<String>| {
-        json!({ "id": id, "pid": pid, "startId": start_id.unwrap_or_else(|| "proc:0".into()),
-                "command": "sleep 60", "startedAt": "2026-01-01T00:00:00+00:00" })
-    };
-    let artifacts = agent_dir.join("session-artifacts").join(session_id);
-    std::fs::create_dir_all(&artifacts).expect("artifacts");
-    std::fs::write(
-        artifacts.join("persistent-shells.json"),
-        json!({ "shells": [
-            entry(&"a".repeat(32), sleeper.id(), pa_daemon::lease::get_process_start_id(sleeper.id())),
-            entry(&"b".repeat(32), gone.id(), None),
-        ] })
-        .to_string(),
-    )
-    .expect("write registry");
+    let sleeper_start_id = pa_daemon::lease::get_process_start_id(sleeper.id()).expect("start id");
+    let home = agent_dir.join("persistent-shells");
+    std::fs::create_dir_all(&home).expect("persistent-shell home");
+    for (id, pid, start_id, session) in [
+        ("a", sleeper.id(), sleeper_start_id.as_str(), session_id),
+        ("b", gone.id(), "proc:0", session_id),
+        (
+            "c",
+            sleeper.id(),
+            sleeper_start_id.as_str(),
+            "another-session",
+        ),
+    ] {
+        let id = id.repeat(32);
+        std::fs::write(
+            home.join(format!("{id}.json")),
+            json!({ "id": id, "pid": pid, "startId": start_id, "command": "sleep 60",
+                    "startedAt": "2026-01-01T00:00:00+00:00", "sessionId": session })
+            .to_string(),
+        )
+        .expect("write record");
+    }
 
     let socket = dir.path().join("supervisor.sock");
     let _daemon = spawn_supervisor(&socket, &agent_dir, None);
@@ -231,7 +239,7 @@ fn inactive_session_row_lists_only_its_live_persistent_shells() {
 }
 
 #[test]
-fn persistent_shell_survives_daemon_shutdown_is_reattached_and_dies_with_session_delete() {
+fn persistent_shell_survives_daemon_shutdown_is_reattached_and_outlives_session_delete() {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -342,7 +350,7 @@ fn persistent_shell_survives_daemon_shutdown_is_reattached_and_dies_with_session
     .expect("parse handles");
     assert_eq!(handles, json!([[pid, true, "hi\n"]]));
 
-    // Close the session, then delete it: the delete kills the shell.
+    // Close the session, then delete it: the shell runs on as an orphan.
     client.request(
         "k1",
         &json!({ "type": "kill", "activeSessionId": active_id }),
@@ -351,10 +359,23 @@ fn persistent_shell_survives_daemon_shutdown_is_reattached_and_dies_with_session
         "d1",
         &json!({ "type": "delete_saved_session", "sessionPath": session_file.to_string_lossy() }),
     );
+    assert!(!session_file.exists());
     assert!(
-        !group_alive(pid),
-        "the session delete left its persistent shell running"
+        group_alive(pid),
+        "the session delete killed its persistent shell"
     );
+    let records: Vec<Value> = std::fs::read_dir(agent_dir.join("persistent-shells"))
+        .expect("persistent-shell home")
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|entry| {
+            serde_json::from_slice(&std::fs::read(entry.path()).expect("read record"))
+                .expect("parse record")
+        })
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["pid"], pid);
+    assert_eq!(records[0]["sessionId"], session_id.as_str());
 }
 
 fn write_faux_script(path: &Path, cell: &str) -> PathBuf {
