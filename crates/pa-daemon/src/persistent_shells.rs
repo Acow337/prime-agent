@@ -110,9 +110,13 @@ pub(crate) mod test_support {
     use std::path::Path;
     use std::process::{Child, Command};
 
-    /// A setsid'd `sleep` registered in `artifact_dir`'s registry under
-    /// `start_id` (`None`: its real start identity).
-    pub(crate) fn registered_sleeper(artifact_dir: &Path, start_id: Option<&str>) -> Child {
+    /// A setsid'd `sleep` registered in `agent_dir`'s persistent-shell home,
+    /// assigned to `session_id`, under `start_id` (`None`: its real start identity).
+    pub(crate) fn registered_sleeper(
+        agent_dir: &Path,
+        session_id: &str,
+        start_id: Option<&str>,
+    ) -> Child {
         let mut command = Command::new("sleep");
         command.arg("60");
         pa_core::platform::process::set_new_session(&mut command);
@@ -121,123 +125,61 @@ pub(crate) mod test_support {
             || crate::lease::get_process_start_id(child.id()).expect("start id"),
             str::to_string,
         );
-        register(artifact_dir, child.id(), &start_id);
-        child
-    }
-
-    /// Write `artifact_dir`'s registry with one shell `pid` under `start_id`.
-    pub(crate) fn register(artifact_dir: &Path, pid: u32, start_id: &str) {
-        std::fs::create_dir_all(artifact_dir.join(super::FILES_DIR)).expect("files dir");
-        let registry = serde_json::json!({ "shells": [{
-            "id": "a".repeat(32),
+        let home = agent_dir.join(super::HOME_DIR);
+        std::fs::create_dir_all(&home).expect("persistent-shell home");
+        let pid = child.id();
+        let id = format!("{pid:032}");
+        let record = serde_json::json!({
+            "id": id,
             "pid": pid,
             "startId": start_id,
             "command": "sleep 60",
             "startedAt": "2026-01-01T00:00:00+00:00",
-        }] });
-        std::fs::write(
-            artifact_dir.join(super::REGISTRY_FILE),
-            registry.to_string(),
-        )
-        .expect("write registry");
+            "sessionId": session_id,
+        });
+        std::fs::write(home.join(format!("{id}.json")), record.to_string()).expect("write record");
+        child
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::process::{Child, Command};
-
-    use nix::sys::signal::{kill, Signal as NixSignal};
-    use nix::unistd::Pid;
-
-    use super::test_support::{register, registered_sleeper};
+    use super::test_support::registered_sleeper;
     use super::*;
 
-    /// Send `child` our own SIGTERM and return the signal it died by: an
-    /// earlier SIGKILL is already pending and wins.
-    fn fatal_signal_after_own_term(mut child: Child) -> Option<i32> {
-        let _ = kill(Pid::from_raw(child.id() as i32), NixSignal::SIGTERM);
-        child.wait().unwrap().signal()
-    }
-
     #[test]
-    fn session_delete_kills_live_shells_and_removes_their_files() {
+    fn session_delete_leaves_its_shells_running_as_orphans() {
         let root = tempfile::tempdir().unwrap();
         let sessions = root.path().join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         let session_file = sessions.join("s1.jsonl");
         std::fs::write(&session_file, "{}\n").unwrap();
-        let artifacts = root.path().join("session-artifacts").join("s1");
-        let mut sleeper = registered_sleeper(&artifacts, None);
+        let mut sleeper = registered_sleeper(root.path(), "s1", None);
 
         let deleted = crate::saved_session_commands::delete_session_file(&session_file);
 
         assert_eq!(deleted["ok"], true);
-        let status = sleeper.wait().unwrap();
-        assert!(!status.success(), "the shell was killed, not finished");
-        assert!(!artifacts.exists());
+        assert!(!session_file.exists());
+        assert!(
+            sleeper.try_wait().unwrap().is_none(),
+            "the shell still runs"
+        );
+        assert_eq!(
+            live_shell_rows_by_session(root.path())["s1"][0]["pid"],
+            sleeper.id(),
+            "it stays listed under the deleted session"
+        );
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
     }
 
     #[test]
-    fn recycled_pid_is_neither_reported_nor_killed() {
-        let artifacts = tempfile::tempdir().unwrap();
-        let stranger = registered_sleeper(artifacts.path(), Some("proc:not-this-process"));
+    fn recycled_pid_is_not_reported() {
+        let root = tempfile::tempdir().unwrap();
+        let mut stranger = registered_sleeper(root.path(), "s1", Some("proc:not-this-process"));
 
-        assert!(live_shell_rows(artifacts.path()).is_empty());
-        kill_session_shells(artifacts.path());
-
-        assert!(!artifacts.path().join(REGISTRY_FILE).exists());
-        assert_eq!(
-            fatal_signal_after_own_term(stranger),
-            Some(NixSignal::SIGTERM as i32),
-            "never signalled"
-        );
-    }
-
-    #[test]
-    fn exited_leaders_group_is_killed() {
-        let artifacts = tempfile::tempdir().unwrap();
-        let mut leader_command = Command::new("sleep");
-        leader_command.arg("60");
-        pa_core::platform::process::set_new_process_group(&mut leader_command);
-        let mut leader = leader_command.spawn().unwrap();
-        let start_id = crate::lease::get_process_start_id(leader.id()).unwrap();
-        register(artifacts.path(), leader.id(), &start_id);
-        let member = Command::new("sleep")
-            .arg("60")
-            .process_group(leader.id() as i32)
-            .spawn()
-            .unwrap();
-        leader.kill().unwrap();
-        leader.wait().unwrap();
-
-        kill_session_shells(artifacts.path());
-
-        assert!(!artifacts.path().join(REGISTRY_FILE).exists());
-        assert!(!artifacts.path().join(FILES_DIR).exists());
-        assert_eq!(
-            fatal_signal_after_own_term(member),
-            Some(NixSignal::SIGKILL as i32),
-            "the dead leader's group got SIGKILL"
-        );
-    }
-
-    #[test]
-    fn pid_recycled_during_the_grace_is_not_killed() {
-        let artifacts = tempfile::tempdir().unwrap();
-        let mut stranger = registered_sleeper(artifacts.path(), Some("proc:not-this-process"));
-        let raw = std::fs::read(artifacts.path().join(REGISTRY_FILE)).unwrap();
-        let registry: Registry = serde_json::from_slice(&raw).unwrap();
-
-        kill_groups(&registry.shells);
-        assert!(signal_process_group(stranger.id() as i32, Signal::Term));
-
-        let status = stranger.wait().unwrap();
-        assert_eq!(
-            status.signal(),
-            Some(nix::sys::signal::Signal::SIGTERM as i32),
-            "no SIGKILL came first"
-        );
+        assert!(live_shell_rows_by_session(root.path()).is_empty());
+        stranger.kill().unwrap();
+        stranger.wait().unwrap();
     }
 }

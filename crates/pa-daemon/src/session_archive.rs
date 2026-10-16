@@ -447,15 +447,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn archived_session_kills_its_persistent_shells() {
+    fn archive_sweep_leaves_persistent_shells_running() {
         let root = tempfile::tempdir().expect("tempdir");
         let sessions = root.path().join("sessions");
         fs::create_dir_all(&sessions).expect("sessions dir");
         let old = write_session(&sessions, "old");
         set_mtime_days_ago(&old, 40);
-        let artifacts = root.path().join("session-artifacts").join("old");
         let mut sleeper =
-            crate::persistent_shells::test_support::registered_sleeper(&artifacts, None);
+            crate::persistent_shells::test_support::registered_sleeper(root.path(), "old", None);
 
         let archived = sweep_sessions(
             &sessions,
@@ -467,8 +466,12 @@ mod tests {
         .expect("sweep");
 
         assert_eq!(archived, vec!["old".to_string()]);
-        assert!(!sleeper.wait().expect("wait").success());
-        assert!(!artifacts.join("persistent-shells.json").exists());
+        assert!(
+            sleeper.try_wait().expect("try_wait").is_none(),
+            "the shell still runs"
+        );
+        sleeper.kill().expect("kill");
+        sleeper.wait().expect("wait");
     }
 
     /// A minimal valid session file: the `session` header line carries the
