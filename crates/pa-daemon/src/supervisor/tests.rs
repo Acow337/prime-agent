@@ -846,13 +846,18 @@ fn saved_session_rows_count_the_sessions_stored_factory_specs() {
     session.set_path(path.clone());
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
-    assert!(saved_session_row(&info).get("factorySpecs").is_none());
+    assert!(saved_session_row(&info, &std::collections::HashMap::new())
+        .get("factorySpecs")
+        .is_none());
     let harness = pa_core::refinement::get_local_harness_state_dir(
         crate::scheduled_jobs::session_artifact_dir(&path, &info.id).as_deref(),
     )
     .unwrap();
     crate::test_support::write_factory_specs(&harness, &["a", "b"]);
-    assert_eq!(saved_session_row(&info)["factorySpecs"], json!(2));
+    assert_eq!(
+        saved_session_row(&info, &std::collections::HashMap::new())["factorySpecs"],
+        json!(2)
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 
