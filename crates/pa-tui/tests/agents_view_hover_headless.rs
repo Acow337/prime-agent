@@ -603,12 +603,11 @@ async fn a_held_shells_read_survives_the_agents_view_handoff() {
                 other => panic!("unexpected command: {other}"),
             }
             // The first view can open only after the server observed its unanswered shells read.
-            if shells_requests > 0
-                && let Some(id) = held_catalog.take()
-            {
-                replies.push((id, json!({"sessions": [saved_row(
+            if let (true, Some(id)) = (shells_requests > 0, held_catalog.as_ref()) {
+                replies.push((id.clone(), json!({"sessions": [saved_row(
                     "/tmp/sessions/old.jsonl", "old", "archived run",
                 )]})));
+                held_catalog = None;
             }
             for (id, data) in replies {
                 let response_command = if data.get("activities").is_some() {
