@@ -273,6 +273,9 @@ pub struct AgentsViewLink {
     /// The activity counts the previous run held: a re-entry renders the line the user opened on
     /// its first frame, so the carried selection restores onto it.
     session_activity: std::collections::HashMap<String, SessionActivity>,
+    /// An unfinished cycle follows the roster link across session handoffs; re-entry consumes
+    /// its result instead of starting another batch while these requests still wait.
+    activity_fetch: Option<tokio::sync::oneshot::Receiver<Vec<session_activity::ActivityRead>>>,
 }
 
 impl AgentsViewLink {
@@ -284,6 +287,7 @@ impl AgentsViewLink {
             saved_sessions: Vec::new(),
             saved_catalog_loaded: false,
             session_activity: std::collections::HashMap::new(),
+            activity_fetch: None,
         })
     }
 
@@ -692,6 +696,7 @@ async fn run_agents_view_surface(
         .as_mut()
         .map(|link| std::mem::take(&mut link.session_activity))
         .unwrap_or_default();
+    let mut activity_fetch = link.as_mut().and_then(|link| link.activity_fetch.take());
     // This pane may arrive already in TUI state (the chat's teardown preserves it), so a
     // roster-link failure here must hand the terminal back before the error escapes.
     let (client, mut events, roster, saved_sessions, saved_catalog_loaded) =
@@ -757,7 +762,12 @@ async fn run_agents_view_surface(
     let mut heartbeat_generation: u64 = 1;
     heartbeats::spawn_heartbeat_catalog_fetch(&client, ui_tx.clone(), heartbeat_generation);
     // The activity lines' counts: one cycle in flight at a time, the next armed when it lands.
-    session_activity::spawn_session_activity_fetch(&client, ui_tx.clone(), mode.live_session_ids());
+    if activity_fetch.is_none() {
+        activity_fetch = Some(session_activity::spawn_session_activity_fetch(
+            &client,
+            mode.live_session_ids(),
+        ));
+    }
     let mut activity_fetch_at: Option<tokio::time::Instant> = None;
     // TS `start()`'s open-time settle (`armSavedSearchFetch` followed by
     // `resolveMissingSelectionAnchor`): a carried catalog arms no fetch,
@@ -1055,6 +1065,22 @@ async fn run_agents_view_surface(
                             continue;
                         }
                     }
+                    result = async {
+                        match activity_fetch.as_mut() {
+                            Some(fetch) => fetch.await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        activity_fetch = None;
+                        if let Ok(reads) = result {
+                            pending.push(UiInput::SessionActivityLoaded(reads));
+                        } else {
+                            activity_fetch_at = Some(
+                                tokio::time::Instant::now() + crate::interactive::ACTIVITY_POLL_INTERVAL,
+                            );
+                        }
+                        continue;
+                    }
                     // Only a running row needs a periodic frame. The timer
                     // stays tied to the last pulse across unrelated inputs.
                     () = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
@@ -1079,11 +1105,10 @@ async fn run_agents_view_surface(
                         }
                     } => {
                         activity_fetch_at = None;
-                        session_activity::spawn_session_activity_fetch(
+                        activity_fetch = Some(session_activity::spawn_session_activity_fetch(
                             &client,
-                            ui_tx.clone(),
                             mode.live_session_ids(),
-                        );
+                        ));
                     }
                     // The incident-notice poll's wake-up: the drain below the select
                     // does the refresh, so the arm only ends the wait.
@@ -1190,6 +1215,9 @@ async fn run_agents_view_surface(
             UiInput::KillResult { key, outcome } => {
                 mode.kill_result(&key, outcome);
             }
+            UiInput::SessionActivityLoaded(reads) => {
+                mode.apply_session_activity(reads);
+            }
             _ => {}
         }
     }
@@ -1211,6 +1239,7 @@ async fn run_agents_view_surface(
             saved_sessions: mode.saved.clone(),
             saved_catalog_loaded: mode.saved_catalog_loaded,
             session_activity: std::mem::take(&mut mode.session_activity),
+            activity_fetch,
         })
     } else {
         client.close();
