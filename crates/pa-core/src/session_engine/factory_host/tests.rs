@@ -712,24 +712,3 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
         .to_string();
     assert_eq!(error, "factory activity timeoutMs must be at most 60000");
 }
-
-/// The unscoped graph reply (the dock's and the agents view's poll) carries the session's own
-/// stored specs: the local store's factory entries, never the global store's.
-#[test]
-fn the_graph_list_reply_counts_only_the_local_stored_specs() {
-    let dir = tempfile::tempdir().unwrap();
-    let spec = inline_machine("testprov/declared-model");
-    write_harness_state(
-        dir.path(),
-        &[machine_entry("shared", &spec)],
-        &[
-            machine_entry("a", &spec),
-            machine_entry("b", &spec),
-            harness_entry("researcher", RefinementKind::Subagent, &json!({})),
-        ],
-    );
-    assert_eq!(
-        host(dir.path(), None, None, true).with_spec_count(json!({ "runs": [] })),
-        json!({ "runs": [], "factorySpecs": 2 })
-    );
-}

@@ -958,8 +958,7 @@ impl SessionEngine {
     /// prefights the spec's declared models first (allowlist pin, request
     /// auth) so a doomed run fails before any child spawns; then the
     /// out-of-band frame carries the request into the kernel's executor,
-    /// which owns the run registry. The unscoped graph reply also carries
-    /// the session's stored spec count ([`super::factory_host::FactoryHost::with_spec_count`]).
+    /// which owns the run registry.
     ///
     /// # Errors
     ///
@@ -997,23 +996,14 @@ impl SessionEngine {
             .provisioner
             .manager()
             .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
-        let reply = manager
+        manager
             .factory_activity(
                 request.action,
                 request.run_id.as_deref(),
                 request.spec_id.as_deref(),
                 request.timeout_ms,
             )
-            .await?;
-        if !request.lists_runs() {
-            return Ok(reply);
-        }
-        // The spec count reads the local harness store from disk: off the executor, like the
-        // preflight.
-        let host = self.factory_host.clone();
-        tokio::task::spawn_blocking(move || host.with_spec_count(reply))
             .await
-            .map_err(|join| anyhow::anyhow!("factory spec count join failed: {join}"))
     }
 
     /// Out-of-band kernel bash activity, scoped to this session's live kernel.

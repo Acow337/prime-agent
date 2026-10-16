@@ -221,14 +221,6 @@ pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> Harn
     state
 }
 
-/// A session's own stored factory specs: the factory entries of its local harness store. The
-/// global store and the runtime's shared library machines are every session's, so they never count.
-#[must_use]
-pub fn local_factory_spec_count(local_harness_dir: &Path) -> usize {
-    load_harness_state(local_harness_dir, HarnessScope::Local).entries[&RefinementKind::Factory]
-        .len()
-}
-
 /// Merge global + local states: local ids conflict-prefixed with their scope.
 ///
 /// # Panics
