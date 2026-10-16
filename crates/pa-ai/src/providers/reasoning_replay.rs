@@ -247,8 +247,8 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                 return Err(limitation(
                     "the Bedrock adapter cannot replay this reasoning signature for the destination model",
                 ));
-            } else if (model.api == "anthropic-messages"
-                || model.api == "bedrock-converse-stream" && claude_destination)
+            } else if (claude_destination
+                || model.api == "anthropic-messages" && thinking.redacted.unwrap_or(false))
                 && thinking
                     .thinking_signature
                     .as_deref()
@@ -386,7 +386,10 @@ mod tests {
                 "cannot replay this reasoning signature",
             ),
         ] {
-            let (model, context) = fixture(api, signature);
+            let (mut model, context) = fixture(api, signature);
+            if api == "anthropic-messages" {
+                model.name = "Claude fixture".into();
+            }
             let original = context.messages.clone();
             let error = validate_reasoning_replay(&model, &context).unwrap_err();
             assert!(error.contains(expected), "{error}");

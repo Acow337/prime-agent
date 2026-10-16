@@ -26,6 +26,65 @@ fn history(source: &Model, content: &serde_json::Value) -> Context {
 }
 
 #[test]
+fn unsigned_non_claude_anthropic_thinking_replays_on_the_same_model() {
+    let source = model("anthropic-messages", "fireworks", "deepseek-v4");
+    let claude = model("anthropic-messages", "anthropic", "claude-sonnet-4-6");
+    let bedrock = model(
+        "bedrock-converse-stream",
+        "amazon-bedrock",
+        "anthropic.claude-sonnet-4-6-v1",
+    );
+    for signature in [None, Some("")] {
+        let context = history(
+            &source,
+            &json!([
+                { "type": "thinking", "thinking": "SYNTHETIC_PLAN", "thinkingSignature": signature },
+                { "type": "text", "text": "Synthetic answer" }
+            ]),
+        );
+        let original = context.messages.clone();
+        assert_eq!(validate_reasoning_replay(&source, &context), Ok(()));
+        assert_eq!(
+            crate::providers::anthropic::convert_messages(
+                &context, &source, /*is_oauth_token*/ false, None
+            ),
+            vec![json!({ "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "SYNTHETIC_PLAN", "signature": "" },
+                { "type": "text", "text": "Synthetic answer" }
+            ] })]
+        );
+        for destination in [&claude, &bedrock] {
+            let error = validate_reasoning_replay(destination, &context).unwrap_err();
+            assert!(
+                error.contains("requires the original reasoning signature"),
+                "{error}"
+            );
+        }
+        assert_eq!(context.messages, original);
+    }
+}
+
+#[test]
+fn redacted_non_claude_anthropic_thinking_requires_its_opaque_payload() {
+    let source = model("anthropic-messages", "fireworks", "deepseek-v4");
+    for signature in [None, Some(""), Some("reasoning_content")] {
+        let context = history(
+            &source,
+            &json!([
+                { "type": "thinking", "thinking": "[Reasoning redacted]", "thinkingSignature": signature, "redacted": true }
+            ]),
+        );
+        let original = context.messages.clone();
+        let error = validate_reasoning_replay(&source, &context).unwrap_err();
+        assert!(
+            error.contains("requires the original reasoning signature"),
+            "{error}"
+        );
+        assert_eq!(context.messages, original);
+    }
+}
+
+#[test]
 fn empty_signed_claude_reasoning_round_trips_across_native_adapters() {
     let anthropic = model("anthropic-messages", "anthropic", "claude-sonnet-4-6");
     let bedrock = model(
