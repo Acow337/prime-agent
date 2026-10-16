@@ -1020,8 +1020,9 @@ class PersistentBashHandle(BashHandle):
     or archive leave it running; a deleted session's shells run on as orphans.
     The session's next kernel re-attaches it (see persistent_shells()). Only its
     own exit or kill() ends it. Awaits never own it: cancelling an await leaves
-    it running. Once it finished, its output is kept in memory and its files
-    are removed.
+    it running. Finished output is kept in memory. Files remain recoverable on
+    read errors or when a leaderless group cannot be verified; such a group is
+    never signalled using only its old numeric process-group id.
     """
 
     def __init__(
@@ -1046,6 +1047,7 @@ class PersistentBashHandle(BashHandle):
         self._rc_path = _persistent_file(home, shell_id, "rc")
         self._done = threading.Event()
         self._result: BashResult | None = None
+        self._completion_error: OSError | ValueError | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
         self._result_consumed = False
@@ -1067,11 +1069,17 @@ class PersistentBashHandle(BashHandle):
         self._schedule_background_completion_notice()
 
     def kill(self, sig: int = signal.SIGTERM, grace: float = 5.0) -> None:
-        # A re-attached shell is not our child: signal its group only while the
-        # pid still carries the recorded start identity (never a recycled pid).
-        if self._proc is None and _shell_identity(self._pid, self._start_id) is not True:
-            return
-        super().kill(sig, grace)
+        # Even a fresh Popen may have been reaped by the watcher before it
+        # commits _reaped. Every persistent signal must check its identity.
+        with self._kill_lock:
+            if self._reaped or _shell_identity(self._pid, self._start_id) is not True:
+                return
+            super().kill(sig, grace)
+
+    def _force_kill(self) -> None:
+        with self._kill_lock:
+            if not self._reaped:
+                _reap_persistent_group(self._pid, self._start_id)
 
     def _watch(self, running: bool) -> None:
         # running=False: the shell finished while no kernel ran; its pid may
@@ -1089,20 +1097,21 @@ class PersistentBashHandle(BashHandle):
                 exit_code = int(f.read())
         except FileNotFoundError:
             pass  # killed before the wrapper recorded a status
-        # Stragglers die with the shell, as for bash(). A re-attached pid that is
-        # alive under another identity names a stranger's group: never signal it.
-        reap = running and (
-            self._proc is not None
-            or not _pid_alive(self._pid)
-            or _shell_identity(self._pid, self._start_id) is True
-        )
+        except (OSError, ValueError) as error:
+            self._completion_error = error
+        # A dead leader's group can still contain the shell's children. A live
+        # recycled pid instead names a stranger's group and must not be signalled.
         with self._kill_lock:
-            if reap:
-                _signal_group(self._pid, signal.SIGKILL)
+            reaped = _reap_persistent_group(self._pid, self._start_id)
             self._reaped = True
-        cast("_OutputFile", self._buffer).keep()
-        _remove_shell_files(self._home, self._activity_id)
-        self._finalize(exit_code)
+        try:
+            cast("_OutputFile", self._buffer).keep()
+        except OSError as error:
+            self._completion_error = error
+        if self._completion_error is None and reaped:
+            _remove_shell_files(self._home, self._activity_id)
+        # Failed I/O must settle waiters too, without losing the recoverable files.
+        self._finalize(exit_code, "" if self._completion_error is not None else None)
         with self._callback_lock:
             callback, self._reap_callback = self._reap_callback, None
         if callback is not None:
@@ -1111,6 +1120,18 @@ class PersistentBashHandle(BashHandle):
             _activity_order.append(self._activity_id)
             while len(_activity_order) > _ACTIVITY_HISTORY_CAP:
                 _activity_handles.pop(_activity_order.popleft(), None)
+
+    async def _wait(self) -> BashResult:
+        result = await super()._wait()
+        if self._completion_error is not None:
+            raise self._completion_error
+        return result
+
+    def poll(self) -> BashResult | None:
+        result = super().poll()
+        if result is not None and self._completion_error is not None:
+            raise self._completion_error
+        return result
 
     def _schedule_background_completion_notice(self) -> None:
         # No bash-activity residency hold: the shell survives kernel release.
@@ -1344,6 +1365,22 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         pass
+    # kill(0) also accepts zombies. Match the host's liveness policy so a
+    # reattached shell can finish without waiting for another process to reap it.
+    try:
+        if sys.platform.startswith("linux"):
+            with open(f"/proc/{pid}/stat") as stat_file:
+                stat = stat_file.read()
+            return stat[stat.rindex(")") + 2:].split()[0] != "Z"
+        if sys.platform == "darwin":
+            state = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "stat="],
+                capture_output=True, text=True, timeout=5,
+                env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+            )
+            return state.returncode != 0 or not state.stdout.lstrip().startswith("Z")
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        pass  # unknown state stays alive; never claim a recycled group
     return True
 
 
@@ -1431,8 +1468,32 @@ def _rehydrate_persistent_shells() -> None:
                 record["command"], record["id"], record["pid"], record["startId"], record["startedAt"],
                 home, None, identity,
             )
-        else:
+        elif _reap_persistent_group(record["pid"], record["startId"]):
             _remove_shell_files(home, record["id"])
+
+
+def _reap_persistent_group(pid: int, start_id: str) -> bool:
+    """Reap stragglers without ever signalling a live recycled or unverified pid."""
+    # Existence is distinct from liveness: a recycled zombie can still own an
+    # unrelated group. It must pass the same start-identity check as a live pid.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        # A durable record can outlive its original group. An extant group
+        # without the recorded leader may be a reused PGID: retain it, do not kill.
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+    except PermissionError:
+        pass
+    current = _process_start_id(pid)
+    if current == start_id:
+        return _signal_group(pid, signal.SIGKILL)
+    return current is not None
 
 
 def _taskkill_tree(pid: int) -> bool:
