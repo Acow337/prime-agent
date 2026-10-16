@@ -1217,3 +1217,115 @@ fn a_model_switch_keeps_the_agent_slot_in_sync_with_the_reported_level() {
         "the agent slot re-syncs to the restored level"
     );
 }
+
+async fn private_default_create_worker(
+    dir: &std::path::Path,
+    responses: Vec<Vec<u8>>,
+) -> std::sync::Arc<crate::worker::Worker> {
+    let agent_dir = dir.join("agent");
+    write_prime_auth(&agent_dir);
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({
+            "defaultProvider": "prime-inference",
+            "defaultModel": "internal/glm-5.3-fast",
+            "enabledModels": [
+                "prime-inference/z-ai/glm-5.3",
+                "prime-inference/internal/glm-5.3-fast",
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = MockCatalogServer::start(responses).await;
+    install_loopback_catalog(&agent_dir, &server);
+    std::sync::Arc::new(crate::worker::Worker::new(
+        crate::worker::WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "model-race".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "race-create".to_string(),
+            agent_dir,
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            script: None,
+            telemetry_disabled: Some(true),
+        },
+        None,
+    ))
+}
+
+async fn create_state(worker: &crate::worker::Worker, dir: &std::path::Path) -> Value {
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": dir.join("race-session.jsonl"), "cwd": dir }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let state = worker
+        .dispatch(
+            "get_connection_state",
+            &json!({ "activeSessionId": "race-create" }),
+        )
+        .await;
+    state.data.expect("state data")
+}
+
+#[tokio::test]
+async fn a_fresh_scoped_create_waits_for_the_private_default() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let pi = pi_payload();
+    let layer_a = json!({ "schemaVersion": 1, "models": [] }).to_string();
+    let worker = private_default_create_worker(
+        dir.path(),
+        vec![
+            catalog_ok_json(&layer_a),
+            catalog_ok_json(&pi),
+            catalog_ok_json(&pi),
+        ],
+    )
+    .await;
+    let data = create_state(&worker, dir.path()).await;
+    assert_eq!(
+        data["model"]["provider"], "prime-inference",
+        "the session runs on the provider default: {data}"
+    );
+    assert_eq!(
+        data["model"]["id"], "internal/glm-5.3-fast",
+        "the private default the patterns scope in wins the startup pick: {data}"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_scoped_create_falls_back_with_a_recorded_message() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let worker = private_default_create_worker(dir.path(), Vec::new()).await;
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({
+                "sessionPath": dir.path().join("race-session.jsonl"),
+                "cwd": dir.path(),
+            }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let summary = created.data.expect("create summary");
+    let state = worker
+        .dispatch(
+            "get_connection_state",
+            &json!({ "activeSessionId": "race-create" }),
+        )
+        .await;
+    let data = state.data.expect("state data");
+    assert_eq!(
+        data["model"]["id"], "z-ai/glm-5.3",
+        "the fallback is the first scoped model: {data}"
+    );
+    assert_eq!(
+        summary["modelFallbackMessage"],
+        "Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3",
+        "the fallback is on the record: {summary}"
+    );
+}
