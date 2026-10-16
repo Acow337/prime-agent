@@ -40,6 +40,7 @@ fn serve(listener: &UnixListener) -> Vec<String> {
         }),
     );
     let mut killed = Vec::new();
+    let mut pending_kill_failure: Option<String> = None;
     loop {
         let Some(line) = read_line(&mut reader) else {
             return killed;
@@ -78,9 +79,25 @@ fn serve(listener: &UnixListener) -> Vec<String> {
                 ] })
             }
             "tail_persistent_shell" => {
+                // Deliver the old shell's error only once another shell's
+                // pane has opened and requested its output.
+                if command["shellId"] == "b" {
+                    if let Some(kill_id) = pending_kill_failure.take() {
+                        respond_failure(
+                            &mut writer,
+                            &kill_id,
+                            "kill_persistent_shell",
+                            "old shell kill failed",
+                        );
+                    }
+                }
                 json!({ "shellId": command["shellId"], "tail": "watching..." })
             }
             "kill_persistent_shell" => {
+                if command["shellId"] == "l" {
+                    pending_kill_failure = Some(id.to_string());
+                    continue;
+                }
                 killed.push(command["shellId"].as_str().unwrap_or_default().to_string());
                 json!({ "shellId": command["shellId"] })
             }
@@ -285,4 +302,32 @@ async fn clicking_a_shell_dispatches_its_tail_without_another_key() {
         .expect("overlay frame")
         .contains("watching..."));
     assert!(killed.is_empty());
+}
+
+#[tokio::test]
+async fn a_late_kill_failure_does_not_move_to_another_shell_pane() {
+    let (frames, _) = run_plan(vec![
+        AgentsStep::WaitSettle { timeout_ms: 2500 },
+        wait_render("long-job -> (deleted)"),
+        AgentsStep::Key("down".to_string()),
+        AgentsStep::Key("down".to_string()),
+        AgentsStep::Key("enter".to_string()),
+        wait_render("watching..."),
+        AgentsStep::Key("enter".to_string()),
+        AgentsStep::Key("escape".to_string()),
+        AgentsStep::Key("up".to_string()),
+        AgentsStep::Key("enter".to_string()),
+        wait_render("watching..."),
+    ])
+    .await;
+    assert!(frames
+        .last()
+        .expect("shell B frame")
+        .contains("build-watch"));
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.contains("old shell kill failed")),
+        "shell A's failure must not appear on shell B"
+    );
 }

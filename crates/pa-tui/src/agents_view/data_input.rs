@@ -675,13 +675,15 @@ impl AgentsViewMode {
         if !crate::mouse_tracking::active() {
             return;
         }
-        if self.shell_view.is_some() {
-            // The overlay owns the mouse too: wheel turns scroll its output,
-            // while clicks must never select or open a hidden session row.
+        if let Some(view) = self.shell_view.as_mut() {
+            // Mouse movement is semantic: remapped keyboard arrows must not
+            // change it, and clicks must not reach hidden session rows.
             if let Some(delta) = crate::mouse::wheel_scroll_delta(event) {
-                let key = if delta < 0 { "up" } else { "down" };
                 for _ in 0..delta.unsigned_abs() {
-                    self.handle_shell_view_key(key);
+                    match view.scroll_output(delta.signum()) {
+                        crate::bash_view::BashViewAction::None => {}
+                        action => self.pending_shell_action = Some(action),
+                    }
                 }
             }
             return;

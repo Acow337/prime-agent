@@ -276,6 +276,10 @@ fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
     let (mut mode, index) = mode_with_row("hidden session", "mock-1");
+    let mut bindings = crate::keybindings::KeybindingsConfig::new();
+    bindings.insert("tui.select.up".to_string(), vec!["alt+k".to_string()]);
+    bindings.insert("tui.select.down".to_string(), vec!["alt+j".to_string()]);
+    mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(bindings);
     mode.render_frame(100, 24);
     let (hidden_row, _) = mode
         .click_rows

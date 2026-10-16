@@ -60,13 +60,13 @@ pub(super) fn spawn_action(
             let outcome = client
                 .request_ok(DaemonCommand::KillPersistentShell {
                     id: None,
-                    shell_id: id,
+                    shell_id: id.clone(),
                     rest: serde_json::Map::default(),
                 })
                 .await
                 .map(|_| ())
                 .map_err(|error| format!("Could not kill bash command: {error:#}"));
-            let _ = ui_tx.send(UiInput::PersistentShellKilled(outcome));
+            let _ = ui_tx.send(UiInput::PersistentShellKilled { id, outcome });
         })),
         BashViewAction::Close | BashViewAction::None => None,
     }

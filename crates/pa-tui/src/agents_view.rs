@@ -261,7 +261,10 @@ enum UiInput {
         outcome: Result<String, String>,
     },
     /// A persistent-shell kill settled.
-    PersistentShellKilled(Result<(), String>),
+    PersistentShellKilled {
+        id: String,
+        outcome: Result<(), String>,
+    },
 }
 
 /// The flow's roster connection: one daemon connection alive across the flow's view runs, so a
@@ -1006,14 +1009,18 @@ async fn run_agents_view_surface(
                     }
                 }
                 // A landed kill re-reads the list now unless a read is already in flight.
-                UiInput::PersistentShellKilled(outcome) => match outcome {
+                UiInput::PersistentShellKilled { id, outcome } => match outcome {
                     Ok(()) => {
                         if shells_fetch_at.is_some() {
                             shells_fetch_at = Some(tokio::time::Instant::now());
                         }
                     }
                     Err(error) => {
-                        if let Some(view) = mode.shell_view.as_mut() {
+                        if let Some(view) = mode
+                            .shell_view
+                            .as_mut()
+                            .filter(|view| view.detail_id().as_deref() == Some(id.as_str()))
+                        {
                             view.set_error(error, false, None);
                         }
                     }
@@ -1316,7 +1323,7 @@ fn is_daemon_answer(input: &UiInput) -> bool {
             | UiInput::HeartbeatsLoaded { .. }
             | UiInput::PersistentShellsLoaded(_)
             | UiInput::PersistentShellTail { .. }
-            | UiInput::PersistentShellKilled(_)
+            | UiInput::PersistentShellKilled { .. }
     )
 }
 

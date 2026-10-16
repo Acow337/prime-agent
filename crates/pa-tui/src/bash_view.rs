@@ -374,7 +374,7 @@ impl BashView {
 
     /// Scroll the detail's output region: up lifts the window off the newest lines,
     /// down lowers it back; at the loaded top, load more or stop.
-    fn scroll_output(&mut self, delta: isize) -> BashViewAction {
+    pub(crate) fn scroll_output(&mut self, delta: isize) -> BashViewAction {
         let Mode::Detail { id } = self.mode.clone() else {
             return BashViewAction::None;
         };
