@@ -111,8 +111,10 @@ impl SessionUi {
     /// fork/navigation/import/reload rebuilds). Best effort — a failed fetch
     /// keeps the current view.
     pub(crate) async fn rebuild_transcript(&mut self, view: &mut AgentView) {
-        let incomplete_history =
-            self.pending_backfill.is_some() || self.transcript_backfill.is_some();
+        let incomplete_history = self.compaction_refresh_pending
+            || self.pending_backfill.is_some()
+            || self.transcript_backfill.is_some();
+        self.compaction_refresh_pending = false;
         self.retire_history_paging();
         let data = self
             .bounded_request(
@@ -697,6 +699,11 @@ impl SessionUi {
                         );
                         view.follow();
                         self.dirty = true;
+                    } else {
+                        // Protocol 7 TS/older Rust daemons publish a successful
+                        // summary without a transcript. Retain their refresh
+                        // path; only an in-stream replacement can skip it.
+                        self.compaction_refresh_pending = true;
                     }
                 } else if reason == "manual" {
                     // Aborts and error messages surface only for user-issued compactions.

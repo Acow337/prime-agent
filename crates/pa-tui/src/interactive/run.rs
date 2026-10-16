@@ -1330,6 +1330,9 @@ async fn run_interactive_surface(
                     while let Ok(event) = events.try_recv() {
                         session.apply_client_event(event, &mut view);
                     }
+                    if session.compaction_refresh_pending {
+                        session.rebuild_transcript(&mut view).await;
+                    }
                     // A settled turn or a settled compaction refreshes the tray's
                     // context usage: a compaction rewrites the durable transcript's size,
                     // and its frames may arrive without a turn pairing them.

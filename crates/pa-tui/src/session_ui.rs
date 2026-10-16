@@ -352,6 +352,8 @@ pub(crate) struct SessionUi {
     /// Armed prompt round trips (one per spawned request): the headless
     /// idle and exit gates treat an in-flight submit as busy.
     prompt_in_flight: usize,
+    /// A legacy daemon completed compaction without an in-stream transcript.
+    pub(crate) compaction_refresh_pending: bool,
     transcript_epoch: u64,
     backfill_compaction_count: Option<u64>,
     backfill_leaf_id: Option<String>,

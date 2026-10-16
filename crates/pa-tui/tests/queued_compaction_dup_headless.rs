@@ -359,3 +359,56 @@ fn a_settled_compaction_refreshes_the_tray_stats() {
         "the compaction transition refreshes the tray on top of the exit hint; commands: {commands:?}"
     );
 }
+
+/// TS and older Rust protocol-7 daemons do not include result.transcript.
+/// Both manual and automatic successful compactions still replace the chat
+/// from get_messages; the new in-stream path above must continue to skip it.
+#[test]
+fn legacy_compaction_results_refresh_the_transcript() {
+    std::env::remove_var("TMUX");
+    for reason in ["manual", "threshold"] {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("tui.sock");
+        let supervisor = MockSupervisor {
+            listener: UnixListener::bind(&socket).expect("bind mock socket"),
+        };
+        let mut frames = compaction_only_frames();
+        for frame in &mut frames {
+            frame["event"]["reason"] = json!(reason);
+            if let Some(result) = frame["event"]
+                .get_mut("result")
+                .and_then(Value::as_object_mut)
+            {
+                result.remove("transcript");
+            }
+        }
+        let handle = std::thread::spawn(move || supervisor.serve(&frames));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let plan = HeadlessPlan {
+            steps: vec![HeadlessStep::WaitRender {
+                needle: SUMMARY_TEXT.to_string(),
+                timeout_ms: 5000,
+            }],
+            width: 100,
+            height: 40,
+        };
+        let outcome = runtime
+            .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+            .expect("legacy compaction run");
+        let commands = handle.join().expect("mock supervisor finished");
+        let frame = outcome.frames.last().expect("a rendered frame");
+        assert_eq!(frame.matches(SUMMARY_TEXT).count(), 1, "{reason}: {frame}");
+        assert_eq!(frame.matches(QUEUED_TEXT).count(), 1, "{reason}: {frame}");
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| *command == "get_messages")
+                .count(),
+            1,
+            "legacy {reason} refreshes exactly once: {commands:?}"
+        );
+    }
+}
