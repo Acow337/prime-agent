@@ -14,7 +14,7 @@ const INTERVAL_CAP: usize = 18;
 const LABEL_CAP: usize = 32;
 /// The next-run column's fixed cell: wide enough for its header and every
 /// countdown the schedule can produce (the next run is bounded within a
-/// year, so at most "in 365d").
+/// year, so at most "365d").
 const NEXT_RUN_CELL: usize = 8;
 
 /// The delivery word (TS: `follow_up` renders `follow-up`).

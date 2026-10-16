@@ -338,7 +338,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         subagents_idle: 1,
         subagents_inactive: 2,
         heartbeats: 2,
-        heartbeats_active: vec!["in 5m lane canary".to_string()],
+        heartbeats_active: vec!["5m lane canary".to_string()],
         heartbeats_paused: 1,
         shells: vec!["cargo test · 12.0s".to_string()],
         shells_persistent: 0,
@@ -356,7 +356,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         rows,
         vec![
             " ◆ subagents   3 running · 1 idle · 2 inactive",
-            " ◷ heartbeats  in 5m lane canary",
+            " ◷ heartbeats  5m lane canary",
             " ▸ shells      cargo test · 12.0s",
             " ⚙ factory     nightly paused",
             " Pursuing goal (0s)",
@@ -435,6 +435,23 @@ fn an_overflowing_expanded_row_counts_the_rest() {
     assert_eq!(texts[3], " ▸ shells      item 1  ·  item 2  ·  item 3  +6");
 }
 
+/// A large activity list fits by terminal cells, including a multi-digit omitted count.
+#[test]
+fn a_large_expanded_row_fits_wide_items_and_counts_the_omitted_items() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        heartbeats_active: vec!["界界".to_string(); 4096],
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 60));
+    assert_eq!(
+        texts[2],
+        " ◷ heartbeats  界界  ·  界界  ·  界界  ·  界界  +4092"
+    );
+    assert_eq!(fitting_items(&dock.heartbeats_active, 4096 * 9 - 5), 4096);
+}
+
 /// A first item too long to sit beside the `+N` marker is ellipsized, so the omitted count still
 /// renders.
 #[test]
@@ -442,15 +459,15 @@ fn an_oversized_first_item_keeps_the_overflow_marker() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
         heartbeats_active: vec![
-            format!("in 5m {}", "check the deploy queue ".repeat(4)),
-            "in 9m lane canary".to_string(),
+            format!("5m {}", "check the deploy queue ".repeat(4)),
+            "9m lane canary".to_string(),
         ],
         selected: ActivityGroup::Subagents,
         focused: true,
         ..ActivityDock::default()
     };
     let texts = line_texts(&render_activity_dock(&dock, &theme, 40));
-    assert_eq!(texts[2], " ◷ heartbeats  in 5m check the depl…  +1");
+    assert_eq!(texts[2], " ◷ heartbeats  5m check the deploy …  +1");
 }
 
 /// One press steps to the neighboring rendered group and wraps; N groups take exactly N presses.
