@@ -165,15 +165,18 @@ pub fn rlm_ledger_path(agent_dir: &Path, sessions_dir: &Path) -> PathBuf {
 /// resolve; the survivors' recorded endpoints do - a dead endpoint drops
 /// the edge, a moved path resolves through its durable session id - and
 /// the resolved paths replace the recorded ones.
-fn resolve_live_edges(state: &ReplayState, resolver: &mut LivePathResolver) -> Vec<RlmLedgerEdge> {
+fn resolve_live_edges(
+    state: &ReplayState,
+    resolver: &mut LivePathResolver,
+) -> Result<Vec<RlmLedgerEdge>> {
     let mut edges = Vec::with_capacity(state.edges.len());
     for edge in &state.edges {
         if edge.deleted.is_some() {
             continue;
         }
         let (Some(child), Some(parent)) = (
-            resolver.resolve(&edge.child),
-            resolver.resolve(&edge.parent),
+            resolver.resolve(&edge.child)?,
+            resolver.resolve(&edge.parent)?,
         ) else {
             continue;
         };
@@ -183,7 +186,7 @@ fn resolve_live_edges(state: &ReplayState, resolver: &mut LivePathResolver) -> V
             ..edge.clone()
         });
     }
-    edges
+    Ok(edges)
 }
 
 /// Fold parsed records into the replayed edge set, keeping only the
@@ -546,7 +549,7 @@ impl RlmSpawnLedger {
         );
         // Endpoint liveness and relocation are filesystem state, not ledger
         // state: restore and top-level artifact sweeps do not append a row.
-        let mut edges = resolve_live_edges(&state, &mut resolver);
+        let mut edges = resolve_live_edges(&state, &mut resolver)?;
         for edge in &mut edges {
             edge.child = canonical_session_path(Path::new(&edge.child))
                 .to_string_lossy()
@@ -750,7 +753,7 @@ impl RlmSpawnLedger {
             self.canonical_sessions_dir.clone(),
             &state.artifact_index,
         );
-        Ok(resolve_live_edges(&state, &mut resolver))
+        resolve_live_edges(&state, &mut resolver)
     }
 
     /// The opened parent file's live edges: only the records of children
@@ -773,7 +776,7 @@ impl RlmSpawnLedger {
             self.canonical_sessions_dir.clone(),
             &state.artifact_index,
         );
-        let mut edges = resolve_live_edges(&state, &mut resolver);
+        let mut edges = resolve_live_edges(&state, &mut resolver)?;
         edges.retain(|edge| canonical_session_path(Path::new(&edge.parent)) == parent_file);
         Ok(edges)
     }
