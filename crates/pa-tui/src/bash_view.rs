@@ -426,6 +426,12 @@ impl BashView {
         }
     }
 
+    /// Open row `id`'s detail drill-in directly, as Enter on its list row does.
+    pub fn open(&mut self, id: &str) -> BashViewAction {
+        self.selected_id = Some(id.to_string());
+        self.confirm_selection()
+    }
+
     /// Enter on the list opens the row's detail drill-in (the host fetches
     /// the output tail); Enter in the detail runs the cancel action.
     fn confirm_selection(&mut self) -> BashViewAction {

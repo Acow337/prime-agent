@@ -117,6 +117,10 @@ impl AgentsViewMode {
                 }
             }
         }
+        // The machine-wide persistent shells follow the sessions in the unscoped, unsearched list.
+        if !scope_active && self.query.trim().is_empty() {
+            rows.extend(self.persistent_shell_rows(&records));
+        }
         // Keep the selection on the same row across rebuilds, falling back to the carried
         // identity/key.
         self.selected = resolve_selection(
@@ -390,6 +394,10 @@ impl AgentsViewMode {
         // A sticky line clears on any keypress (the transient lines ride their own
         // expiry).
         self.clear_sticky_status();
+        if self.shell_view.is_some() {
+            self.handle_shell_view_key(key);
+            return;
+        }
         let was_armed = self.exit_armed;
         // The notice panel: any key closes it (the refusal's ways out stay copy-pasteable while
         // it is up), except the exit key, which falls through so the double-press exit convention
