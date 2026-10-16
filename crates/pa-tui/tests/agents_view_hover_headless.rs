@@ -577,9 +577,12 @@ async fn a_held_shells_read_survives_the_agents_view_handoff() {
             let command = envelope["command"]["type"].as_str().unwrap();
             let mut replies = Vec::new();
             match command {
-                "roster_subscribe" => replies.push((id, json!({
-                    "roster": [roster_row("p", "idle", &parent_summary("p"))],
-                }))),
+                "roster_subscribe" => replies.push((
+                    id,
+                    json!({
+                        "roster": [roster_row("p", "idle", &parent_summary("p"))],
+                    }),
+                )),
                 "list_saved_sessions" => held_catalog = Some(id),
                 "list_kernel_bash" => {
                     shells_requests += 1;
@@ -604,9 +607,12 @@ async fn a_held_shells_read_survives_the_agents_view_handoff() {
             }
             // The first view can open only after the server observed its unanswered shells read.
             if let (true, Some(id)) = (shells_requests > 0, held_catalog.as_ref()) {
-                replies.push((id.clone(), json!({"sessions": [saved_row(
-                    "/tmp/sessions/old.jsonl", "old", "archived run",
-                )]})));
+                replies.push((
+                    id.clone(),
+                    json!({"sessions": [saved_row(
+                        "/tmp/sessions/old.jsonl", "old", "archived run",
+                    )]}),
+                ));
                 held_catalog = None;
             }
             for (id, data) in replies {
@@ -661,17 +667,19 @@ async fn a_held_shells_read_survives_the_agents_view_handoff() {
             width: 120,
             height: 36,
         }),
-        Some(first.link.expect("the handoff retains the roster connection")),
+        Some(
+            first
+                .link
+                .expect("the handoff retains the roster connection"),
+        ),
     )
     .await
     .expect("the returning view consumes the held cycle");
-    assert!(
-        second
-            .outcome
-            .frames
-            .iter()
-            .any(|frame| frame.contains("$ 1 shells"))
-    );
+    assert!(second
+        .outcome
+        .frames
+        .iter()
+        .any(|frame| frame.contains("$ 1 shells")));
     assert_eq!(
         server.await.unwrap(),
         1,
