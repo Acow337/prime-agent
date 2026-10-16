@@ -338,7 +338,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         subagents_idle: 1,
         subagents_inactive: 2,
         heartbeats: 2,
-        heartbeats_active: vec!["in 5m lane canary".to_string()],
+        heartbeats_active: vec!["5m lane canary".to_string()],
         heartbeats_paused: 1,
         shells: vec!["cargo test · 12.0s".to_string()],
         factory_runs: vec!["nightly paused".to_string()],
@@ -441,8 +441,8 @@ fn an_oversized_first_item_keeps_the_overflow_marker() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
         heartbeats_active: vec![
-            format!("in 5m {}", "check the deploy queue ".repeat(4)),
-            "in 9m lane canary".to_string(),
+            format!("5m {}", "check the deploy queue ".repeat(4)),
+            "9m lane canary".to_string(),
         ],
         selected: ActivityGroup::Subagents,
         focused: true,

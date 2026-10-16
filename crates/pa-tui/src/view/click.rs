@@ -517,7 +517,7 @@ mod tests {
         view.chrome.show_manage = true;
         view.chrome.activity = Some(crate::chrome::ActivityDock {
             heartbeats: 1,
-            heartbeats_active: vec!["in 5m canary".to_string()],
+            heartbeats_active: vec!["5m canary".to_string()],
             selected: focused.unwrap_or_default(),
             focused: focused.is_some(),
             ..Default::default()
