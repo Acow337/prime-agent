@@ -177,6 +177,30 @@ fn saved_row(client: &mut Client, id: &str, sessions_dir: &Path, session_id: &st
 }
 
 #[test]
+fn persistent_python_unit_regressions() {
+    let Some(python) = kernel_python() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must bootstrap the kernel interpreter before persistent-shell tests"
+        );
+        return;
+    };
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prime-agent-runtime");
+    let output = Command::new(python)
+        .current_dir(&runtime)
+        .env("PYTHONPATH", runtime.join("src"))
+        .args(["-m", "unittest", "test.test_bash.PersistentBashTest"])
+        .output()
+        .expect("run persistent-shell Python regressions");
+    assert!(
+        output.status.success(),
+        "persistent-shell Python regressions failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn inactive_session_row_lists_only_its_live_persistent_shells() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
