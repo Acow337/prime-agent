@@ -356,7 +356,6 @@ pub(crate) struct SessionUi {
     /// Armed prompt round trips (one per spawned request): the headless
     /// idle and exit gates treat an in-flight submit as busy.
     prompt_in_flight: usize,
-    pub(crate) transcript_stale: bool,
     transcript_epoch: u64,
     backfill_compaction_count: Option<u64>,
     backfill_leaf_id: Option<String>,
