@@ -258,8 +258,8 @@ impl CompactionManager {
     fn emit_session_event(&self, mut event: Value) -> serde_json::Result<()> {
         let mut core = self.core.lock().unwrap();
         // A replacement transcript must cover every row sequenced before it.
-        if event.get("type").and_then(Value::as_str) == Some("compaction_end")
-            && let Some(store) = core.store.as_ref()
+        if let (Some("compaction_end"), Some(store)) =
+            (event.get("type").and_then(Value::as_str), core.store.as_ref())
         {
             attach_collapse_transcript(&mut event, store);
         }

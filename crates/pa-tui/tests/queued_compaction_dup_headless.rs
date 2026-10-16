@@ -378,7 +378,10 @@ fn custom_rows_before_and_after_collapse_render_once() {
         "display": true, "timestamp": 301,
     });
     let frames = vec![
-        session_event(&json!({ "type": "compaction_start", "reason": "manual" }), 1),
+        session_event(
+            &json!({ "type": "compaction_start", "reason": "manual" }),
+            1,
+        ),
         session_event(&json!({ "type": "message_start", "message": before }), 2),
         session_event(&json!({ "type": "message_end", "message": before }), 3),
         session_event(
@@ -413,7 +416,11 @@ fn custom_rows_before_and_after_collapse_render_once() {
         .expect("custom collapse replay");
     let commands = handle.join().expect("mock supervisor finished");
     let frame = outcome.frames.last().expect("a rendered frame");
-    for text in ["custom before collapse", "custom after collapse", SUMMARY_TEXT] {
+    for text in [
+        "custom before collapse",
+        "custom after collapse",
+        SUMMARY_TEXT,
+    ] {
         assert_eq!(frame.matches(text).count(), 1, "{text}: {frame}");
     }
     assert!(!commands.iter().any(|command| command == "get_messages"));
