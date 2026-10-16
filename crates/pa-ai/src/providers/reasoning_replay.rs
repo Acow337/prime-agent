@@ -248,7 +248,8 @@ pub(crate) fn validate_reasoning_replay(model: &Model, context: &Context) -> Res
                     "the Bedrock adapter cannot replay this reasoning signature for the destination model",
                 ));
             } else if (claude_destination
-                || model.api == "anthropic-messages" && thinking.redacted.unwrap_or(false))
+                || model.api == "anthropic-messages"
+                    && (thinking.redacted.unwrap_or(false) || channel_marker.is_some()))
                 && thinking
                     .thinking_signature
                     .as_deref()

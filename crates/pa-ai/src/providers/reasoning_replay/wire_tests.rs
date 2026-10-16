@@ -85,6 +85,27 @@ fn redacted_non_claude_anthropic_thinking_requires_its_opaque_payload() {
 }
 
 #[test]
+fn completions_channel_markers_are_not_anthropic_reasoning_signatures() {
+    let source = model("openai-completions", "zai", "glm-fixture");
+    let destination = model("anthropic-messages", "kimi", "kimi-k3");
+    for marker in REASONING_FIELDS {
+        let context = history(
+            &source,
+            &json!([
+                { "type": "thinking", "thinking": "SYNTHETIC_PLAN", "thinkingSignature": marker }
+            ]),
+        );
+        let original = context.messages.clone();
+        let error = validate_reasoning_replay(&destination, &context).unwrap_err();
+        assert!(
+            error.contains("requires the original reasoning signature"),
+            "{error}"
+        );
+        assert_eq!(context.messages, original);
+    }
+}
+
+#[test]
 fn empty_signed_claude_reasoning_round_trips_across_native_adapters() {
     let anthropic = model("anthropic-messages", "anthropic", "claude-sonnet-4-6");
     let bedrock = model(
