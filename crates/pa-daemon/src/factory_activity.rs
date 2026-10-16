@@ -238,7 +238,7 @@ mod tests {
                 responsive
             });
             let payload = serde_json::json!({ "action": "graph" });
-            let (slow_graph, _) =
+            let (slow_graph, ()) =
                 tokio::join!(worker.dispatch("factory_activity", &payload), async {
                     opened_rx.await.expect("storage read started");
                     let _ = release_tx.send(());
