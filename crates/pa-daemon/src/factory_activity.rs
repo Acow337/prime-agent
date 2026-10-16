@@ -85,7 +85,9 @@ impl Worker {
                     .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)
                     .await
             }
-            None => Err(anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE)),
+            None => Err(anyhow::anyhow!(
+                pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE
+            )),
         };
         // The unscoped graph (the dock's and the agents view's poll) also carries the session's
         // stored specs: durable harness entries, so a live session without a kernel (not booted
@@ -175,7 +177,10 @@ mod tests {
             &["shared"],
         );
         let graph = worker
-            .dispatch("factory_activity", &serde_json::json!({ "action": "graph" }))
+            .dispatch(
+                "factory_activity",
+                &serde_json::json!({ "action": "graph" }),
+            )
             .await;
         assert!(graph.success, "{graph:?}");
         assert_eq!(
