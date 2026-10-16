@@ -3,15 +3,15 @@
 //! One session-addressed command reaches this session's kernel factory
 //! executor (the bridge registered by the pa-core session engine): the
 //! payload's `action` rides the out-of-band kernel frame, and the kernel's
-//! reply returns verbatim (the run registry stays kernel-owned) — the
-//! unscoped graph plus the engine's stored-spec count. The
+//! reply returns verbatim (the run registry stays kernel-owned); the
+//! unscoped graph also carries the session's stored spec count. The
 //! `run` action's model preflight (the allowlist pin, request auth)
 //! happens in the session engine before the frame — a doomed run fails
 //! before any child spawns.
 
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
@@ -27,6 +27,17 @@ pub(crate) fn factory_lane_enabled(agent_dir: &Path) -> bool {
         agent_dir,
     )
     .get_factory_enabled()
+}
+
+/// A session's own stored factory specs: the factory entries of its local harness store, read
+/// from disk without a kernel. The global store and the runtime's shared library machines are
+/// every session's, so they never count.
+pub(crate) fn stored_factory_spec_count(session_artifact_dir: &Path) -> usize {
+    pa_core::refinement::get_local_harness_state_dir(Some(session_artifact_dir)).map_or(0, |dir| {
+        pa_core::refinement::load_harness_state(&dir, pa_core::refinement::HarnessScope::Local)
+            .entries[&pa_core::refinement::RefinementKind::Factory]
+            .len()
+    })
 }
 
 /// The capabilities a hello advertises: the default set, minus the
@@ -45,7 +56,8 @@ impl Worker {
     /// `factory_activity`: one factory action over this session's kernel.
     /// The arm mirrors `handle_kernel_bash_activity`: the engine owns the
     /// kernel scope, and a missing session answers with the same "Kernel
-    /// is not running" refusal.
+    /// is not running" refusal — except the unscoped graph, which still
+    /// answers the session's stored specs.
     pub(crate) async fn handle_factory_activity(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("factory_activity") {
             return response;
@@ -67,21 +79,50 @@ impl Worker {
             .and_then(Value::as_str)
             .map(str::to_string);
         let timeout_ms = payload.get("timeoutMs").and_then(Value::as_u64);
-        let Some(engine) = &self.agent_engine else {
-            return response_failure(
-                None,
-                "factory_activity",
-                pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE,
-                None,
-            );
+        let reply = match &self.agent_engine {
+            Some(engine) => {
+                engine
+                    .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)
+                    .await
+            }
+            None => Err(anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE)),
         };
-        match engine
-            .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)
-            .await
-        {
-            Ok(result) => response_success(None, "factory_activity", Some(result)),
+        // The unscoped graph (the dock's and the agents view's poll) also carries the session's
+        // stored specs: durable harness entries, so a live session without a kernel (not booted
+        // yet, or passivated) answers them with no runs instead of the refusal.
+        let lists_runs = action == "graph" && run_id.is_none() && spec_id.is_none();
+        let reply = match reply {
+            Err(error)
+                if lists_runs
+                    && error.to_string() == pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE =>
+            {
+                Ok(json!({ "runs": [] }))
+            }
+            reply => reply,
+        };
+        match reply {
+            Ok(mut result) => {
+                if lists_runs {
+                    result["factorySpecs"] = json!(self.stored_factory_specs());
+                }
+                response_success(None, "factory_activity", Some(result))
+            }
             Err(error) => response_failure(None, "factory_activity", &format!("{error:#}"), None),
         }
+    }
+
+    /// This session's stored factory specs; an in-memory session has none.
+    fn stored_factory_specs(&self) -> usize {
+        let artifacts = {
+            let core = self
+                .core
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            core.store.as_ref().and_then(|store| {
+                crate::scheduled_jobs::session_artifact_dir(&store.path, store.session_id())
+            })
+        };
+        artifacts.as_deref().map_or(0, stored_factory_spec_count)
     }
 }
 

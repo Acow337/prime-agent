@@ -889,8 +889,7 @@ pub(super) fn saved_session_row(
         object.insert("persistentShells".to_string(), json!(shells));
     }
     if let Some(dir) = crate::scheduled_jobs::session_artifact_dir(&info.path, &info.id) {
-        let specs = pa_core::refinement::get_local_harness_state_dir(Some(&dir))
-            .map_or(0, |harness| pa_core::refinement::local_factory_spec_count(&harness));
+        let specs = crate::factory_activity::stored_factory_spec_count(&dir);
         if specs > 0 {
             object.insert("factorySpecs".to_string(), json!(specs));
         }
