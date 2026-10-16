@@ -1273,7 +1273,11 @@ fn activity_lines_follow_each_nodes_subagents_block() {
             (RowKind::Shells, 2, "$ 1 shells"),
             (RowKind::Subagent, 1, "second child"),
             (RowKind::Shells, 1, "$ 2 shells"),
-            (RowKind::FactoryRuns, 1, "\u{2699} 0 factories \u{b7} 1 running"),
+            (
+                RowKind::FactoryRuns,
+                1,
+                "\u{2699} 0 factories \u{b7} 1 running"
+            ),
         ]
     );
     let shells = &rows[7];

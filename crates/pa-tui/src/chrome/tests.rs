@@ -454,7 +454,10 @@ fn the_expanded_factory_row_counts_stored_specs_without_runs() {
         ..ActivityDock::default()
     };
     let texts = line_texts(&render_activity_dock(&dock, &theme, 80));
-    assert_eq!(texts[4].trim_end(), " ⚙ factory     2 factories · 0 running");
+    assert_eq!(
+        texts[4].trim_end(),
+        " ⚙ factory     2 factories · 0 running"
+    );
     let collapsed = ActivityDock {
         focused: false,
         ..dock
