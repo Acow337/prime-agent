@@ -76,6 +76,20 @@ impl FactoryHost {
         )
     }
 
+    /// An unscoped graph reply (the dock's and the agents view's poll) plus `factorySpecs`: the
+    /// session's own stored specs ([`crate::refinement::local_factory_spec_count`]) ride beside
+    /// the kernel-owned runs, so one poll answers both counts.
+    #[must_use]
+    pub fn with_spec_count(&self, mut reply: Value) -> Value {
+        let specs = self
+            .config
+            .local_harness_dir
+            .as_deref()
+            .map_or(0, crate::refinement::local_factory_spec_count);
+        reply["factorySpecs"] = specs.into();
+        reply
+    }
+
     /// The local harness state, when the session has one (the lookup's
     /// first tier, exactly like the kernel harness's unprefixed `get`).
     fn local_harness_state(&self) -> Option<crate::refinement::HarnessState> {
@@ -459,6 +473,12 @@ impl FactoryActivityRequest {
                 .map(str::to_string),
             timeout_ms,
         })
+    }
+
+    /// The unscoped graph: every live run's snapshot, the views' polling shape.
+    #[must_use]
+    pub fn lists_runs(&self) -> bool {
+        self.action == "graph" && self.run_id.is_none() && self.spec_id.is_none()
     }
 }
 
