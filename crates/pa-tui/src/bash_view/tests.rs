@@ -1161,4 +1161,11 @@ fn registry_changes_preserve_failed_tail_fetches_and_their_retry() {
         text.contains("recovered output") && !text.contains("unavailable"),
         "{text}"
     );
+    view.set_error("Bash output: row gone".to_string(), true, Some(generation));
+    view.apply_activities(Vec::new());
+    view.clear_error();
+    assert!(
+        view.error.is_none(),
+        "a vanished row retires its fetch error"
+    );
 }

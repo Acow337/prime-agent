@@ -298,8 +298,9 @@ impl BashView {
     /// A changed registry supersedes a kill error. A fetch error keeps its
     /// retry state until output lands; metadata alone cannot satisfy a fetch.
     pub fn clear_error(&mut self) {
-        if !self.fetch_error {
+        if !self.fetch_error || matches!(self.mode, Mode::List) {
             self.error = None;
+            self.fetch_error = false;
         }
     }
 
