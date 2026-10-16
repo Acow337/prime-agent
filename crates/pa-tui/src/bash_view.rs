@@ -22,6 +22,10 @@ use render::{
     Columns,
 };
 
+// A tail response may outlive its entire pane, so tokens belong to the process,
+// not one BashView instance. Relaxed ordering only allocates distinct tokens.
+static NEXT_DETAIL_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 const PREFERRED_VISIBLE: usize = 8;
 
 /// Rows the list reserves outside its items: rule, title, blank, column
@@ -135,8 +139,8 @@ pub enum BashViewAction {
 pub struct BashView {
     /// The latest registry snapshot (kept current by the host's refresh).
     activities: Vec<BashActivity>,
-    /// Each open increments it; the host stamps tail requests with the open's
-    /// generation, so a late response never overwrites the newer open's output.
+    /// A process-unique token for this open; tail requests retain it even when
+    /// the host replaces the entire view before their responses arrive.
     detail_generation: u64,
     selected_id: Option<String>,
     mode: Mode,
@@ -442,7 +446,8 @@ impl BashView {
                 };
                 if self.find_activity(&id).is_some() {
                     self.mode = Mode::Detail { id: id.clone() };
-                    self.detail_generation = self.detail_generation.wrapping_add(1);
+                    self.detail_generation =
+                        NEXT_DETAIL_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.reset_detail_output();
                     return BashViewAction::OpenDetail {
                         id,

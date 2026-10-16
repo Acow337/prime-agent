@@ -1109,3 +1109,23 @@ fn durations_format_compactly() {
     assert_eq!(format_duration(Some(3_412)), "3.4s");
     assert_eq!(format_duration(Some(125_000)), "2m 05s");
 }
+
+#[test]
+fn replacing_the_entire_view_rejects_previous_output_and_errors() {
+    let mut previous = BashView::new(activities(), 40);
+    previous.open("a");
+    let old_generation = previous.detail_generation;
+    for id in ["a", "b"] {
+        let mut replacement = BashView::new(activities(), 40);
+        replacement.open(id);
+        replacement.set_output(id, "current output", replacement.detail_generation);
+        replacement.set_output(id, "stale output", old_generation);
+        replacement.set_error("stale error".to_string(), true, Some(old_generation));
+        let text = frame_text(&replacement.render(&theme(), 70, &kb())).join("\n");
+        assert!(text.contains("current output"), "{text}");
+        assert!(
+            !text.contains("stale output") && !text.contains("stale error"),
+            "{text}"
+        );
+    }
+}

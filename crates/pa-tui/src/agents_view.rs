@@ -902,13 +902,6 @@ async fn run_agents_view_surface(
                     if let Some((key, active_session_id)) = mode.pending_headline.take() {
                         spawn_headline_fetch(&client, ui_tx.clone(), key, active_session_id);
                     }
-                    if let Some(action) = mode.pending_shell_action.take() {
-                        action_dispatches.extend(persistent_shells::spawn_action(
-                            &client,
-                            ui_tx.clone(),
-                            action,
-                        ));
-                    }
                 }
                 // A plain click opens the row under it; drags and wheel turns are consumed inside.
                 UiInput::Mouse(event) => {
@@ -1001,7 +994,11 @@ async fn run_agents_view_surface(
                     generation,
                     outcome,
                 } => {
-                    if let Some(view) = mode.shell_view.as_mut() {
+                    if let Some(view) = mode
+                        .shell_view
+                        .as_mut()
+                        .filter(|view| view.detail_id().as_deref() == Some(id.as_str()))
+                    {
                         match outcome {
                             Ok(tail) => view.set_output(&id, &tail, generation),
                             Err(error) => view.set_error(error, true, Some(generation)),
@@ -1026,6 +1023,15 @@ async fn run_agents_view_surface(
                 // that ends without an exit key still captures its frames
                 // and returns instead of spinning forever.
                 UiInput::Done => mode.running = false,
+            }
+            // Keys and row clicks can both open the shell overlay. Dispatch only
+            // after the input has been applied, regardless of its source.
+            if let Some(action) = mode.pending_shell_action.take() {
+                action_dispatches.extend(persistent_shells::spawn_action(
+                    &client,
+                    ui_tx.clone(),
+                    action,
+                ));
             }
             // An exit decision skips sync terminal I/O: a wedged pty must
             // not prevent the reader-armed force-quit deadline from firing.

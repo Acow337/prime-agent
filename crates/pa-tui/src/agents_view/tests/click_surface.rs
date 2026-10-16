@@ -268,3 +268,54 @@ fn short_session_names_pad_to_the_name_column() {
     let name_cell = format!("short name{}", " ".repeat(28 - 2 - 10));
     assert_eq!(text, expected_row(&name_cell, &layout));
 }
+
+#[test]
+fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
+    let _guard = crate::mouse_tracking::STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+    let (mut mode, index) = mode_with_row("hidden session", "mock-1");
+    mode.render_frame(100, 24);
+    let (hidden_row, _) = mode
+        .click_rows
+        .iter()
+        .find(|(_, row_index)| *row_index == index)
+        .copied()
+        .expect("session row");
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [{
+        "id": "shell-a", "command": "watch build", "status": "running", "persistent": true
+    }]}));
+    let row = mode
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::PersistentShell)
+        .cloned()
+        .expect("shell row");
+    mode.open_persistent_shell(&row);
+    let crate::bash_view::BashViewAction::OpenDetail { generation, .. } =
+        mode.pending_shell_action.take().expect("tail action")
+    else {
+        panic!("open detail")
+    };
+    let output = (0..50)
+        .map(|n| format!("output line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    mode.shell_view
+        .as_mut()
+        .unwrap()
+        .set_output("shell-a", &output, generation);
+    let before = mode.render_frame(100, 24);
+    let selected = mode.selected;
+    mode.handle_mouse(&mouse_report(hidden_row, true, false));
+    mode.handle_mouse(&mouse_report(hidden_row, false, false));
+    assert_eq!(mode.selected, selected);
+    assert!(mode.running && mode.opened.is_none() && mode.shell_view.is_some());
+    let wheel = crate::mouse::parse_sgr_mouse_event("\x1b[<64;3;3M").unwrap();
+    mode.handle_mouse(&wheel);
+    let after = mode.render_frame(100, 24);
+    assert_ne!(before, after, "the wheel scrolls the overlay's output");
+    assert_eq!(mode.selected, selected);
+    crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+}

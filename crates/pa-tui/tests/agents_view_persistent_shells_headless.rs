@@ -13,6 +13,9 @@ use pa_tui::agents_view::{
 };
 use serde_json::{json, Value};
 
+// Headless mouse tracking is process-global; all plans in this binary serialize.
+static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn shell(id: &str, command: &str, session_id: &str, status: &str) -> Value {
     json!({ "id": id, "command": command, "pid": 4242, "startedAt": "2026-01-01T00:00:00+00:00",
             "status": status, "persistent": true, "sessionId": session_id })
@@ -177,6 +180,7 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
 
 /// Run one headless plan against the mock; returns the frames and the killed shell ids.
 async fn run_plan(steps: Vec<AgentsStep>) -> (Vec<String>, Vec<String>) {
+    let _guard = RUN_LOCK.lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
     let listener = UnixListener::bind(&socket).expect("bind mock socket");
@@ -249,4 +253,36 @@ async fn enter_on_a_shell_shows_its_output_and_kills_it() {
         last.contains("$ build-watch -> release prep \u{b7} finished"),
         "the killed shell lists as finished:\n{last}"
     );
+}
+
+#[tokio::test]
+async fn clicking_a_shell_dispatches_its_tail_without_another_key() {
+    let (baseline, _) = run_plan(vec![
+        AgentsStep::WaitSettle { timeout_ms: 2500 },
+        wait_render("long-job -> (deleted)"),
+    ])
+    .await;
+    let row = baseline
+        .last()
+        .expect("list frame")
+        .lines()
+        .position(|line| line.contains("$ build-watch -> release prep"))
+        .expect("shell row");
+    let (frames, killed) = run_plan(vec![
+        AgentsStep::WaitSettle { timeout_ms: 2500 },
+        wait_render("long-job -> (deleted)"),
+        AgentsStep::Click { row, col: 3 },
+        wait_render("watching..."),
+        // Click where the hidden session row used to be: the overlay owns it.
+        AgentsStep::Click {
+            row: row.saturating_sub(3),
+            col: 3,
+        },
+    ])
+    .await;
+    assert!(frames
+        .last()
+        .expect("overlay frame")
+        .contains("watching..."));
+    assert!(killed.is_empty());
 }

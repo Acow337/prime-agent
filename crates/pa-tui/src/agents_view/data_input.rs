@@ -675,6 +675,17 @@ impl AgentsViewMode {
         if !crate::mouse_tracking::active() {
             return;
         }
+        if self.shell_view.is_some() {
+            // The overlay owns the mouse too: wheel turns scroll its output,
+            // while clicks must never select or open a hidden session row.
+            if let Some(delta) = crate::mouse::wheel_scroll_delta(event) {
+                let key = if delta < 0 { "up" } else { "down" };
+                for _ in 0..delta.unsigned_abs() {
+                    self.handle_shell_view_key(key);
+                }
+            }
+            return;
+        }
         // A buttonless motion report is the hover (operator directive 2026-09-29, `?1003` any-event
         // tracking): the row under the mouse carries the light hover band while it resolves to a
         // session row. Motion never disturbs the click grammar: a pending press keeps its row
