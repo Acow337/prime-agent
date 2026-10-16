@@ -314,6 +314,12 @@ impl AgentsViewMode {
         if !self.query.trim().is_empty() {
             return Some((more.cursor.clone(), None));
         }
+        if self.anchor_selection_pending {
+            return Some((more.cursor.clone(), Some(SAVED_CATALOG_PAGE_FILES)));
+        }
+        if !self.saved_page_requested {
+            return None;
+        }
         let last = self
             .rows
             .iter()
@@ -321,6 +327,13 @@ impl AgentsViewMode {
             .unwrap_or(0);
         (self.selected + self.page_step() >= last)
             .then(|| (more.cursor.clone(), Some(SAVED_CATALOG_PAGE_FILES)))
+    }
+
+    pub(super) fn finish_saved_page(&mut self, more: Option<SavedMore>) {
+        self.saved_more = more;
+        if self.saved_more.is_none() {
+            self.end_anchor_wait();
+        }
     }
 
     /// Drop the unflushed stream batch: the terminal response replaces the catalog wholesale, and
@@ -560,6 +573,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.down") {
+            self.saved_page_requested = true;
             self.move_selection(1);
             return;
         }
@@ -568,6 +582,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.pageDown") {
+            self.saved_page_requested = true;
             self.move_selection(self.page_step() as isize);
             return;
         }
@@ -579,6 +594,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.bottom") {
+            self.saved_page_requested = true;
             self.move_selection_to(SelectionEdge::Last);
             return;
         }

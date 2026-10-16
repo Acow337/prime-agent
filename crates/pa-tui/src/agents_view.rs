@@ -417,6 +417,7 @@ struct AgentsViewMode {
     /// The store files the catalog has not folded yet; a scroll near the end or a search
     /// fetches them.
     saved_more: Option<SavedMore>,
+    saved_page_requested: bool,
     /// The screen rows of the rendered session rows, in frame order — exactly the rows the last
     /// frame painted (a plain left click opens the row under it). Rebuilt on every render.
     click_rows: Vec<(usize, usize)>,
@@ -527,6 +528,7 @@ impl AgentsViewMode {
             saved_stream: Vec::new(),
             saved_catalog_loaded: false,
             saved_more: None,
+            saved_page_requested: false,
             incident_notice_state,
             click_rows: Vec::new(),
             hover_row: None,
@@ -969,7 +971,6 @@ async fn run_agents_view_surface(
                     } else {
                         mode.apply_saved_loaded(sessions);
                     }
-                    mode.saved_more = more;
                     // The catalog's success retires the failure status (never keep reporting an
                     // unavailable catalog after it loaded).
                     if mode
@@ -979,9 +980,7 @@ async fn run_agents_view_surface(
                         mode.status = None;
                     }
                     mode.rebuild_rows();
-                    // The anchor's row can only arrive through THIS fetch, so a terminal load
-                    // without it ends the wait.
-                    mode.end_anchor_wait();
+                    mode.finish_saved_page(more);
                 }
                 UiInput::SavedFailed { error } => {
                     // The catalog settled on a terminal failure: the anchor's wait ends with it,
@@ -1128,6 +1127,7 @@ async fn run_agents_view_surface(
         // search fetches all of it (its rows stream in as they fold).
         if catalog_request.is_none() {
             if let Some((cursor, limit)) = mode.next_saved_fetch() {
+                mode.saved_page_requested = false;
                 catalog_request = Some(spawn_saved_catalog_fetch(
                     &client,
                     ui_tx.clone(),
