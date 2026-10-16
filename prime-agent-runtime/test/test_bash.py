@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import resource
+import shlex
 import signal
 import socket
 import subprocess
@@ -1510,11 +1511,13 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.files(), [])
 
     async def test_fresh_persistent_shell_reports_through_files(self):
-        handle = bash("echo hi; exit 4", persistent=True)
+        go = os.path.join(os.path.dirname(self.home), "go")
+        handle = bash(f"while [ ! -e {shlex.quote(go)} ]; do sleep 0.01; done; echo hi; exit 4", persistent=True)
         self.pgids.append(handle.pid)
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertTrue(rows[handle.pid]["persistent"])
         self.assertEqual([(r["pid"], r["sessionId"]) for r in self.records()], [(handle.pid, "own-session")])
+        open(go, "w").close()
         result = await handle
         self.assertEqual((result.exit_code, result.output), (4, "hi\n"))
         await self.wait_for(lambda: self.files() == [])
