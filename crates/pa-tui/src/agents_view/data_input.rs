@@ -117,9 +117,9 @@ impl AgentsViewMode {
                 }
             }
         }
-        // The machine-wide persistent shells follow the sessions in the unscoped, unsearched list.
+        // The machine-wide persistent shells head the unscoped, unsearched list.
         if !scope_active && self.query.trim().is_empty() {
-            rows.extend(self.persistent_shell_rows(&records));
+            rows.splice(0..0, self.persistent_shell_rows(&records));
         }
         // Keep the selection on the same row across rebuilds, falling back to the carried
         // identity/key.

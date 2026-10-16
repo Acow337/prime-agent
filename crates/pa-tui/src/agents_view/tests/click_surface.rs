@@ -329,10 +329,13 @@ fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
     let (mut mode, _) = mode_with_row("holder", "mock-1");
     mode.apply_persistent_shells(serde_json::json!({ "activities": [{
         "id": "orphan", "command": "sleep 60", "sessionId": "deleted",
-        "status": "unverified", "persistent": true,
+        "status": "unverified", "durationMs": 4_000, "persistent": true,
     }]}));
     let row = mode.persistent_shell_rows(&[]).remove(0);
-    assert!(AgentsViewMode::persistent_shell_text(&row, 100).contains("ownership unverified"));
+    assert_eq!(
+        AgentsViewMode::persistent_shell_text(&row, 100),
+        "$ sleep 60 \u{b7} 4.0s"
+    );
     mode.open_persistent_shell(&row);
     mode.pending_shell_action.take();
     mode.handle_shell_view_key("enter");

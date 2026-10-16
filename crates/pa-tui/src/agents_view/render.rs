@@ -307,6 +307,20 @@ impl AgentsViewMode {
         // While a query is active the list is a ranked picker: one flat, relevance-ordered run
         // of hits (per-row icons carry the status), not status section blocks.
         if self.query.trim().is_empty() {
+            let shells: Vec<(usize, &AgentsViewRow)> = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.kind == RowKind::PersistentShell)
+                .collect();
+            if !shells.is_empty() {
+                display.push(DisplayItem::ShellsHeading(shells.len()));
+                display.extend(
+                    shells
+                        .into_iter()
+                        .map(|(index, row)| DisplayItem::Row(index, row)),
+                );
+            }
             for (section, count) in &counts {
                 if *count == 0 {
                     continue;
@@ -329,23 +343,6 @@ impl AgentsViewMode {
                         }
                     }
                 }
-            }
-            let shells: Vec<(usize, &AgentsViewRow)> = self
-                .rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| row.kind == RowKind::PersistentShell)
-                .collect();
-            if !shells.is_empty() {
-                if !display.is_empty() {
-                    display.push(DisplayItem::Spacer);
-                }
-                display.push(DisplayItem::ShellsHeading(shells.len()));
-                display.extend(
-                    shells
-                        .into_iter()
-                        .map(|(index, row)| DisplayItem::Row(index, row)),
-                );
             }
         } else {
             for (index, row) in self.rows.iter().enumerate() {

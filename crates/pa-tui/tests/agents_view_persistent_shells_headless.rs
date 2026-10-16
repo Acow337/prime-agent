@@ -18,7 +18,7 @@ static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn shell(id: &str, command: &str, session_id: &str, status: &str) -> Value {
     json!({ "id": id, "command": command, "pid": 4242, "startedAt": "2026-01-01T00:00:00+00:00",
-            "status": status, "persistent": true, "sessionId": session_id })
+            "durationMs": 12_400, "status": status, "persistent": true, "sessionId": session_id })
 }
 
 /// Serves the roster (one live session, `release prep`), an empty saved catalog, and two shells:
@@ -229,15 +229,15 @@ fn wait_render(needle: &str) -> AgentsStep {
 async fn persistent_shells_list_with_their_session_or_deleted() {
     let (frames, _) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job -> (deleted)"),
+        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
     ])
     .await;
 
     let last = frames.last().expect("a frame");
     for needle in [
         "Persistent shells (2)",
-        "$ build-watch -> release prep",
-        "$ long-job -> (deleted)",
+        "$ build-watch \u{b7} 12.4s \u{b7} release prep",
+        "$ long-job \u{b7} 12.4s \u{b7} (deleted)",
     ] {
         assert!(
             last.contains(needle),
@@ -250,13 +250,12 @@ async fn persistent_shells_list_with_their_session_or_deleted() {
 async fn enter_on_a_shell_shows_its_output_and_kills_it() {
     let (frames, killed) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job -> (deleted)"),
-        AgentsStep::Key("down".to_string()),
+        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        AgentsStep::Key("home".to_string()),
         AgentsStep::Key("enter".to_string()),
         wait_render("watching..."),
         AgentsStep::Key("enter".to_string()),
-        AgentsStep::Key("escape".to_string()),
-        wait_render("build-watch -> release prep \u{b7} finished"),
+        wait_render("finished"),
     ])
     .await;
 
@@ -267,8 +266,8 @@ async fn enter_on_a_shell_shows_its_output_and_kills_it() {
     assert_eq!(killed, ["b"], "the kill named the selected shell");
     let last = frames.last().expect("a frame");
     assert!(
-        last.contains("$ build-watch -> release prep \u{b7} finished"),
-        "the killed shell lists as finished:\n{last}"
+        last.contains("build-watch") && last.contains("finished"),
+        "the killed shell's pane shows it finished:\n{last}"
     );
 }
 
@@ -276,23 +275,23 @@ async fn enter_on_a_shell_shows_its_output_and_kills_it() {
 async fn clicking_a_shell_dispatches_its_tail_without_another_key() {
     let (baseline, _) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job -> (deleted)"),
+        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
     ])
     .await;
     let row = baseline
         .last()
         .expect("list frame")
         .lines()
-        .position(|line| line.contains("$ build-watch -> release prep"))
+        .position(|line| line.contains("$ build-watch \u{b7} 12.4s \u{b7} release prep"))
         .expect("shell row");
     let (frames, killed) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job -> (deleted)"),
+        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
         AgentsStep::Click { row, col: 3 },
         wait_render("watching..."),
-        // Click where the hidden session row used to be: the overlay owns it.
+        // Click where the hidden session row sits: the overlay owns it.
         AgentsStep::Click {
-            row: row.saturating_sub(3),
+            row: row + 4,
             col: 3,
         },
     ])
@@ -308,8 +307,8 @@ async fn clicking_a_shell_dispatches_its_tail_without_another_key() {
 async fn a_late_kill_failure_does_not_move_to_another_shell_pane() {
     let (frames, _) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job -> (deleted)"),
-        AgentsStep::Key("down".to_string()),
+        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        AgentsStep::Key("home".to_string()),
         AgentsStep::Key("down".to_string()),
         AgentsStep::Key("enter".to_string()),
         wait_render("watching..."),

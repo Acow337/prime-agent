@@ -15,8 +15,7 @@ use crate::{Line, Span};
 
 mod render;
 
-#[cfg(test)]
-use render::format_duration;
+pub(crate) use render::format_duration;
 use render::{
     action_row, clean_line, error_line, hint_line, marker_line, metadata_row, pane_header_lines,
     Columns,

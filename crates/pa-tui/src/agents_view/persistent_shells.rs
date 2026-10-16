@@ -9,7 +9,7 @@ use super::{
 };
 use crate::agents_view_forest::session_title;
 use crate::agents_view_state::{summary_for_record, UnifiedRecord};
-use crate::bash_view::{parse_bash_activities, BashView, BashViewAction};
+use crate::bash_view::{format_duration, parse_bash_activities, BashView, BashViewAction};
 
 /// The daemon capability that serves the machine-wide shell list, output, and kill.
 pub(super) const CAPABILITY: &str = "persistent_shells";
@@ -136,7 +136,7 @@ impl AgentsViewMode {
                     summary: serde_json::json!({
                         "shellId": id,
                         "command": shell.get("command").and_then(Value::as_str).map(single_line),
-                        "status": shell.get("status").and_then(Value::as_str),
+                        "durationMs": shell.get("durationMs").and_then(Value::as_u64),
                     }),
                     title: assignment,
                     model: String::new(),
@@ -152,23 +152,21 @@ impl AgentsViewMode {
             .collect()
     }
 
-    /// The text of one shell row: `$ <command> -> <session>`, the command clipped so the
-    /// assignment stays readable, and a finished shell marked.
+    /// The text of one shell row: `$ <command> · <elapsed> · <session>`, the command clipped so
+    /// the elapsed time and the assignment stay readable; no assignment while the catalog loads.
     pub(super) fn persistent_shell_text(row: &AgentsViewRow, width: usize) -> String {
         let command = row
             .summary
             .get("command")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let mut tail = String::new();
+        let mut tail = format!(
+            " \u{b7} {}",
+            format_duration(row.summary.get("durationMs").and_then(Value::as_u64))
+        );
         if !row.title.is_empty() {
-            tail.push_str(" -> ");
+            tail.push_str(" \u{b7} ");
             tail.push_str(&row.title);
-        }
-        match row.summary.get("status").and_then(Value::as_str) {
-            Some("running") => {}
-            Some("unverified") => tail.push_str(" \u{b7} ownership unverified"),
-            _ => tail.push_str(" \u{b7} finished"),
         }
         let room = width
             .saturating_sub(2 + crate::width::str_width(&tail))
