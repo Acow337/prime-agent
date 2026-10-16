@@ -283,10 +283,13 @@ impl AgentsViewMode {
     }
 
     /// Upsert rows into the catalog by path first, then durable id, so a superseded fetch's late
-    /// frames or a page that repeats a row never duplicate it.
+    /// frames or a page that repeats a row never duplicate it. Paths deleted this run stay out.
     pub(super) fn upsert_saved(&mut self, rows: Vec<Value>) {
         for row in rows {
             let path = row.get("path").and_then(Value::as_str);
+            if path.is_some_and(|path| self.deleted_saved_paths.contains(path)) {
+                continue;
+            }
             let durable_id = row.get("id").and_then(Value::as_str);
             let existing = self.saved.iter().position(|saved| {
                 path.is_some_and(|path| saved.get("path").and_then(Value::as_str) == Some(path))
