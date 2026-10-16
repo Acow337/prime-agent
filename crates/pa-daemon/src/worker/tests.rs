@@ -109,6 +109,7 @@ mod abort_boundary_tests;
 mod connection_state_tests;
 mod goal_tests;
 mod kill_broadcast_tests;
+mod navigation_pause_tests;
 mod queue_tests;
 mod summary_tests;
 mod warning_marker_tests;
