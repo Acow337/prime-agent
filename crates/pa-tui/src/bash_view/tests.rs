@@ -240,6 +240,7 @@ fn the_pane_runs_to_the_bottom() {
             status: "finished".to_string(),
             exit_code: Some(0),
             duration_ms: Some(u64::from(n) * 1_000),
+            persistent: false,
         })
         .collect();
     for viewport in [10usize, 16, 24] {
@@ -1125,5 +1126,24 @@ fn the_dock_shell_items_list_running_shells_only() {
             "cargo build --release · 3.4s",
             "python -m pytest tests/integrat… · 2m 05s",
         ]
+    );
+}
+
+/// Only running shells count, and the persistent ones among them; a finished persistent shell
+/// counts in neither.
+#[test]
+fn running_shell_counts_skip_finished_shells() {
+    let data = json!({"activities": [
+        {"id": "a", "command": "x", "status": "running", "persistent": true},
+        {"id": "b", "command": "y", "status": "running"},
+        {"id": "c", "command": "z", "status": "done", "persistent": true},
+        {"id": "d", "command": "w", "status": "failed"},
+    ]});
+    assert_eq!(
+        running_shell_counts(&data),
+        ShellCounts {
+            running: 2,
+            persistent: 1,
+        }
     );
 }
