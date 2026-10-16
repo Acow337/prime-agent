@@ -469,6 +469,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manual_collapse_includes_rows_committed_before_its_event_sequence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","id":"collapse-race","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let store = crate::session_store::SessionFile::open(&path).unwrap();
+        let core = Arc::new(Mutex::new(SessionCore::test_core(
+            Some(store),
+            dir.path().display().to_string(),
+        )));
+        let events = Arc::new(EventPump::new());
+        let mut subscription = events.subscribe();
+        let manager = CompactionManager::new(
+            Arc::new(crate::engine::ScriptedEngine::default()),
+            Arc::clone(&events),
+            Arc::clone(&core),
+            "collapse-race".to_string(),
+            dir.path().to_path_buf(),
+        );
+        let mut end = compaction_end_success(
+            "manual",
+            &json!({ "summary": "the collapsed history", "tokensBefore": 1234 }),
+            false,
+            None,
+        );
+        // Reproduce a custom append between preparing the collapse and sequencing it.
+        {
+            let core = core.lock().unwrap();
+            attach_collapse_transcript(&mut end, core.store.as_ref().unwrap());
+        }
+        let row = json!({
+            "role": "custom", "customType": "notice", "content": "raced notice",
+            "display": true, "details": null,
+        });
+        {
+            let mut core = core.lock().unwrap();
+            core.store
+                .as_mut()
+                .unwrap()
+                .persist_entry(
+                    "custom_message",
+                    json!({
+                        "customType": "notice", "content": "raced notice",
+                        "display": true, "details": null,
+                    }),
+                )
+                .unwrap();
+        }
+        for event_type in ["message_start", "message_end"] {
+            manager
+                .emit_session_event(json!({ "type": event_type, "message": row }))
+                .unwrap();
+        }
+        manager.emit_session_event(end).unwrap();
+        let frames: Vec<Value> = (0..3)
+            .map(|_| serde_json::from_slice(&subscription.try_recv().unwrap().payload).unwrap())
+            .collect();
+        assert_eq!(frames[2]["meta"]["sequence"], json!(3));
+        assert_eq!(
+            frames[2]["event"]["result"]["transcript"],
+            json!(core.lock().unwrap().store.as_ref().unwrap().messages()),
+            "the collapse must not erase the custom row whose frames precede it",
+        );
+    }
+
+    #[test]
     fn compaction_result_value_mirrors_the_ts_datakeys() {
         let result = pa_core::session_engine::compaction_exec::CompactionResult {
             summary: "the story so far".to_string(),
