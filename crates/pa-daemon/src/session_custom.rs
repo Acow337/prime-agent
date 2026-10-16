@@ -259,50 +259,56 @@ impl Worker {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         };
+        let origin = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| (store.session_id().to_string(), core.generation.clone()))
+        };
         let engine = std::sync::Arc::clone(&self.engine);
         let result = tokio::task::spawn_blocking(move || engine.run_refinement(options))
             .await
             .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
-        let result = match result {
-            Ok(result) => result,
+        let committed = match result {
+            Ok(committed) => committed,
             Err(error) => {
-                self.emit_worker_event(json!({
-                    "type": "refine_failed",
-                    "error": format!("{error:#}"),
-                }));
+                if let Some((session_id, generation)) = &origin {
+                    crate::worker::emit_refinement_event_for_generation(
+                        &self.core,
+                        &self.events,
+                        session_id,
+                        Some(generation),
+                        json!({
+                            "type": "refine_failed", "error": format!("{error:#}"),
+                        }),
+                    );
+                }
                 return response_failure(None, "refine", &format!("{error:#}"), None);
             }
         };
-        // The refinement's durable rows: the TUI outcome, plus the model-facing
-        // notice when edits applied.
-        if let Ok(typed) =
-            serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone())
-        {
-            let outcome =
-                pa_core::session_engine::refine::create_refinement_outcome_message(&typed);
-            if let Ok(value) =
-                serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome))
-            {
-                self.emit_custom_row(&value);
-            }
-            if typed.applied_edits.iter().any(|edit| edit.applied) {
-                let notice = pa_core::session_engine::refine::create_refinement_notice_message(
-                    &typed,
-                    pa_core::session_engine::refine::RefinementSource::User,
-                );
+        if let Some((session_id, generation)) = &origin {
+            for row in committed.rows {
                 if let Ok(value) =
-                    serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
+                    serde_json::to_value(pa_types::session::AgentMessage::Custom(row))
                 {
-                    self.emit_custom_row(&value);
+                    crate::worker::emit_refinement_row_for_generation(
+                        &self.core,
+                        &self.events,
+                        session_id,
+                        Some(generation),
+                        &value,
+                    );
                 }
             }
-            crate::user_bash::emit_session_event_frame(
+            crate::worker::emit_refinement_event_for_generation(
                 &self.core,
                 &self.events,
-                crate::worker::refine_complete_event(&typed),
+                session_id,
+                Some(generation),
+                crate::worker::refine_complete_event(&committed.result),
             );
         }
-        response_success(None, "refine", Some(result))
+        response_success(None, "refine", serde_json::to_value(&committed.result).ok())
     }
 
     /// `reload`: re-read the session's live inputs — the request auth
