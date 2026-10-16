@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use pa_core::platform::process::{process_group_exists, signal_process_group, Signal};
 use serde::Deserialize;
@@ -105,7 +105,9 @@ pub(crate) fn live_shell_rows_by_session(agent_dir: &Path) -> HashMap<String, Ve
 
 /// Every registered shell with its assigned `sessionId`: running while its
 /// leader runs as registered, unverified when a group remains without that
-/// proof, otherwise finished with its recorded exit code (if any).
+/// proof, otherwise finished with its recorded exit code (if any). Its
+/// `durationMs` runs from `startedAt` to now, or to the exit code's write
+/// once finished.
 pub(crate) fn shell_rows(agent_dir: &Path) -> Vec<Value> {
     registered_shells(agent_dir)
         .iter()
@@ -120,13 +122,22 @@ pub(crate) fn shell_rows(agent_dir: &Path) -> Vec<Value> {
             };
             let mut row = activity_row(shell, status);
             row["sessionId"] = json!(shell.session_id);
-            if status == "finished" {
-                row["exitCode"] = json!(std::fs::read_to_string(shell_file(
-                    agent_dir, &shell.id, "rc"
-                ))
-                .ok()
-                .and_then(|rc| rc.trim().parse::<i64>().ok()));
-            }
+            let rc = shell_file(agent_dir, &shell.id, "rc");
+            let ended_ms = if status == "finished" {
+                row["exitCode"] = json!(std::fs::read_to_string(&rc)
+                    .ok()
+                    .and_then(|rc| rc.trim().parse::<i64>().ok()));
+                std::fs::metadata(&rc)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                    .and_then(|since| u64::try_from(since.as_millis()).ok())
+            } else {
+                Some(crate::util::now_ms())
+            };
+            row["durationMs"] = json!(crate::util::iso_to_unix_ms(&shell.started_at)
+                .zip(ended_ms)
+                .map(|(started, ended)| ended.saturating_sub(started)));
             row
         })
         .collect()
@@ -427,6 +438,7 @@ mod tests {
             ),
             (&json!("finished"), &json!("gone"), &json!(3))
         );
+        assert!(running["durationMs"].is_u64() && done_row["durationMs"].is_u64());
         assert_eq!(
             output_tail(root.path(), &finished, 2).as_deref(),
             Some("two\nthree")
