@@ -55,3 +55,26 @@ fn a_saved_anchor_beyond_the_first_page_remains_pending_until_it_arrives() {
         Some(SessionSelection::Resume(PathBuf::from("/x/older.jsonl")))
     );
 }
+
+#[test]
+fn a_carried_partial_catalog_keeps_waiting_for_a_missing_anchor() {
+    let mut mode = mode_with_anchor(Some("older"), Vec::new());
+    mode.apply_saved_loaded(vec![saved_catalog_row("/x/new.jsonl", "new", "newer")]);
+    mode.rebuild_rows();
+    mode.finish_saved_page(more());
+    assert!(mode.saved_catalog_loaded);
+    mode.settle_carried_anchor();
+    assert!(
+        mode.anchor_selection_pending,
+        "a carried page is not the complete catalog"
+    );
+    assert!(mode.next_saved_fetch().is_some());
+    mode.handle_key("enter");
+    assert!(mode.opened.is_none());
+    mode.finish_saved_page(None);
+    mode.settle_carried_anchor();
+    assert!(
+        !mode.anchor_selection_pending,
+        "an exhausted catalog settles a missing anchor"
+    );
+}

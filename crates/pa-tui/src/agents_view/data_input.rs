@@ -5,8 +5,8 @@ use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
     parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors, scope_root,
     scope_to_subtree, AgentsViewMode, AgentsViewRow, AgentsViewScope, Composer, OpenedRow, PathBuf,
-    PressedMouseClick, RowKind, ScopeRoot, SelectionEdge, SelectionKey, SessionSelection, Value,
-    ANCHOR_LOADING_HINT, SAVED_CATALOG_PAGE_FILES,
+    PressedMouseClick, RowKind, SavedMore, ScopeRoot, SelectionEdge, SelectionKey,
+    SessionSelection, Value, ANCHOR_LOADING_HINT, SAVED_CATALOG_PAGE_FILES,
 };
 
 impl AgentsViewMode {
@@ -327,6 +327,12 @@ impl AgentsViewMode {
             .unwrap_or(0);
         (self.selected + self.page_step() >= last)
             .then(|| (more.cursor.clone(), Some(SAVED_CATALOG_PAGE_FILES)))
+    }
+
+    pub(super) fn settle_carried_anchor(&mut self) {
+        if self.saved_more.is_none() {
+            self.end_anchor_wait();
+        }
     }
 
     pub(super) fn finish_saved_page(&mut self, more: Option<SavedMore>) {

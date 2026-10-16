@@ -782,7 +782,7 @@ async fn run_agents_view_surface(
     // rebuild above or the catalog already settled without it; an armed
     // fetch keeps the wait (its load settles it).
     if catalog_request.is_none() {
-        mode.end_anchor_wait();
+        mode.settle_carried_anchor();
     }
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
