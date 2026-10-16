@@ -466,6 +466,23 @@ fn the_expanded_factory_row_counts_stored_specs_without_runs() {
     assert!(texts[1].ends_with("⚙ 0 factory"), "{texts:?}");
 }
 
+/// A large activity list fits by terminal cells, including a multi-digit omitted count.
+#[test]
+fn a_large_expanded_row_fits_wide_items_and_counts_the_omitted_items() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        heartbeats_active: vec!["界界".to_string(); 4096],
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 60));
+    assert_eq!(
+        texts[2],
+        " ◷ heartbeats  界界  ·  界界  ·  界界  ·  界界  +4092"
+    );
+    assert_eq!(fitting_items(&dock.heartbeats_active, 4096 * 9 - 5), 4096);
+}
+
 /// A first item too long to sit beside the `+N` marker is ellipsized, so the omitted count still
 /// renders.
 #[test]

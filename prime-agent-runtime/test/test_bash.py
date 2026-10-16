@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from types import FunctionType, SimpleNamespace
 from unittest import mock
 
@@ -1595,6 +1596,148 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await asyncio.wait_for(handle, 10)).exit_code, -1)
         self.assertIsNone(stranger.poll())
         await self.wait_for(lambda: self.files() == [])
+
+    async def test_completed_file_errors_settle_waiters_and_leave_records_recoverable(self):
+        for kind in ("output", "status"):
+            with self.subTest(kind=kind):
+                shell_id = ("e" if kind == "output" else "f") * 32
+                gone = subprocess.Popen(["true"])
+                gone.wait()
+                self.write_record(self.record(shell_id, gone.pid, "proc:gone"), rc=7)
+                rc_path = os.path.join(self.home, f"{shell_id}.rc")
+                if kind == "status":
+                    with open(rc_path, "w") as status:
+                        status.write("invalid status")
+                fault = (
+                    mock.patch.object(bash_module._OutputFile, "keep", side_effect=PermissionError("output denied"))
+                    if kind == "output" else nullcontext()
+                )
+                with fault, mock.patch("threading.excepthook") as thread_error:
+                    bash_module._rehydrate_persistent_shells()
+                    handle = self.handle_for(gone.pid)
+                    with self.assertRaises((PermissionError, ValueError)):
+                        await asyncio.wait_for(handle, 5)
+                    with self.assertRaises((PermissionError, ValueError)):
+                        handle.poll()
+                    self.assertFalse(handle.running)
+                    thread_error.assert_not_called()
+                self.assertTrue(os.path.exists(os.path.join(self.home, f"{shell_id}.json")))
+                with open(rc_path, "w") as status:
+                    status.write("7\n")
+                bash_module._rehydrate_persistent_shells()
+                recovered = self.handle_for(gone.pid)
+                result = await asyncio.wait_for(recovered, 5)
+                self.assertEqual((result.exit_code, result.output), (7, "old output\n"))
+                await self.wait_for(lambda: self.files() == [])
+
+    async def test_restart_retains_unverified_leaderless_groups_without_signalling(self):
+        for recorded_status in (None, 7):
+            with self.subTest(recorded_status=recorded_status):
+                leader = subprocess.Popen(["sleep", "60"], process_group=0)
+                self.pgids.append(leader.pid)
+                member = subprocess.Popen(["sleep", "60"], process_group=leader.pid)
+                self.addCleanup(member.wait)
+                self.addCleanup(leader.wait)
+                shell_id = ("8" if recorded_status is None else "9") * 32
+                self.write_record(
+                    self.record(shell_id, leader.pid, bash_module._process_start_id(leader.pid)),
+                    rc=recorded_status,
+                )
+                leader.kill()
+                leader.wait()
+                with mock.patch.object(bash_module, "_signal_group", wraps=bash_module._signal_group) as signal_group:
+                    bash_module._rehydrate_persistent_shells()
+                    if recorded_status is not None:
+                        handle = self.handle_for(leader.pid)
+                        self.assertEqual((await asyncio.wait_for(handle, 5)).exit_code, recorded_status)
+                    signal_group.assert_not_called()
+                self.assertIsNone(member.poll())
+                self.assertTrue(os.path.exists(os.path.join(self.home, f"{shell_id}.json")))
+                member.kill()
+                member.wait()
+                bash_module._remove_shell_files(self.home, shell_id)
+
+    def test_restart_keeps_dead_group_record_if_cleanup_cannot_deliver(self):
+        shell_id = "7" * 32
+        self.write_record(self.record(shell_id, 424242, "proc:gone"))
+        before = self.files()
+        with mock.patch.object(bash_module, "_shell_identity", return_value=False):
+            with mock.patch.object(bash_module.os, "kill", side_effect=ProcessLookupError):
+                with mock.patch.object(bash_module.os, "killpg", side_effect=PermissionError):
+                    bash_module._rehydrate_persistent_shells()
+        self.assertEqual(self.files(), before)
+
+    async def test_unreaped_dead_leader_does_not_leave_a_running_handle(self):
+        if not (sys.platform.startswith("linux") or sys.platform == "darwin"):
+            self.skipTest("native zombie checks cover Linux and macOS")
+        leader = subprocess.Popen(
+            ["/bin/sh", "-c", "read gate; exit 0"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True,
+        )
+        self.addCleanup(leader.wait)
+        self.addCleanup(leader.kill)
+        self.write_record(self.record("6" * 32, leader.pid, bash_module._process_start_id(leader.pid)))
+        bash_module._rehydrate_persistent_shells()
+        handle = self.handle_for(leader.pid)
+        self.assertTrue(handle.running)
+        leader.stdin.close()
+        self.assertEqual(leader.stdout.read(), b"")  # observable exit, no waitpid
+        leader.stdout.close()
+        self.assertEqual((await asyncio.wait_for(handle, 5)).exit_code, -1)
+        self.assertFalse(handle.running)
+        leader.wait()
+
+    def test_persistent_escalation_rechecks_the_identity(self):
+        # A real registered process stands in for the reused PID: no signal may
+        # reach it once its recorded identity changed or became unreadable.
+        stranger = self.sleeper()
+        handle = object.__new__(bash_module.PersistentBashHandle)
+        handle._pid = stranger.pid
+        handle._start_id = "proc:recycled"
+        handle._reaped = False
+        handle._kill_lock = threading.Lock()
+        for identity in (False, None):
+            with self.subTest(identity=identity):
+                current = None if identity is None else "proc:stranger"
+                with mock.patch.object(bash_module, "_process_start_id", return_value=current):
+                    with mock.patch.object(bash_module, "_signal_group") as signal_group:
+                        handle._force_kill()
+                        signal_group.assert_not_called()
+                self.assertIsNone(stranger.poll())
+
+    async def test_cancelled_persistent_await_leaves_the_shell_running(self):
+        handle = bash("sleep 60", persistent=True)
+        self.pgids.append(handle.pid)
+        waiter = asyncio.ensure_future(handle)
+        started = asyncio.Event()
+
+        async def observe_wait():
+            started.set()
+            return await waiter
+
+        observed = asyncio.create_task(observe_wait())
+        await started.wait()
+        observed.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await observed
+        self.assertTrue(handle.running)
+        os.kill(handle.pid, 0)
+        self.assertEqual([record["pid"] for record in self.records()], [handle.pid])
+        handle.kill()
+        await asyncio.wait_for(handle, 5)
+
+    def test_fresh_persistent_kill_refuses_a_recycled_pid(self):
+        stranger = self.sleeper()
+        handle = object.__new__(bash_module.PersistentBashHandle)
+        handle._pid = stranger.pid
+        handle._start_id = "proc:recycled"
+        handle._proc = stranger  # fresh-handle path, but ownership has expired
+        handle._reaped = False
+        handle._kill_lock = threading.Lock()
+        with mock.patch.object(bash_module, "_signal_group") as signal_group:
+            handle.kill(signal.SIGKILL)
+            signal_group.assert_not_called()
+        self.assertIsNone(stranger.poll())
 
     async def test_dead_entry_is_swept(self):
         gone = subprocess.Popen(["true"])
