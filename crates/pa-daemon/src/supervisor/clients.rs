@@ -829,7 +829,9 @@ impl Supervisor {
                 // The machine-wide persistent shells, each with its assigned session id.
                 let agent_dir = self.options.agent_dir.clone();
                 let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
-                    Ok(Some(json!({ "activities": crate::persistent_shells::shell_rows(&agent_dir) })))
+                    Ok(Some(
+                        json!({ "activities": crate::persistent_shells::shell_rows(&agent_dir) }),
+                    ))
                 })
                 .await;
                 (vec![line], false)
