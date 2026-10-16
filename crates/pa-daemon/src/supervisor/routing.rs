@@ -4,7 +4,8 @@ use super::{
     anyhow, attach_client_capabilities, bail, client_command_payload, command_active_session_id,
     json, mpsc, oneshot, response_failure, response_line, response_success, streamed_attach_lines,
     wants_chunked, Arc, DaemonCommand, DaemonResponse, Duration, Outbound, ResidentWorker, Result,
-    RouteAdmission, SnapshotPurpose, Supervisor, Value, WorkerReply, WorkerRequest,
+    RosterFamilySeedOwner, RouteAdmission, SnapshotPurpose, Supervisor, Value, WorkerReply,
+    WorkerRequest,
 };
 use anyhow::Context as _;
 
@@ -1003,7 +1004,11 @@ impl Supervisor {
         let launch = tokio::spawn({
             let supervisor = Arc::clone(self);
             let create = create;
-            async move { supervisor.launch_worker(&create, None).await }
+            async move {
+                supervisor
+                    .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
+                    .await
+            }
         });
         let launched =
             tokio::time::timeout(std::time::Duration::from_millis(ROUTE_TIMEOUT_MS), launch).await;

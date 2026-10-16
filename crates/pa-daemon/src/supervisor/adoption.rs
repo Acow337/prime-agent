@@ -560,7 +560,11 @@ impl Supervisor {
         // A worker that registers after the boot seed publishes its passive ledger family in
         // the background: TS reseeds on the worker's first roster snapshot, and this port's
         // workers push only their own summary, so the daemon walks the family here.
-        if record.epoch == 1 {
+        if record.epoch == 1
+            && !resident
+                .roster_family_seed_owned_by_create
+                .load(Ordering::SeqCst)
+        {
             let family_root = {
                 let descriptor = resident.descriptor.lock().await;
                 descriptor

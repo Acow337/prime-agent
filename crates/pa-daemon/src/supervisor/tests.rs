@@ -1095,7 +1095,7 @@ async fn a_create_while_shutting_down_is_refused() {
         rest: Map::default(),
     };
     let refused = supervisor
-        .launch_worker(&create, None)
+        .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
         .await
         .err()
         .expect("the shutting-down supervisor accepted a create");
@@ -1361,7 +1361,7 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         "the first signal must start the drain"
     );
     let refused = supervisor
-        .launch_worker(&create, None)
+        .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
         .await
         .err()
         .expect("a create during the drain must be rejected");
