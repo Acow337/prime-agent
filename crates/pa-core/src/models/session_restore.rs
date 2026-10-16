@@ -75,11 +75,15 @@ pub async fn resolve_model_scope_from_models_with_readiness(
     if !default_missing {
         return scoped;
     }
-    let _ = tokio::time::timeout(
+    if tokio::time::timeout(
         Duration::from_millis(readiness_timeout_ms),
         registry.refresh_available_models(),
     )
-    .await;
+    .await
+    .is_err()
+    {
+        return scoped;
+    }
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
     resolve_model_scope_from_models(patterns, &available)
 }

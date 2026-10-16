@@ -73,7 +73,7 @@ impl AgentSessionEngine {
         {
             return;
         }
-        let wanted = scope.scoped_models.is_empty()
+        let wanted = scope.patterns.is_empty()
             || pa_core::models::scope_patterns_select_reference(
                 &scope.patterns,
                 provider,

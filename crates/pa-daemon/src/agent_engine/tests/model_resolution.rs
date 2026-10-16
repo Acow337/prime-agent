@@ -1363,3 +1363,30 @@ async fn a_fresh_scoped_create_falls_back_with_a_recorded_message() {
         }
     }
 }
+
+#[test]
+fn an_explicit_scope_with_no_matches_does_not_warn_about_an_excluded_default() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({"defaultProvider": "anthropic", "defaultModel": "excluded-default"}).to_string(),
+    )
+    .unwrap();
+    let engine = restore_test_engine(dir.path(), None, None);
+    *engine.startup_scope.lock().unwrap() = Some(StartupScope {
+        scoped_models: Vec::new(),
+        patterns: vec!["battery/no-such-model".to_string()],
+        is_continuing: false,
+    });
+    let resolved = engine.resolve_registry_model().expect("available fallback");
+    assert_eq!(
+        (resolved.provider.as_str(), resolved.id.as_str()),
+        ("battery", "mock-1")
+    );
+    assert!(
+        engine.model_fallback_message().is_none(),
+        "explicitly excluded defaults do not imply an unavailable-model fallback"
+    );
+}
