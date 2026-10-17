@@ -456,7 +456,12 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     let file = fs::File::open(&path).unwrap();
     let _ = file.set_modified(past);
     drop(file);
-    let second = read_session_info(&path).unwrap();
+    let mut file = fs::File::open(&path).unwrap();
+    let (second, sidecar_behind) = read_session_info_from(&mut file, &path).unwrap();
+    assert!(
+        sidecar_behind,
+        "a rejected prefix must mark the fresh scan for sidecar backfill"
+    );
     assert_eq!(
         second.name.as_deref(),
         Some("after!"),
@@ -1208,5 +1213,28 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
         fs::remove_dir_all(abort_dir).unwrap();
     }
 
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// The single-writer premise: a fold by a process that does not hold the
+/// file's lease (the daemon catalog's cold read) never persists a sidecar.
+#[test]
+fn a_non_holder_fold_writes_no_sidecar() {
+    let dir = test_dir();
+    let path = dir.join("unleased.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"sc","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"message","id":"u1","timestamp":"2026-09-23T00:00:00.000Z",
+                "message":{"role":"user","content":"hi","timestamp":1_790_110_000_000_u64}}),
+        ],
+    );
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.message_count, 1);
+    assert!(
+        !path.with_extension("info-cache.json").exists(),
+        "only the lease holder's release writes a sidecar"
+    );
     fs::remove_dir_all(dir).unwrap();
 }

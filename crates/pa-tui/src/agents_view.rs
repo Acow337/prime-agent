@@ -139,6 +139,9 @@ pub enum AgentsStep {
     Click { row: usize, col: usize },
     /// A raw SGR mouse sequence, decoded by the same parser the terminal's reports flow through.
     Mouse(String),
+    /// Wake the waiter once the plan reaches this step (every preceding step, barriers included,
+    /// has run): hands control back to a test whose next action must follow a rendered state.
+    Notify(std::sync::Arc<tokio::sync::Notify>),
 }
 
 #[derive(Debug, Default)]
@@ -221,6 +224,8 @@ enum UiInput {
     },
     /// A decoded SGR mouse report (the click grammar's input).
     Mouse(crate::mouse::MouseEvent),
+    /// The headless plan's `Notify` step, popped in plan order.
+    Notify(std::sync::Arc<tokio::sync::Notify>),
     Resize,
     Settled,
     Done,
@@ -417,6 +422,7 @@ struct AgentsViewMode {
     /// The store files the catalog has not folded yet; a scroll near the end or a search
     /// fetches them.
     saved_more: Option<SavedMore>,
+    saved_page_requested: bool,
     /// The screen rows of the rendered session rows, in frame order — exactly the rows the last
     /// frame painted (a plain left click opens the row under it). Rebuilt on every render.
     click_rows: Vec<(usize, usize)>,
@@ -527,6 +533,7 @@ impl AgentsViewMode {
             saved_stream: Vec::new(),
             saved_catalog_loaded: false,
             saved_more: None,
+            saved_page_requested: false,
             incident_notice_state,
             click_rows: Vec::new(),
             hover_row: None,
@@ -780,7 +787,7 @@ async fn run_agents_view_surface(
     // rebuild above or the catalog already settled without it; an armed
     // fetch keeps the wait (its load settles it).
     if catalog_request.is_none() {
-        mode.end_anchor_wait();
+        mode.settle_carried_anchor();
     }
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
@@ -925,6 +932,7 @@ async fn run_agents_view_surface(
                 UiInput::Paste(text) => {
                     mode.handle_paste(&text);
                 }
+                UiInput::Notify(notify) => notify.notify_one(),
                 // `Settled` is the plan's own settle no-op; `WaitRender` never reaches the batch
                 // pop (the pre-pass at the loop head owns it).
                 UiInput::Resize | UiInput::Settled | UiInput::WaitRender { .. } => {}
@@ -969,7 +977,6 @@ async fn run_agents_view_surface(
                     } else {
                         mode.apply_saved_loaded(sessions);
                     }
-                    mode.saved_more = more;
                     // The catalog's success retires the failure status (never keep reporting an
                     // unavailable catalog after it loaded).
                     if mode
@@ -979,9 +986,7 @@ async fn run_agents_view_surface(
                         mode.status = None;
                     }
                     mode.rebuild_rows();
-                    // The anchor's row can only arrive through THIS fetch, so a terminal load
-                    // without it ends the wait.
-                    mode.end_anchor_wait();
+                    mode.finish_saved_page(more);
                 }
                 UiInput::SavedFailed { error } => {
                     // The catalog settled on a terminal failure: the anchor's wait ends with it,
@@ -1128,6 +1133,7 @@ async fn run_agents_view_surface(
         // search fetches all of it (its rows stream in as they fold).
         if catalog_request.is_none() {
             if let Some((cursor, limit)) = mode.next_saved_fetch() {
+                mode.saved_page_requested = false;
                 catalog_request = Some(spawn_saved_catalog_fetch(
                     &client,
                     ui_tx.clone(),

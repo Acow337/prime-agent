@@ -4,9 +4,11 @@
 //! (TS never invalidates on a parse failure).
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::session_store::{
     parse_session_header_line, persist_info_sidecar, read_first_line_bounded_from,
@@ -80,33 +82,37 @@ pub struct SessionPage {
 }
 
 /// The walk order's key: newest mtime first, the file name breaking ties, so
-/// the order is total and a cursor names one position in it.
+/// the initial snapshot order is total.
 type WalkKey = (Reverse<u128>, String);
 
-fn parse_cursor(cursor: &str) -> Option<WalkKey> {
-    let (modified_ns, name) = cursor.split_once(':')?;
-    Some((Reverse(modified_ns.parse().ok()?), name.to_string()))
+struct WalkSnapshot {
+    session_dir: PathBuf,
+    files: Arc<Vec<PathBuf>>,
+    last_used: Instant,
 }
 
-/// List every valid session file in a directory, most recently modified first.
-/// The rich-field fold runs sequentially: a measured parallel fold loses to
-/// cross-core cacheline/futex costs on a loaded box (425ms vs 137ms over 1412 files).
-#[must_use]
-pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
-    list_sessions_with(session_dir, None, None, |_, _, _| true).infos
+fn walk_snapshots() -> &'static Mutex<HashMap<String, WalkSnapshot>> {
+    static SNAPSHOTS: OnceLock<Mutex<HashMap<String, WalkSnapshot>>> = OnceLock::new();
+    SNAPSHOTS.get_or_init(Default::default)
 }
 
-/// [`list_sessions`] as a page with the saved-catalog stream's per-file
-/// callback. The enumeration (names and mtimes) always covers the whole
-/// store; the fold walks only the files after `cursor`, at most `limit` of
-/// them. `on_row` receives rows as each fold completes, so rows reach the
-/// client DURING the scan, newest first. `false` stops the scan.
-pub fn list_sessions_with(
-    session_dir: &Path,
-    cursor: Option<&str>,
-    limit: Option<usize>,
-    mut on_row: impl FnMut(usize, usize, &SessionInfo) -> bool,
-) -> SessionPage {
+fn snapshot_files(session_dir: &Path, cursor: Option<&str>) -> (String, Arc<Vec<PathBuf>>, usize) {
+    if let Some((id, offset)) = cursor
+        .and_then(|cursor| cursor.strip_prefix("snapshot:"))
+        .and_then(|cursor| cursor.split_once(':'))
+        .and_then(|(id, offset)| offset.parse::<usize>().ok().map(|offset| (id, offset)))
+    {
+        let mut snapshots = walk_snapshots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshots.retain(|_, snapshot| snapshot.last_used.elapsed() < Duration::from_secs(300));
+        if let Some(snapshot) = snapshots.get_mut(id) {
+            if snapshot.session_dir == session_dir && offset <= snapshot.files.len() {
+                snapshot.last_used = Instant::now();
+                return (id.to_string(), Arc::clone(&snapshot.files), offset);
+            }
+        }
+    }
     let mut files: Vec<(WalkKey, PathBuf)> = fs::read_dir(session_dir)
         .into_iter()
         .flatten()
@@ -123,14 +129,64 @@ pub fn list_sessions_with(
         })
         .collect();
     files.sort_unstable();
-    let start = cursor
-        .and_then(parse_cursor)
-        .map_or(0, |after| files.partition_point(|(key, _)| *key <= after));
-    let files = &files[start..];
+    (
+        uuid::Uuid::new_v4().to_string(),
+        Arc::new(files.into_iter().map(|(_, path)| path).collect()),
+        0,
+    )
+}
+
+fn retain_snapshot(id: String, session_dir: &Path, files: Arc<Vec<PathBuf>>) {
+    let mut snapshots = walk_snapshots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    snapshots.retain(|_, snapshot| snapshot.last_used.elapsed() < Duration::from_secs(300));
+    if !snapshots.contains_key(&id) && snapshots.len() >= 32 {
+        if let Some(oldest) = snapshots
+            .iter()
+            .min_by_key(|(_, snapshot)| snapshot.last_used)
+            .map(|(id, _)| id.clone())
+        {
+            snapshots.remove(&oldest);
+        }
+    }
+    snapshots.insert(
+        id,
+        WalkSnapshot {
+            session_dir: session_dir.to_path_buf(),
+            files,
+            last_used: Instant::now(),
+        },
+    );
+}
+
+/// List every valid session file in a directory, most recently modified first.
+/// The rich-field fold runs sequentially: a measured parallel fold loses to
+/// cross-core cacheline/futex costs on a loaded box (425ms vs 137ms over 1412 files).
+#[must_use]
+pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
+    list_sessions_with(session_dir, None, None, |_, _, _| true).infos
+}
+
+/// [`list_sessions`] as a page with the saved-catalog stream's per-file
+/// callback. The first request snapshots the names in mtime order; continuations retain that
+/// file order even when sessions change. Expired cursors restart the walk; the TUI deduplicates
+/// repeated paths. At most 32 snapshots are kept, expiring after five idle minutes.
+/// The fold walks only the files after `cursor`, at most `limit` of
+/// them. `on_row` receives rows as each fold completes, so rows reach the
+/// client DURING the scan, newest first. `false` stops the scan.
+pub fn list_sessions_with(
+    session_dir: &Path,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+    mut on_row: impl FnMut(usize, usize, &SessionInfo) -> bool,
+) -> SessionPage {
+    let (snapshot_id, snapshot, start) = snapshot_files(session_dir, cursor);
+    let files = &snapshot[start..];
     let walk = limit.map_or(files.len(), |limit| limit.max(1).min(files.len()));
     let mut infos = Vec::new();
     let mut walked = 0;
-    for (index, (_, path)) in files[..walk].iter().enumerate() {
+    for (index, path) in files[..walk].iter().enumerate() {
         walked = index + 1;
         if let Some(info) = roster_session_info(path) {
             // `false` stops the scan: the consumer is gone, so the remaining
@@ -143,8 +199,9 @@ pub fn list_sessions_with(
     }
     let remaining = files.len() - walked;
     let next_cursor = (remaining > 0).then(|| {
-        let ((Reverse(modified_ns), name), _) = &files[walked - 1];
-        format!("{modified_ns}:{name}")
+        let cursor = format!("snapshot:{snapshot_id}:{}", start + walked);
+        retain_snapshot(snapshot_id, session_dir, Arc::clone(&snapshot));
+        cursor
     });
     SessionPage {
         infos,
@@ -404,5 +461,47 @@ mod tests {
             list_sessions_with(&dir, first.next_cursor.as_deref(), Some(2), |_, _, _| true);
         assert_eq!(names(&second), ["row 2", "row 1"], "no file skipped");
         assert_eq!(second.remaining, 1);
+    }
+    #[test]
+    fn a_session_modified_between_pages_is_not_skipped() {
+        let dir = temp_dir();
+        let base = SystemTime::now() - Duration::from_secs(3600);
+        let paths: Vec<_> = (0..3)
+            .map(|index| {
+                let path = write_session(&dir, "/repo/x", Some(&format!("row {index}")), 1);
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(base + Duration::from_secs(index))
+                    .unwrap();
+                path
+            })
+            .collect();
+        let first = list_sessions_with(&dir, None, Some(1), |_, _, _| true);
+        assert_eq!(first.infos[0].name.as_deref(), Some("row 2"));
+        fs::File::options()
+            .write(true)
+            .open(&paths[0])
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+        let second =
+            list_sessions_with(&dir, first.next_cursor.as_deref(), Some(2), |_, _, _| true);
+        assert_eq!(
+            second
+                .infos
+                .iter()
+                .map(|info| info.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("row 1"), Some("row 0")]
+        );
+        assert!(second.next_cursor.is_none());
+        let replay =
+            list_sessions_with(&dir, first.next_cursor.as_deref(), Some(2), |_, _, _| true);
+        assert_eq!(
+            replay.infos, second.infos,
+            "retrying a cursor reads the same file slice"
+        );
     }
 }

@@ -437,7 +437,7 @@ pub(crate) fn read_session_info_from(
                 if cached.prefix_intact(file) {
                     Some(cached.clone_for_resume())
                 } else {
-                    Some(SessionScanState::fresh(generation))
+                    None
                 }
             }
             // No in-process state serves (absent or invalidated): the
