@@ -922,6 +922,9 @@ async fn run_agents_view_surface(
                     deleted_saved_path,
                 } => {
                     mode.delete_result(&message, tone, deleted_saved_path);
+                    if shells_fetch_at.is_some() {
+                        shells_fetch_at = Some(tokio::time::Instant::now());
+                    }
                 }
                 UiInput::RenameResult { rename, outcome } => {
                     mode.rename_result(rename, outcome);

@@ -186,6 +186,26 @@ pub(crate) fn kill_shell(agent_dir: &Path, id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+pub(crate) fn delete_shell(agent_dir: &Path, id: &str) -> Result<bool, String> {
+    let Some(shell) = find_shell(agent_dir, id) else {
+        return Ok(false);
+    };
+    if runs_as_registered(&shell) {
+        return Err("Cannot delete a running persistent shell".to_string());
+    }
+    if group_unverified(&shell) {
+        return Err("Cannot verify persistent shell group ownership; record kept".to_string());
+    }
+    for kind in ["rc", "out", "json"] {
+        if let Err(error) = std::fs::remove_file(shell_file(agent_dir, &shell.id, kind)) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("Could not delete persistent shell: {error}"));
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// A missing or changed leader no longer proves the durable group's identity.
 fn kill_group(shell: &Shell) -> Result<(), String> {
     if runs_as_registered(shell) {
@@ -361,6 +381,34 @@ mod tests {
         assert_eq!(shell_rows(root.path())[0]["status"], "finished");
         assert_eq!(output_tail(root.path(), &id, 1).as_deref(), Some("line"));
         assert_eq!(kill_shell(root.path(), "unknown"), Ok(false));
+    }
+
+    #[test]
+    fn delete_removes_a_finished_shell_and_refuses_a_running_one() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sleeper = registered_sleeper(root.path(), "s1", None);
+        let running = format!("{:032}", sleeper.id());
+        let mut done = Command::new("true").spawn().unwrap();
+        done.wait().unwrap();
+        let finished = register(root.path(), done.id(), "proc:0", "gone");
+        for kind in ["rc", "out"] {
+            std::fs::write(shell_file(root.path(), &finished, kind), "0\n").unwrap();
+        }
+
+        assert!(delete_shell(root.path(), &running).is_err());
+        assert_eq!(delete_shell(root.path(), &finished), Ok(true));
+
+        for kind in ["json", "rc", "out"] {
+            assert!(!shell_file(root.path(), &finished, kind).exists());
+        }
+        let rows = shell_rows(root.path());
+        assert_eq!(
+            (rows.len(), &rows[0]["id"], &rows[0]["status"]),
+            (1, &json!(running), &json!("running"))
+        );
+        assert_eq!(delete_shell(root.path(), "unknown"), Ok(false));
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
     }
 
     #[test]

@@ -168,6 +168,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "list_persistent_shells",
     "tail_persistent_shell",
     "kill_persistent_shell",
+    "delete_persistent_shell",
 ];
 
 /// Parsed client command envelope.
@@ -933,6 +934,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::ListPersistentShells { .. }
         | DaemonCommand::TailPersistentShell { .. }
         | DaemonCommand::KillPersistentShell { .. }
+        | DaemonCommand::DeletePersistentShell { .. }
         | DaemonCommand::Restart { .. }
         | DaemonCommand::Shutdown { .. } => None,
     }
@@ -984,6 +986,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::ListPersistentShells { .. } => "list_persistent_shells",
         DaemonCommand::TailPersistentShell { .. } => "tail_persistent_shell",
         DaemonCommand::KillPersistentShell { .. } => "kill_persistent_shell",
+        DaemonCommand::DeletePersistentShell { .. } => "delete_persistent_shell",
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",

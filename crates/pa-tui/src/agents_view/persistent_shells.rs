@@ -137,6 +137,7 @@ impl AgentsViewMode {
                         "shellId": id,
                         "command": shell.get("command").and_then(Value::as_str).map(single_line),
                         "durationMs": shell.get("durationMs").and_then(Value::as_u64),
+                        "status": shell.get("status"),
                     }),
                     title: assignment,
                     model: String::new(),
