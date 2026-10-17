@@ -185,6 +185,10 @@ def wait_for_created_session(terminal, client, active):
             if isinstance(response, dict) and response.get('success') is False:
                 info = response.get('errorInfo') or {}
                 if (response.get('error') == 'Unknown active session: ' + active
+                        # Pinned TS requireAvailableWorkerClient reports its
+                        # lifecycle before accepting forwarded state requests.
+                        or response.get('error') in ('Session worker is starting',
+                            'Session worker is recovering', 'Session worker is not connected')
                         or (info.get('code') == 'session_recovering'
                             and info.get('activeSessionId') == active)):
                     return False

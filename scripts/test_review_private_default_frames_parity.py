@@ -36,10 +36,16 @@ class CaptureGuards(unittest.TestCase):
         client.call.side_effect = [AssertionError({'success': False,
             'errorInfo': {'code': 'session_recovering', 'activeSessionId': 'fixture'}}), state]
         self.assertEqual(wait_for_created_session(terminal, client, 'fixture'), state)
+        for message in ('Session worker is starting', 'Session worker is recovering',
+                        'Session worker is not connected'):
+            client.call.side_effect = [AssertionError({'success': False, 'error': message}), state]
+            self.assertEqual(wait_for_created_session(terminal, client, 'fixture'), state)
         terminal.wait.side_effect = lambda _description, predicate: predicate()
-        client.call.side_effect = AssertionError({'success': False, 'error': 'Permission denied'})
-        with self.assertRaisesRegex(AssertionError, 'Permission denied'):
-            wait_for_created_session(terminal, client, 'fixture')
+        for message in ('Permission denied', 'Session worker is failed', 'Session worker is stopping',
+                        'Daemon client is not attached to this session'):
+            client.call.side_effect = AssertionError({'success': False, 'error': message})
+            with self.assertRaises(AssertionError):
+                wait_for_created_session(terminal, client, 'fixture')
         client.call.side_effect = AssertionError({'success': False,
             'errorInfo': {'code': 'session_recovering', 'activeSessionId': 'other'}})
         with self.assertRaises(AssertionError):
