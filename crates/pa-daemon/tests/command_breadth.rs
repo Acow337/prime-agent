@@ -532,6 +532,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "kill_persistent_shell",
         r#"{"type": "kill_persistent_shell", "shellId": "s"}"#,
     ),
+    (
+        "delete_persistent_shell",
+        r#"{"type": "delete_persistent_shell", "shellId": "s"}"#,
+    ),
 ];
 
 /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
@@ -563,6 +567,7 @@ fn known_command_types_match_the_ts_list() {
                     | "list_persistent_shells"
                     | "tail_persistent_shell"
                     | "kill_persistent_shell"
+                    | "delete_persistent_shell"
             ),
             "unexpected non-TS command type: {extra}"
         );

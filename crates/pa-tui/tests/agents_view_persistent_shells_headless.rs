@@ -40,6 +40,7 @@ fn serve(listener: &UnixListener) -> Vec<String> {
         }),
     );
     let mut killed = Vec::new();
+    let mut deleted = Vec::new();
     let mut pending_kill_failure: Option<String> = None;
     loop {
         let Some(line) = read_line(&mut reader) else {
@@ -73,10 +74,14 @@ fn serve(listener: &UnixListener) -> Vec<String> {
                 } else {
                     "finished"
                 };
-                json!({ "activities": [
+                let shells: Vec<Value> = [
                     shell("b", "build-watch", "p", build_status),
                     shell("l", "long-job", "gone", "running"),
-                ] })
+                ]
+                .into_iter()
+                .filter(|shell| !deleted.contains(&shell["id"]))
+                .collect();
+                json!({ "activities": shells })
             }
             "tail_persistent_shell" => {
                 // Deliver the old shell's error only once another shell's
@@ -99,6 +104,10 @@ fn serve(listener: &UnixListener) -> Vec<String> {
                     continue;
                 }
                 killed.push(command["shellId"].as_str().unwrap_or_default().to_string());
+                json!({ "shellId": command["shellId"] })
+            }
+            "delete_persistent_shell" => {
+                deleted.push(command["shellId"].clone());
                 json!({ "shellId": command["shellId"] })
             }
             "roster_unsubscribe" => Value::Null,
@@ -328,5 +337,53 @@ async fn a_late_kill_failure_does_not_move_to_another_shell_pane() {
             .iter()
             .any(|frame| frame.contains("old shell kill failed")),
         "shell A's failure must not appear on shell B"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_x_on_a_shell_row_stops_it_then_deletes_it_through_the_session_confirm() {
+    let (frames, killed) = run_plan(vec![
+        AgentsStep::WaitSettle { timeout_ms: 2500 },
+        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        AgentsStep::Key("home".to_string()),
+        wait_render("open   Ctrl+X stop"),
+        AgentsStep::Key("ctrl+x".to_string()),
+        wait_render("Press Ctrl+X again to stop"),
+        AgentsStep::Key("ctrl+x".to_string()),
+        wait_render("Stopped build-watch"),
+        wait_render("open   Ctrl+X delete"),
+        AgentsStep::Key("ctrl+x".to_string()),
+        wait_render("Press Ctrl+X again to delete"),
+        AgentsStep::Key("ctrl+x".to_string()),
+        wait_render("Persistent shells (1)"),
+    ])
+    .await;
+
+    assert_eq!(killed, ["b"], "the stop named the selected shell");
+    let mut needles = [
+        "open   Ctrl+X stop",
+        "Press Ctrl+X again to stop",
+        "Stopped build-watch",
+        "open   Ctrl+X delete",
+        "Press Ctrl+X again to delete",
+        "Persistent shells (1)",
+    ]
+    .into_iter()
+    .peekable();
+    for frame in &frames {
+        if needles.peek().is_some_and(|needle| frame.contains(needle)) {
+            needles.next();
+        }
+    }
+    assert_eq!(
+        needles.next(),
+        None,
+        "frames in order:\n{}",
+        frames.join("\n---\n")
+    );
+    let last = frames.last().expect("a frame");
+    assert!(
+        !last.contains("$ build-watch"),
+        "the deleted shell left the list:\n{last}"
     );
 }
