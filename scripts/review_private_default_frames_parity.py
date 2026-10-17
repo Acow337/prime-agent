@@ -213,6 +213,7 @@ def validate_observation(label, scenario, observed):
     for size, frame in observed['frames'].items():
         assert size == f"{frame['columns']}x{frame['rows']}", 'mismatched terminal dimensions'
         assert frame['input_preserved'], 'input disappeared across redraw'
+        assert frame['selected_model_id_visible'], 'model state has not reached the visible startup frame'
         if frame['warning_prefix_count']:
             assert frame['warning_text_complete'], 'visible warning was clipped'
         expected = int(expected_warning) if size == '120x40' else None
@@ -254,18 +255,21 @@ def capture(binary, label, scenario, root, directory, observed):
         terminal.wait('visible startup frame', lambda: bool(terminal.screen.text().strip()))
         os.write(terminal.master, INPUT.encode())
         expected_warning = label == 'rust' and scenario == 'unavailable'
-        terminal.wait('editor and startup warning', lambda: INPUT in terminal.screen.text()
+        terminal.wait('editor, selected model and startup warning', lambda: INPUT in terminal.screen.text()
+            and selected in terminal.screen.text()
             and (not expected_warning or 'Default model prime-inference/' in terminal.screen.text()))
         observed['frames'] = {}
         for columns, rows in DIMENSIONS:
             if terminal.screen.width != columns:
                 terminal.resize(columns, rows)
                 os.write(terminal.master, b'_NARROW')
-                terminal.wait('resized editor', lambda: INPUT + '_NARROW' in terminal.screen.text())
+                terminal.wait('resized editor and selected model', lambda:
+                    INPUT + '_NARROW' in terminal.screen.text() and selected in terminal.screen.text())
             frame = write_frame(directory, f'{columns}x{rows}', terminal)
             message = observed['fallback_message']
             frame['warning_text_complete'] = not message or ''.join(message.split()) in ''.join(frame['text'].split())
             frame['selected_model_name_visible'] = bool(model.get('name')) and model['name'] in frame['text']
+            frame['selected_model_id_visible'] = selected in frame['text']
             observed['frames'][f'{columns}x{rows}'] = frame
         # Observe availability only after capturing natural startup. Refreshing
         # metadata beforehand could itself trigger a redraw or clear a notice.
@@ -308,7 +312,7 @@ def run(args):
         'policy_decision_pending': True,
         'scope': 'Actual fresh TUI startup against owned daemons, matched PTY dimensions, signed synthetic authorization-cache states; no inference or external networking.',
         'limits': 'Does not exercise live catalog fetch timing, OS terminal font/pixel fidelity, or full application parity. SVGs render captured cells; raw ANSI preserves original attributes.',
-        'expected_difference': 'Pinned TS selects the first scoped model; Rust currently prefers an authorized saved default. Rust alone adds the requested-default-unavailable warning. These are recorded, not product-approved.',
+        'expected_difference': 'The isolated TS findInitialModel resolver chooses the first scoped model, but TS main.ts buildSessionOptions first prefers an authorized saved default. Record the real startup selection without approving policy. Rust adds the requested-default-unavailable attach warning.',
         'source': {key: os.environ.get(key) for key in ('GITHUB_RUN_ID', 'GITHUB_SHA')}}
     try:
         if os.environ.get('GITHUB_EVENT_PATH'):

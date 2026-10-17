@@ -16,7 +16,8 @@ def observation(label, scenario):
             'available_ids': [PUBLIC] if scenario == 'unavailable' else [PUBLIC, PRIVATE],
             'fallback_message': WARNING + ' Using prime-inference/' + PUBLIC if warn else None,
             'frames': {f'{columns}x{rows}': {'columns': columns, 'rows': rows,
-                       'input_preserved': True, 'warning_prefix_count': int(warn), 'warning_text_complete': True}
+                       'input_preserved': True, 'selected_model_id_visible': True,
+                       'warning_prefix_count': int(warn), 'warning_text_complete': True}
                        for columns, rows in ((120, 40), (80, 28))}}
 
 
@@ -79,7 +80,8 @@ class CaptureGuards(unittest.TestCase):
 
     def test_missing_duplicate_warning_or_lost_input_is_rejected(self):
         for field, replacement in (('warning_prefix_count', 0), ('warning_prefix_count', 2),
-                                   ('input_preserved', False), ('columns', 119), ('warning_text_complete', False)):
+                                   ('input_preserved', False), ('selected_model_id_visible', False),
+                                   ('columns', 119), ('warning_text_complete', False)):
             value = observation('rust', 'unavailable')
             value['frames']['120x40'][field] = replacement
             with self.assertRaises(AssertionError):
