@@ -71,9 +71,8 @@ pub(crate) fn resolve_saved_session(
         Ok(())
     })();
     drop(target);
-    let result = result.and_then(|()| {
-        std::fs::hard_link(&temp, &destination).context("publish restored session")
-    });
+    let result = result
+        .and_then(|()| std::fs::hard_link(&temp, &destination).context("publish restored session"));
     let cleanup = std::fs::remove_file(&temp);
     result.with_context(|| format!("restore archived session {}", info.id))?;
     cleanup.with_context(|| format!("remove restore staging file {}", temp.display()))?;
@@ -173,7 +172,10 @@ mod tests {
             assert_eq!(restored, expected);
             assert_eq!(std::fs::read(&restored.path).unwrap(), bytes);
             assert_eq!(
-                std::fs::metadata(&restored.path).unwrap().modified().unwrap(),
+                std::fs::metadata(&restored.path)
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
                 modified
             );
             assert!(!path.exists(), "restored file leaves the archive");

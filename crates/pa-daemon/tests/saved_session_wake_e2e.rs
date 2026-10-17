@@ -240,6 +240,7 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     serde_json::to_string(&response["data"]).expect("messages json")
 }
 
+#[derive(Clone, Copy)]
 enum SavedLocation {
     Live,
     LegacyArchive,
