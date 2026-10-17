@@ -33,9 +33,16 @@ class CaptureGuards(unittest.TestCase):
             'error': 'Unknown active session: fixture'}), state]
         self.assertEqual(wait_for_created_session(terminal, client, 'fixture'), state)
         self.assertEqual(client.call.call_count, 2)
+        client.call.side_effect = [AssertionError({'success': False,
+            'errorInfo': {'code': 'session_recovering', 'activeSessionId': 'fixture'}}), state]
+        self.assertEqual(wait_for_created_session(terminal, client, 'fixture'), state)
         terminal.wait.side_effect = lambda _description, predicate: predicate()
         client.call.side_effect = AssertionError({'success': False, 'error': 'Permission denied'})
         with self.assertRaisesRegex(AssertionError, 'Permission denied'):
+            wait_for_created_session(terminal, client, 'fixture')
+        client.call.side_effect = AssertionError({'success': False,
+            'errorInfo': {'code': 'session_recovering', 'activeSessionId': 'other'}})
+        with self.assertRaises(AssertionError):
             wait_for_created_session(terminal, client, 'fixture')
 
     def test_both_connection_state_shapes_keep_the_same_model(self):

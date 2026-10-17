@@ -182,9 +182,12 @@ def wait_for_created_session(terminal, client, active):
             # Only this explicit transitional response is pending readiness;
             # transport errors and every other daemon refusal still fail.
             response = error.args[0] if error.args else None
-            if (isinstance(response, dict) and response.get('success') is False
-                    and response.get('error') == 'Unknown active session: ' + active):
-                return False
+            if isinstance(response, dict) and response.get('success') is False:
+                info = response.get('errorInfo') or {}
+                if (response.get('error') == 'Unknown active session: ' + active
+                        or (info.get('code') == 'session_recovering'
+                            and info.get('activeSessionId') == active)):
+                    return False
             raise
 
     terminal.wait('fresh session create completed', created)
