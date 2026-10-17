@@ -2,9 +2,11 @@
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import Mock
 
 from review_private_default_frames_parity import (
-    PUBLIC, PRIVATE, WARNING, Screen, validate_observation, write_frame,
+    PUBLIC, PRIVATE, WARNING, Screen, connection_model, wait_for_created_session,
+    validate_observation, write_frame,
 )
 
 
@@ -19,6 +21,28 @@ def observation(label, scenario):
 
 
 class CaptureGuards(unittest.TestCase):
+    def test_spawned_worker_waits_for_create_but_other_refusals_fail(self):
+        terminal = Mock()
+        def wait(_description, predicate):
+            self.assertFalse(predicate())
+            self.assertTrue(predicate())
+        terminal.wait.side_effect = wait
+        state = {'model': {'id': PUBLIC}}
+        client = Mock()
+        client.call.side_effect = [AssertionError({'success': False,
+            'error': 'Unknown active session: fixture'}), state]
+        self.assertEqual(wait_for_created_session(terminal, client, 'fixture'), state)
+        self.assertEqual(client.call.call_count, 2)
+        terminal.wait.side_effect = lambda _description, predicate: predicate()
+        client.call.side_effect = AssertionError({'success': False, 'error': 'Permission denied'})
+        with self.assertRaisesRegex(AssertionError, 'Permission denied'):
+            wait_for_created_session(terminal, client, 'fixture')
+
+    def test_both_connection_state_shapes_keep_the_same_model(self):
+        model = {'id': PUBLIC, 'provider': 'prime-inference'}
+        self.assertEqual(connection_model({'model': model}),
+                         connection_model({'state': {'model': model}}))
+
     def test_characterization_does_not_approve_either_priority_policy(self):
         for label in ('ts', 'rust'):
             for selected in (PUBLIC, PRIVATE):

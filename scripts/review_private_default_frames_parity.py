@@ -165,6 +165,32 @@ def active_worker(agent, socket_path):
     return next(iter(ids)) if ids else None
 
 
+def connection_model(state):
+    return state.get('model') or state.get('state', {}).get('model')
+
+
+def wait_for_created_session(terminal, client, active):
+    state = None
+
+    def created():
+        nonlocal state
+        try:
+            state = client.call('get_connection_state', activeSessionId=active)
+            return True
+        except AssertionError as error:
+            # A descriptor identifies the spawned worker, not a completed create.
+            # Only this explicit transitional response is pending readiness;
+            # transport errors and every other daemon refusal still fail.
+            response = error.args[0] if error.args else None
+            if (isinstance(response, dict) and response.get('success') is False
+                    and response.get('error') == 'Unknown active session: ' + active):
+                return False
+            raise
+
+    terminal.wait('fresh session create completed', created)
+    return state
+
+
 def validate_observation(label, scenario, observed):
     permitted = [PUBLIC, PRIVATE] if scenario == 'authorized' else [PUBLIC]
     assert observed['selected_model'] in permitted, 'selected an unavailable or excluded model'
@@ -209,10 +235,10 @@ def capture(binary, label, scenario, root, directory, observed):
         scope.register(terminal.process, command)
         terminal.wait('fresh worker descriptor', lambda: active_worker(root / 'agent', socket_path))
         active = active_worker(root / 'agent', socket_path)
-        state = client.call('get_connection_state', activeSessionId=active)
+        state = wait_for_created_session(terminal, client, active)
         attached = client.call('attach', activeSessionId=active)
         observed.update(active_session_id=active, state=state, attach=attached)
-        model = state.get('model') or state.get('state', {}).get('model')
+        model = connection_model(state)
         assert isinstance(model, dict) and model.get('provider') == 'prime-inference', state
         selected = model.get('id')
         observed['selected_model'] = selected
@@ -240,7 +266,9 @@ def capture(binary, label, scenario, root, directory, observed):
         observed['available_ids'] = [row['id'] for row in models['models']
                                      if row.get('provider') == 'prime-inference']
         after_refresh = client.call('get_connection_state', activeSessionId=active)
-        assert after_refresh.get('model', {}).get('id') == selected, 'catalog read retargeted the active model'
+        refreshed_model = connection_model(after_refresh) or {}
+        assert (refreshed_model.get('provider'), refreshed_model.get('id')) == (
+            model['provider'], selected), 'catalog read retargeted the active model'
         validate_observation(label, scenario, observed)
         observed['warning_present_after_resize'] = observed['frames']['80x28']['warning_prefix_count'] == 1
         observed['capture_verified'] = True
