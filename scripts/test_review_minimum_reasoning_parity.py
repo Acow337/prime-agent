@@ -1,101 +1,109 @@
 #!/usr/bin/env python3
-"""Regress temporary-directory teardown racing fixture-owned workers."""
-import os
+"""Keep actual behavior gates and graceful fixture cleanup inseparable."""
 import json
-import tempfile
 from pathlib import Path
-from types import SimpleNamespace
+import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from review_minimum_reasoning_parity import fixture_processes, wait_fixture_gone, summarize_branch
+from review_goal_fixture_lifecycle import OwnedProcesses
+from review_minimum_reasoning_parity import MARKER, run_case, summarize_branch
 
 
 class CleanupTests(unittest.TestCase):
-    def processes(self, env, identities, command=b'/fixture/binary\0'):
-        with patch('pathlib.Path.iterdir', return_value=[Path('/proc/789')]), \
-                patch('pathlib.Path.stat', return_value=SimpleNamespace(st_uid=os.getuid())), \
-                patch('pathlib.Path.read_bytes', side_effect=[command, env]), \
-                patch('review_minimum_reasoning_parity.process_identity', side_effect=identities):
-            return fixture_processes('fixture', Path('/fixture/binary'))
-
-    def test_unrelated_runner_service_does_not_require_environment_access(self):
-        with patch('pathlib.Path.iterdir', return_value=[Path('/proc/789')]), \
-                patch('pathlib.Path.stat', return_value=SimpleNamespace(st_uid=os.getuid())), \
-                patch('pathlib.Path.read_bytes', side_effect=[b'/runner/Runner.Worker\0', PermissionError('denied')]) as reads, \
-                patch('review_minimum_reasoning_parity.process_identity', return_value=('proc:123', 'S')):
-            self.assertEqual(fixture_processes('fixture', Path('/fixture/binary')), [])
-            self.assertEqual(reads.call_count, 1)
-
-    def test_matching_fixture_waits_despite_process_state_change(self):
-        self.assertEqual(self.processes(b'PA_MINIMUM_REASONING_FIXTURE_ID=fixture\0',
-            [('proc:123', 'S'), ('proc:123', 'R')]), [(789, 'proc:123')])
-
-    def test_exact_tagged_python_repl_is_owned(self):
-        self.assertEqual(self.processes(b'PA_MINIMUM_REASONING_FIXTURE_ID=fixture\0',
-            [('proc:123', 'S'), ('proc:123', 'S')], b'/venv/bin/python3\0-m\0rlm.repl\0'),
-            [(789, 'proc:123')])
-
-    def test_foreign_and_partial_fixture_tags_are_not_owned(self):
-        for tag in ('foreign', 'fixture-other'):
-            self.assertEqual(self.processes(('PA_MINIMUM_REASONING_FIXTURE_ID=' + tag).encode(),
-                [('proc:123', 'S')]), [])
-
-    def test_recycled_and_zombie_processes_are_gone(self):
-        for current in [('proc:new', 'S'), ('proc:123', 'Z')]:
-            self.assertEqual(self.processes(b'PA_MINIMUM_REASONING_FIXTURE_ID=fixture\0',
-                [('proc:123', 'S'), current]), [])
-
-    def test_exit_between_proc_reads_is_gone(self):
-        for error in (FileNotFoundError(), ProcessLookupError()):
-            self.assertEqual(self.processes(b'', [error]), [])
-
-    def test_unreadable_same_user_process_does_not_claim_cleanup(self):
-        with self.assertRaises(PermissionError):
-            self.processes(PermissionError('denied'), [('proc:123', 'S')])
-
-    def test_branch_shutdown_ack_and_control_close_precede_process_wait(self):
+    def exercise(self, root, *, cleanup_failure=False, controls=True, durable=True):
+        library = root / 'library'
+        for skill in ('compact', 'refine'):
+            path = library / 'skills' / skill / 'src' / skill / '__init__.py'
+            path.parent.mkdir(parents=True)
+            path.touch()
+        case = root / 'case'
         events = []
-        connection, process = MagicMock(), MagicMock(returncode=0)
-        process.poll.return_value = None
-        connection.close.side_effect = lambda: events.append('control_closed')
-        process.wait.side_effect = lambda **kwargs: events.append('process_wait')
-        reader = connection.makefile.return_value.__enter__.return_value
-        reader.readline.side_effect = [json.dumps(row).encode() for row in (
-            {'type': 'daemon_hello', 'protocol': {'name': 'prime-agent.daemon', 'version': 7}},
-            {'type': 'response', 'id': 'create', 'success': True, 'data': {'id': 'active'}},
-            {'type': 'response', 'id': 'branch', 'success': True, 'data': {}},
-            {'type': 'response', 'id': 'shutdown', 'success': True, 'data': {}},
-        )]
-        with tempfile.TemporaryDirectory() as temp, \
-                patch('review_minimum_reasoning_parity.subprocess.Popen', return_value=process), \
-                patch('review_minimum_reasoning_parity.socket.socket', return_value=connection), \
-                patch('review_minimum_reasoning_parity.stop'):
-            root = Path(temp)
-            session = root / 'session.jsonl'
-            session.write_text(json.dumps({'type': 'message', 'id': 'assistant',
+        server, process, client, scope, thread = (MagicMock() for _ in range(5))
+        process.returncode = 0
+        scope.targets = {}
+        scope.errors = []
+        scope.live.return_value = []
+        thread.is_alive.return_value = False
+        server.server_address = ('127.0.0.1', 1234)
+        server.error = None
+        server.requests = [
+            {'auxiliary': False, 'body': {'messages': [
+                {'role': 'tool', 'content': MARKER + '{"scheduled":true}'}]}},
+            {'auxiliary': True, 'body': {'enable_thinking': controls}},
+        ]
+        def spawn(*args, **kwargs):
+            (case / 'sessions' / 'fixture.jsonl').write_text(
+                json.dumps({'type': 'compaction'}) if durable else '')
+            return process
+        def command(kind, **kwargs):
+            events.append(kind)
+            return {'id': 'active'} if kind == 'create' else {}
+        client.call.side_effect = command
+        client.close.side_effect = lambda: events.append('control_closed')
+        process.wait.side_effect = lambda **kwargs: events.append('supervisor_exit')
+        if cleanup_failure:
+            scope.wait_gone.side_effect = [AssertionError('owned process remained'), None]
+        else:
+            scope.wait_gone.side_effect = lambda timeout: events.append('owned_processes_exited')
+        observation = {}
+        with patch.dict('os.environ', {'PI_PACKAGE_DIR': str(library)}), \
+                patch('review_minimum_reasoning_parity.Server', return_value=server), \
+                patch('review_minimum_reasoning_parity.threading.Thread', return_value=thread), \
+                patch('review_minimum_reasoning_parity.invoke', return_value={'exit_code': 0}), \
+                patch('review_minimum_reasoning_parity.subprocess.Popen', side_effect=spawn), \
+                patch('review_minimum_reasoning_parity.KernelClient', return_value=client), \
+                patch('review_minimum_reasoning_parity.OwnedProcesses', return_value=scope):
+            result = run_case(Path('/fixture/binary'), 'rust', 'compact', case, observation)
+        return result, observation, events
+
+    def test_daemon_commands_and_owned_exit_precede_directory_removal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result, observation, events = self.exercise(Path(temp))
+            self.assertEqual(result, {'scheduled': True, 'completed': True})
+            self.assertTrue(observation['cleanup_verified'])
+            self.assertEqual(events, ['create', 'prompt_and_wait', 'prompt_and_wait',
+                'shutdown', 'control_closed', 'supervisor_exit', 'owned_processes_exited',
+                'control_closed'])
+
+    def test_fallback_reaping_cannot_turn_failed_graceful_cleanup_green(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(AssertionError, 'fixture cleanup failed: owned process remained'):
+                self.exercise(Path(temp), cleanup_failure=True)
+
+    def test_cleanup_cannot_hide_incorrect_thinking_controls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(AssertionError, 'expected'):
+                self.exercise(Path(temp), controls=False)
+
+    def test_cleanup_cannot_hide_missing_durable_outcome(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(AssertionError, 'no durable completed compact outcome'):
+                self.exercise(Path(temp), durable=False)
+
+    def test_branch_uses_live_session_and_real_assistant_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'session.jsonl'
+            path.write_text(json.dumps({'type': 'message', 'id': 'assistant',
                 'message': {'role': 'assistant'}}))
-            summarize_branch(Path('/fixture/binary'), root, root, {}, session, {})
-        commands = [json.loads(call.args[0])['command']
-                    for call in connection.sendall.call_args_list]
-        self.assertEqual(commands[-1], {'type': 'shutdown', 'force': True})
-        self.assertEqual(events, ['control_closed', 'process_wait'])
+            client = MagicMock()
+            client.call.return_value = {}
+            summarize_branch(client, 'active', path)
+            client.call.assert_called_once_with('navigate_tree', timeout_seconds=60,
+                activeSessionId='active', targetId='assistant', summarize=True,
+                customInstructions='Verify mandatory thinking')
+            client.call.return_value = {'cancelled': True}
+            with self.assertRaises(AssertionError):
+                summarize_branch(client, 'active', path)
 
-    def test_waits_for_observed_exit_before_returning(self):
-        event = MagicMock()
-        with patch('review_minimum_reasoning_parity.fixture_processes',
-                   side_effect=[[(789, 'proc:123')], []]) as processes, \
-                patch('review_minimum_reasoning_parity.threading.Event', return_value=event):
-            wait_fixture_gone('fixture', Path('/fixture/binary'))
-            self.assertEqual(processes.call_count, 2)
-            event.wait.assert_called_once_with(0.025)
-
-    def test_live_process_at_deadline_remains_a_failure(self):
-        with patch('review_minimum_reasoning_parity.fixture_processes',
-                   return_value=[(789, 'proc:123')]), \
-                patch('review_minimum_reasoning_parity.time.monotonic', side_effect=[0, 36]):
-            with self.assertRaisesRegex(AssertionError, 'processes remained'):
-                wait_fixture_gone('fixture', Path('/fixture/binary'))
+    def test_proc_exit_race_is_gone_but_permission_errors_still_fail(self):
+        scope = OwnedProcesses(Path('/fixture/binary'), Path('/fixture'), Path('/fixture/d.sock'))
+        scope.targets = {789: 'proc:123'}
+        with patch('review_goal_fixture_lifecycle.process_identity', side_effect=ProcessLookupError()):
+            self.assertEqual(scope.live(), [])
+        with patch('review_goal_fixture_lifecycle.process_identity', side_effect=PermissionError()):
+            with self.assertRaises(PermissionError):
+                scope.live()
 
 
 if __name__ == '__main__':

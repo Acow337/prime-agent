@@ -6,7 +6,9 @@ cells through their offered REPL tool. Only auxiliary request thinking controls
 are compared, recording TS summary thinking-off as the intended correction:
 prompt wording, token budgets, and whole UI/frame parity are not
 claimed. Branch summary uses an owned daemon and its real navigate_tree command.
-All providers, homes, sessions, and subprocesses belong to this fixture.
+Both binaries use the same raw daemon commands; the owned supervisor shuts down
+workers and kernels before temporary files are removed. All providers, homes,
+sessions, and subprocesses belong to this fixture.
 """
 import argparse
 import http.server
@@ -14,17 +16,14 @@ import json
 import os
 from pathlib import Path
 import sys
-import socket
 import subprocess
-import time
 import tempfile
 import threading
-import uuid
 
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
 from review_restore_notice_parity import invoke, probe_from
-from review_draft_disconnect_parity import stop
-from review_kernel_env_parity import process_identity
+from review_kernel_env_parity import KernelClient
+from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
 
 MARKER = 'MINIMUM_REASONING_RESULT='
 
@@ -98,106 +97,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(wire.encode())
 
 
-def fixture_processes(fixture, binary):
-    """Read only exact fixture-tagged live processes; never signal by PID."""
-    alive = []
-    marker = b'PA_MINIMUM_REASONING_FIXTURE_ID=' + fixture.encode()
-    for entry in Path('/proc').iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if entry.stat().st_uid != os.getuid():
-                continue
-            pid = int(entry.name)
-            identity, state = process_identity(pid)
-            command = (entry / 'cmdline').read_bytes().split(b'\0')
-            # The runner also owns non-dumpable service processes whose environ
-            # is unreadable. They cannot belong to this binary/REPL fixture.
-            if command[0] != str(binary).encode() and not (
-                    b'python' in Path(command[0].decode()).name.encode()
-                    and command[1:3] == [b'-m', b'rlm.repl']):
-                continue
-            if state != 'Z' and marker in (entry / 'environ').read_bytes().split(b'\0'):
-                # A recycled PID must not be attributed to this fixture.
-                current, current_state = process_identity(pid)
-                if current == identity and current_state != 'Z':
-                    alive.append((pid, identity))
-        except (FileNotFoundError, ProcessLookupError):
-            pass  # Exit between proc reads is successful teardown.
-    return alive
-
-
-def wait_fixture_gone(fixture, binary):
-    deadline = time.monotonic() + 35
-    while True:
-        alive = fixture_processes(fixture, binary)
-        if not alive:
-            return
-        if time.monotonic() >= deadline:
-            raise AssertionError('owned fixture processes remained after shutdown: ' + str(alive))
-        threading.Event().wait(0.025)
-
-
-def summarize_branch(binary, root, cwd, env, session_file, observation):
+def summarize_branch(client, active, session_file):
     entries = [json.loads(line) for line in session_file.read_text().splitlines()]
     target = next(row['id'] for row in entries
                   if row.get('type') == 'message' and row.get('message', {}).get('role') == 'assistant')
-    path = root / 'daemon.sock'
-    with (root / 'daemon.log').open('wb') as log:
-        process = subprocess.Popen([str(binary), '--mode', 'daemon', '--daemon-socket', str(path)],
-                                   cwd=cwd, env=env, stdout=log, stderr=log, start_new_session=True)
-        connection = None
-        try:
-            deadline = time.monotonic() + 35
-            while time.monotonic() < deadline:
-                assert process.poll() is None, 'owned daemon exited before socket readiness'
-                try:
-                    connection = socket.socket(socket.AF_UNIX)
-                    connection.settimeout(60)
-                    connection.connect(str(path))
-                    break
-                except (FileNotFoundError, ConnectionRefusedError):
-                    connection.close()
-                    connection = None
-                    threading.Event().wait(0.05)
-            assert connection is not None, 'owned daemon socket never became ready'
-            with connection.makefile('rb') as reader:
-                hello = json.loads(reader.readline())
-                assert hello.get('type') == 'daemon_hello', hello
-                observation['daemon_hello'] = hello
-                def command(identifier, payload):
-                    connection.sendall((json.dumps({'type': 'command', 'id': identifier,
-                        'protocol': hello['protocol'], 'command': payload}) + '\n').encode())
-                    deadline = time.monotonic() + 60
-                    while time.monotonic() < deadline:
-                        line = reader.readline()
-                        assert line, 'owned daemon closed before response'
-                        row = json.loads(line)
-                        observation.setdefault('daemon_wire', []).append(row)
-                        if row.get('type') == 'response' and row.get('id') == identifier:
-                            assert row.get('success') is True, row
-                            return row
-                    raise TimeoutError('no response for ' + identifier)
-                created = command('create', {'type': 'create', 'sessionPath': str(session_file),
-                    'config': {'cwd': str(cwd), 'sessionDir': str(session_file.parent)}})
-                active = created['data'].get('id') or created['data'].get('sessionId')
-                assert active, created
-                moved = command('branch', {'type': 'navigate_tree', 'activeSessionId': active,
-                    'targetId': target, 'summarize': True,
-                    'customInstructions': 'Verify mandatory thinking'})
-                assert moved.get('data', {}).get('cancelled') is not True, moved
-                # Stop workers through the supervisor before waiting for exit.
-                # Killing only the supervisor leaves detached workers writing.
-                command('shutdown', {'type': 'shutdown', 'force': True})
-        finally:
-            if connection is not None:
-                connection.close()
-            try:
-                process.wait(timeout=15)
-                assert process.returncode == 0, 'owned daemon failed graceful shutdown'
-            finally:
-                stop(process)
-            observation['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')
+    moved = client.call('navigate_tree', timeout_seconds=60, activeSessionId=active,
+                        targetId=target, summarize=True,
+                        customInstructions='Verify mandatory thinking')
+    assert moved.get('cancelled') is not True, moved
 
 
 def run_case(binary, label, scenario, root, observation):
@@ -210,13 +117,13 @@ def run_case(binary, label, scenario, root, observation):
     paths = sorted(str(path) for path in library.glob('*/src') if path.is_dir())
     for skill in ('compact', 'refine'):
         assert (library / skill / 'src' / skill / '__init__.py').is_file(), skill + ' skill missing'
-    fixture = uuid.uuid4().hex
-    env.update(PA_MINIMUM_REASONING_FIXTURE_ID=fixture, HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
+    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent),
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(sessions),
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),
                XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'),
                PYTHONPATH=os.pathsep.join(paths))
+    env[TAG] = str(root)
     if label == 'ts':
         env['PI_PACKAGE_DIR'] = os.environ['PI_PACKAGE_DIR']
     server = Server(scenario)
@@ -240,18 +147,34 @@ def run_case(binary, label, scenario, root, observation):
         'prewarmPythonKernel': False, 'compaction': {'enabled': False, 'keepRecentTokens': 100,
                                                    'reserveTokens': 1024},
         'autoRefine': {'enabled': False}}))
-    command = [str(binary), '--mode', 'json', '--provider', 'fixture', '--model',
-               'mandatory-fixture', '--thinking', 'low', '--session-dir', str(sessions),
-               'Seed the fixture.', 'Schedule the requested auxiliary operation.']
+    socket_path = root / 'daemon.sock'
+    scope = OwnedProcesses(binary, root, socket_path)
+    process = client = None
+    primary_error = None
+    log = (root / 'daemon.log').open('wb')
     try:
         observation['version'] = invoke([str(binary), '--version'], cwd, env)
-        observation['process'] = invoke(command, cwd, env)
+        command = [str(binary), '--mode', 'daemon', '--daemon-socket', str(socket_path)]
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log,
+                                   stderr=log, start_new_session=True)
+        scope.register(process, command)
+        client = KernelClient(socket_path, process)
+        observation['daemon_hello'] = client.hello
+        created = client.call('create', config={
+            'cwd': str(cwd), 'agentDir': str(agent), 'sessionDir': str(sessions),
+            'provider': 'fixture', 'model': 'mandatory-fixture', 'thinkingLevel': 'low',
+            'telemetryDisabled': True, 'noExtensions': True, 'noContextFiles': True})
+        active = created.get('activeSessionId') or created.get('id')
+        assert active, created
+        for message in ('Seed the fixture.', 'Schedule the requested auxiliary operation.'):
+            client.call('prompt_and_wait', timeout_seconds=90,
+                        activeSessionId=active, message=message)
         assert server.error is None, server.error
         bodies = [row['body'] for row in server.requests]
         if scenario == 'branch':
             session_files = list(sessions.rglob('*.jsonl'))
             assert len(session_files) == 1, session_files
-            summarize_branch(binary, root, cwd, env, session_files[0], observation)
+            summarize_branch(client, active, session_files[0])
             scheduled = {'scheduled': True}
         else:
             scheduled = probe_from(bodies, MARKER)
@@ -273,16 +196,24 @@ def run_case(binary, label, scenario, root, observation):
         assert outcomes, 'no durable completed ' + scenario + ' outcome'
         observation.update(controls=controls, outcome_count=len(outcomes), tool_name=server.tool_name)
         return {'scheduled': scheduled['scheduled'], 'completed': bool(outcomes)}
+    except BaseException as error:
+        primary_error = error
+        observation['primary_error'] = str(error)
+        raise
     finally:
         observation['requests'] = server.requests
+        observation['daemon_wire'] = list(client.wire) if client else []
+        # CLI exit leaves the TS kernel alive. Owning the supervisor gives both
+        # binaries the same acknowledged shutdown before temporary files vanish.
+        finish(scope, client, process, observation)
+        log.close()
+        observation['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')[-6000:]
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
         assert not thread.is_alive(), 'fixture provider did not stop'
-        # CLI exit and shutdown acknowledgement precede detached worker exit.
-        # Wait for observable ownership to disappear before rmtree starts.
-        wait_fixture_gone(fixture, binary)
-        observation['cleanup_verified'] = True
+        if not observation['cleanup_verified'] and primary_error is None:
+            raise AssertionError('fixture cleanup failed: ' + observation['cleanup_error'])
 
 
 def main():
