@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from review_goal_fixture_lifecycle import OwnedProcesses
-from review_minimum_reasoning_parity import MARKER, run_case, summarize_branch
+from review_minimum_reasoning_parity import MARKER, run_case, summarize_branch, wait_for_operation
 
 
 class CleanupTests(unittest.TestCase):
@@ -77,9 +77,46 @@ class CleanupTests(unittest.TestCase):
                 self.exercise(Path(temp), controls=False)
 
     def test_cleanup_cannot_hide_missing_durable_outcome(self):
-        with tempfile.TemporaryDirectory() as temp:
-            with self.assertRaisesRegex(AssertionError, 'no durable completed compact outcome'):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('review_minimum_reasoning_parity.time.monotonic', side_effect=[0, 91]):
+            with self.assertRaisesRegex(AssertionError, 'timed out waiting.*durable compact outcome'):
                 self.exercise(Path(temp), durable=False)
+
+    def test_turn_idle_does_not_end_wait_before_continuation_probe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sessions = Path(temp)
+            (sessions / 'session.jsonl').write_text(json.dumps({'type': 'compaction'}))
+            server = MagicMock(error=None, requests=[])
+            event = MagicMock()
+            event.wait.side_effect = lambda _timeout: server.requests.append({'body': {
+                'messages': [{'role': 'tool', 'content': MARKER + '{"scheduled":true}'}]}})
+            with patch('review_minimum_reasoning_parity.threading.Event', return_value=event):
+                self.assertEqual(wait_for_operation(server, 'compact', sessions),
+                    ({'scheduled': True}, [{'type': 'compaction'}]))
+            event.wait.assert_called_once_with(0.025)
+
+    def test_probe_does_not_end_wait_before_durable_operation_outcome(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sessions = Path(temp)
+            server = MagicMock(error=None, requests=[{'body': {'messages': [
+                {'role': 'tool', 'content': MARKER + '{"scheduled":true}'}]}}])
+            event = MagicMock()
+            event.wait.side_effect = lambda _timeout: (sessions / 'session.jsonl').write_text(
+                json.dumps({'type': 'refinement_outcome', 'customType': 'refinement_outcome'}))
+            with patch('review_minimum_reasoning_parity.threading.Event', return_value=event):
+                scheduled, outcomes = wait_for_operation(server, 'refine', sessions)
+            self.assertEqual(scheduled, {'scheduled': True})
+            self.assertEqual(len(outcomes), 1)
+            event.wait.assert_called_once_with(0.025)
+
+    def test_invalid_current_probe_is_not_retried_until_it_disappears(self):
+        with tempfile.TemporaryDirectory() as temp:
+            server = MagicMock(error=None, requests=[{'body': {'messages': [
+                {'role': 'tool', 'content': MARKER + 'invalid-json'}]}}])
+            with patch('review_minimum_reasoning_parity.threading.Event') as event:
+                with self.assertRaises(json.JSONDecodeError):
+                    wait_for_operation(server, 'compact', Path(temp))
+                event.assert_not_called()
 
     def test_branch_uses_live_session_and_real_assistant_target(self):
         with tempfile.TemporaryDirectory() as temp:

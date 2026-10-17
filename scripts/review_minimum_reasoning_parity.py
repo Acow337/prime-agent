@@ -19,9 +19,10 @@ import sys
 import subprocess
 import tempfile
 import threading
+import time
 
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
-from review_restore_notice_parity import invoke, probe_from
+from review_restore_notice_parity import invoke, probe_from, texts
 from review_kernel_env_parity import KernelClient
 from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
 
@@ -107,6 +108,32 @@ def summarize_branch(client, active, session_file):
     assert moved.get('cancelled') is not True, moved
 
 
+def wait_for_operation(server, scenario, sessions, timeout_seconds=90):
+    """Turn-idle can precede the deferred operation and its continuation."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        assert server.error is None, server.error
+        bodies = [row['body'] for row in server.requests]
+        probe_ready = any(line.startswith(MARKER)
+            for body in bodies for message in body.get('messages', [])
+            if message.get('role') == 'tool'
+            for text in texts(message.get('content')) for line in text.splitlines())
+        scheduled = ({'scheduled': True} if scenario == 'branch' else
+                     probe_from(bodies, MARKER) if probe_ready else None)
+        entries = [json.loads(line) for path in sessions.rglob('*.jsonl')
+                   for line in path.read_text().splitlines() if line.strip()]
+        outcomes = [entry for entry in entries if
+                    (scenario == 'compact' and entry.get('type') == 'compaction') or
+                    (scenario == 'refine' and entry.get('customType') == 'refinement_outcome') or
+                    (scenario == 'branch' and entry.get('type') == 'branch_summary')]
+        if scheduled is not None and outcomes:
+            return scheduled, outcomes
+        if time.monotonic() >= deadline:
+            raise AssertionError('timed out waiting for current scheduled probe and durable '
+                                 + scenario + ' outcome')
+        threading.Event().wait(0.025)
+
+
 def run_case(binary, label, scenario, root, observation):
     for name in ('home', 'agent', 'sessions', 'work', 'tmp'):
         (root / name).mkdir(parents=True)
@@ -170,14 +197,11 @@ def run_case(binary, label, scenario, root, observation):
             client.call('prompt_and_wait', timeout_seconds=90,
                         activeSessionId=active, message=message)
         assert server.error is None, server.error
-        bodies = [row['body'] for row in server.requests]
         if scenario == 'branch':
             session_files = list(sessions.rglob('*.jsonl'))
             assert len(session_files) == 1, session_files
             summarize_branch(client, active, session_files[0])
-            scheduled = {'scheduled': True}
-        else:
-            scheduled = probe_from(bodies, MARKER)
+        scheduled, outcomes = wait_for_operation(server, scenario, sessions)
         observation['scheduled'] = scheduled
         assert scheduled.get('scheduled') is True, scheduled
         auxiliary = [row['body'] for row in server.requests if row['auxiliary']]
@@ -186,14 +210,6 @@ def run_case(binary, label, scenario, root, observation):
                     'reasoning', 'chat_template_kwargs') if key in body} for body in auxiliary]
         expected = {'enable_thinking': label == 'rust' or scenario == 'refine'}
         assert all(control == expected for control in controls), {'expected': expected, 'actual': controls}
-        # A scheduled cell alone is insufficient: check the persisted operation result.
-        entries = [json.loads(line) for path in sessions.rglob('*.jsonl')
-                   for line in path.read_text().splitlines() if line.strip()]
-        outcomes = [entry for entry in entries if
-                    (scenario == 'compact' and entry.get('type') == 'compaction') or
-                    (scenario == 'refine' and entry.get('customType') == 'refinement_outcome') or
-                    (scenario == 'branch' and entry.get('type') == 'branch_summary')]
-        assert outcomes, 'no durable completed ' + scenario + ' outcome'
         observation.update(controls=controls, outcome_count=len(outcomes), tool_name=server.tool_name)
         return {'scheduled': scheduled['scheduled'], 'completed': bool(outcomes)}
     except BaseException as error:
