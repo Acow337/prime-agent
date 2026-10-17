@@ -120,13 +120,26 @@ def wait_for_operation(server, scenario, sessions, timeout_seconds=90):
             for text in texts(message.get('content')) for line in text.splitlines())
         scheduled = ({'scheduled': True} if scenario == 'branch' else
                      probe_from(bodies, MARKER) if probe_ready else None)
-        entries = [json.loads(line) for path in sessions.rglob('*.jsonl')
-                   for line in path.read_text().splitlines() if line.strip()]
+        entries = []
+        complete = True
+        for path in sessions.rglob('*.jsonl'):
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                complete = False  # Listed inode retired before the read.
+                break
+            # Both writers terminate persisted records with a newline. Do not
+            # decode an in-flight tail, which may even split a UTF-8 character.
+            # Malformed complete records and other I/O errors remain failures.
+            if data and not data.endswith(b'\n'):
+                complete = False
+                break
+            entries.extend(json.loads(line) for line in data.splitlines() if line.strip())
         outcomes = [entry for entry in entries if
                     (scenario == 'compact' and entry.get('type') == 'compaction') or
                     (scenario == 'refine' and entry.get('customType') == 'refinement_outcome') or
                     (scenario == 'branch' and entry.get('type') == 'branch_summary')]
-        if scheduled is not None and outcomes:
+        if scheduled is not None and complete and outcomes:
             return scheduled, outcomes
         if time.monotonic() >= deadline:
             raise AssertionError('timed out waiting for current scheduled probe and durable '

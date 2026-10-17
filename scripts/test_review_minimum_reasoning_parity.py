@@ -34,7 +34,7 @@ class CleanupTests(unittest.TestCase):
         ]
         def spawn(*args, **kwargs):
             (case / 'sessions' / 'fixture.jsonl').write_text(
-                json.dumps({'type': 'compaction'}) if durable else '')
+                json.dumps({'type': 'compaction'}) + '\n' if durable else '')
             return process
         def command(kind, **kwargs):
             events.append(kind)
@@ -85,7 +85,7 @@ class CleanupTests(unittest.TestCase):
     def test_turn_idle_does_not_end_wait_before_continuation_probe(self):
         with tempfile.TemporaryDirectory() as temp:
             sessions = Path(temp)
-            (sessions / 'session.jsonl').write_text(json.dumps({'type': 'compaction'}))
+            (sessions / 'session.jsonl').write_text(json.dumps({'type': 'compaction'}) + '\n')
             server = MagicMock(error=None, requests=[])
             event = MagicMock()
             event.wait.side_effect = lambda _timeout: server.requests.append({'body': {
@@ -102,7 +102,7 @@ class CleanupTests(unittest.TestCase):
                 {'role': 'tool', 'content': MARKER + '{"scheduled":true}'}]}}])
             event = MagicMock()
             event.wait.side_effect = lambda _timeout: (sessions / 'session.jsonl').write_text(
-                json.dumps({'type': 'refinement_outcome', 'customType': 'refinement_outcome'}))
+                json.dumps({'type': 'refinement_outcome', 'customType': 'refinement_outcome'}) + '\n')
             with patch('review_minimum_reasoning_parity.threading.Event', return_value=event):
                 scheduled, outcomes = wait_for_operation(server, 'refine', sessions)
             self.assertEqual(scheduled, {'scheduled': True})
@@ -116,6 +116,48 @@ class CleanupTests(unittest.TestCase):
             with patch('review_minimum_reasoning_parity.threading.Event') as event:
                 with self.assertRaises(json.JSONDecodeError):
                     wait_for_operation(server, 'compact', Path(temp))
+                event.assert_not_called()
+
+    def test_torn_utf8_tail_waits_for_a_complete_session_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sessions = Path(temp)
+            path = sessions / 'session.jsonl'
+            path.write_bytes(b'{"type":"compaction","note":"\xc3')
+            server = MagicMock(error=None, requests=[{'body': {'messages': [
+                {'role': 'tool', 'content': MARKER + '{"scheduled":true}'}]}}])
+            event = MagicMock()
+            event.wait.side_effect = lambda _timeout: path.write_text('{"type":"compaction"}\n')
+            with patch('review_minimum_reasoning_parity.threading.Event', return_value=event):
+                self.assertEqual(wait_for_operation(server, 'compact', sessions),
+                    ({'scheduled': True}, [{'type': 'compaction'}]))
+            event.wait.assert_called_once_with(0.025)
+
+    def test_file_replaced_between_listing_and_read_is_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sessions = Path(temp)
+            (sessions / 'session.jsonl').write_text('{"type":"compaction"}\n')
+            server = MagicMock(error=None, requests=[{'body': {'messages': [
+                {'role': 'tool', 'content': MARKER + '{"scheduled":true}'}]}}])
+            event = MagicMock()
+            with patch('pathlib.Path.read_bytes', side_effect=[FileNotFoundError(), b'{"type":"compaction"}\n']), \
+                    patch('review_minimum_reasoning_parity.threading.Event', return_value=event):
+                self.assertEqual(wait_for_operation(server, 'compact', sessions),
+                    ({'scheduled': True}, [{'type': 'compaction'}]))
+            event.wait.assert_called_once_with(0.025)
+
+    def test_complete_malformed_record_and_permission_errors_are_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sessions = Path(temp)
+            path = sessions / 'session.jsonl'
+            path.write_text('invalid-json\n')
+            server = MagicMock(error=None, requests=[{'body': {'messages': [
+                {'role': 'tool', 'content': MARKER + '{"scheduled":true}'}]}}])
+            with patch('review_minimum_reasoning_parity.threading.Event') as event:
+                with self.assertRaises(json.JSONDecodeError):
+                    wait_for_operation(server, 'compact', sessions)
+                with patch('pathlib.Path.read_bytes', side_effect=PermissionError()):
+                    with self.assertRaises(PermissionError):
+                        wait_for_operation(server, 'compact', sessions)
                 event.assert_not_called()
 
     def test_branch_uses_live_session_and_real_assistant_target(self):
