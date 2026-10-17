@@ -58,7 +58,7 @@ class CaptureGuards(unittest.TestCase):
     def test_svg_escapes_real_cells_and_retains_matched_dimensions(self):
         screen = Screen(120, 40)
         screen.feed(b'<fixture>&')
-        terminal = type('CapturedTerminal', (), {'screen': screen})()
+        terminal = type('CapturedTerminal', (), {'screen': screen, 'raw': b'<fixture>&'})()
         with tempfile.TemporaryDirectory() as temp:
             frame = write_frame(Path(temp), 'capture', terminal)
             self.assertEqual((frame['columns'], frame['rows']), (120, 40))

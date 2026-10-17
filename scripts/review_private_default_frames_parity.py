@@ -101,6 +101,7 @@ class Terminal:
             stdout=slave, stderr=slave, start_new_session=True)
         os.close(slave)
         self.screen, self.raw = Screen(120, 40), bytearray()
+        self.resize_events = [{'raw_offset': 0, 'columns': 120, 'rows': 40}]
 
     def pump(self):
         if select.select([self.master], [], [], 0.05)[0]:
@@ -122,6 +123,7 @@ class Terminal:
         raise AssertionError('TUI readiness timed out: ' + description)
 
     def resize(self, columns, rows):
+        self.resize_events.append({'raw_offset': len(self.raw), 'columns': columns, 'rows': rows})
         self.screen = Screen(columns, rows)
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack('HHHH', rows, columns, 0, 0))
         os.kill(self.process.pid, signal.SIGWINCH)
@@ -144,6 +146,7 @@ def write_frame(directory, name, terminal):
         '<rect width="100%" height="100%" fill="#111"/><text fill="#eee" '
         'font-family="monospace" font-size="16" xml:space="preserve">' + lines + '</text></svg>')
     return {'columns': width, 'rows': height, 'text': text,
+            'raw_end_offset': len(terminal.raw),
             'warning_prefix_count': text.count('Default model prime-inference/'),
             'input_preserved': INPUT in text}
 
@@ -213,13 +216,9 @@ def capture(binary, label, scenario, root, directory, observed):
         assert isinstance(model, dict) and model.get('provider') == 'prime-inference', state
         selected = model.get('id')
         observed['selected_model'] = selected
-        models = client.call('get_available_models', activeSessionId=active)
-        observed['available_ids'] = [row['id'] for row in models['models']
-                                     if row.get('provider') == 'prime-inference']
-        after_refresh = client.call('get_connection_state', activeSessionId=active)
-        assert after_refresh.get('model', {}).get('id') == selected, 'catalog read retargeted the active model'
         summary = attached.get('snapshot', {}).get('summary', {})
         observed['fallback_message'] = summary.get('modelFallbackMessage')
+        terminal.wait('visible startup frame', lambda: bool(terminal.screen.text().strip()))
         os.write(terminal.master, INPUT.encode())
         expected_warning = label == 'rust' and scenario == 'unavailable'
         terminal.wait('editor and startup warning', lambda: INPUT in terminal.screen.text()
@@ -228,12 +227,20 @@ def capture(binary, label, scenario, root, directory, observed):
         for columns, rows in DIMENSIONS:
             if terminal.screen.width != columns:
                 terminal.resize(columns, rows)
-                terminal.wait('resized editor', lambda: INPUT in terminal.screen.text())
+                os.write(terminal.master, b'_NARROW')
+                terminal.wait('resized editor', lambda: INPUT + '_NARROW' in terminal.screen.text())
             frame = write_frame(directory, f'{columns}x{rows}', terminal)
             message = observed['fallback_message']
             frame['warning_text_complete'] = not message or ''.join(message.split()) in ''.join(frame['text'].split())
             frame['selected_model_name_visible'] = bool(model.get('name')) and model['name'] in frame['text']
             observed['frames'][f'{columns}x{rows}'] = frame
+        # Observe availability only after capturing natural startup. Refreshing
+        # metadata beforehand could itself trigger a redraw or clear a notice.
+        models = client.call('get_available_models', activeSessionId=active)
+        observed['available_ids'] = [row['id'] for row in models['models']
+                                     if row.get('provider') == 'prime-inference']
+        after_refresh = client.call('get_connection_state', activeSessionId=active)
+        assert after_refresh.get('model', {}).get('id') == selected, 'catalog read retargeted the active model'
         validate_observation(label, scenario, observed)
         observed['warning_present_after_resize'] = observed['frames']['80x28']['warning_prefix_count'] == 1
         observed['capture_verified'] = True
@@ -244,6 +251,7 @@ def capture(binary, label, scenario, root, directory, observed):
     finally:
         if terminal:
             (directory / 'terminal.ansi').write_bytes(terminal.raw)
+            observed['resize_events'] = terminal.resize_events
             if 'frames' not in observed:
                 observed['last_frame'] = write_frame(directory, 'failure', terminal)
             terminal.close()
