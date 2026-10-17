@@ -251,7 +251,7 @@ mod tests {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (engine, _dir) = faux_engine_with_settings(
+        let (mut engine, dir) = faux_engine_with_settings(
             &json!({"responses": [
                 {"text": "seed reply"},
                 {"text": json!({
@@ -263,6 +263,7 @@ mod tests {
             ]}),
             1,
         );
+        engine.config.session_dir = Some(dir.path().join("sessions"));
         admit(&engine, "seed turn".to_string(), &mut Vec::new());
         {
             let guard = engine.session.blocking_lock();
