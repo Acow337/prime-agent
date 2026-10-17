@@ -283,12 +283,10 @@ mod tests {
         let outcomes: Vec<_> = events
             .iter()
             .enumerate()
-            .filter_map(|(index, event)| match event {
-                EngineEvent::CustomMessage(row) if row["customType"] == "refinement_outcome" => {
-                    Some(index)
-                }
-                _ => None,
+            .filter(|(_, event)| {
+                matches!(event, EngineEvent::CustomMessage(row) if row["customType"] == "refinement_outcome")
             })
+            .map(|(index, _)| index)
             .collect();
         assert_eq!(
             outcomes.len(),
