@@ -258,9 +258,10 @@ impl CompactionManager {
     fn emit_session_event(&self, mut event: Value) -> serde_json::Result<()> {
         let mut core = self.core.lock().unwrap();
         // A replacement transcript must cover every row sequenced before it.
-        if let (Some("compaction_end"), Some(store)) =
-            (event.get("type").and_then(Value::as_str), core.store.as_ref())
-        {
+        if let (Some("compaction_end"), Some(store)) = (
+            event.get("type").and_then(Value::as_str),
+            core.store.as_ref(),
+        ) {
             attach_collapse_transcript(&mut event, store);
         }
         let sequence = core.last_event_sequence + 1;
@@ -561,7 +562,14 @@ mod tests {
         let before = row("before collapse");
         let after = row("after collapse");
         worker.emit_custom_row(&before);
-        let transcript = worker.core.lock().unwrap().store.as_ref().unwrap().messages();
+        let transcript = worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .messages();
         let result = json!({ "summary": "collapsed history", "tokensBefore": 1234 });
         worker
             .compaction
