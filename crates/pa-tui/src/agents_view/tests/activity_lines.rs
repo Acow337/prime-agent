@@ -59,7 +59,7 @@ fn enter_on_a_nested_factory_line_opens_the_child_with_the_factory_panel() {
     let mut mode = mode_with_parent_and_child();
     mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
     with_activity(&mut mode, "c-live", 0, 1);
-    select_title(&mut mode, "\u{2699} 1 factory runs");
+    select_title(&mut mode, "\u{2699} 1 factory run");
     mode.handle_key("enter");
     let opened = mode.opened.as_ref().expect("open recorded");
     assert_eq!(
@@ -89,9 +89,9 @@ fn child_lines_sit_one_indent_step_past_their_row() {
     assert_eq!(
         [
             column("\u{2022} p name"),
-            column("\u{25be} 1 subagents"),
+            column("\u{25be} 1 subagent"),
             column("worker one"),
-            column("$ 1 shells"),
+            column("$ 1 shell"),
             column("$ 2 shells"),
         ],
         [0, 4, 6, 8, 4]

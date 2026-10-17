@@ -371,7 +371,10 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
         identity: format!("{SUMMARY_ROW_PREFIX}{}", parent.identity),
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
-        title: format!("{total} subagents \u{b7} {running} running"),
+        title: format!(
+            "{total} subagent{} \u{b7} {running} running",
+            if total == 1 { "" } else { "s" }
+        ),
         model: String::new(),
         cost: parent.descendant_cost,
         age: String::new(),
@@ -417,14 +420,21 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
         rows.push(line(
             RowKind::Shells,
             "shells",
-            format!("$ {} shells{persistent}", shells.running),
+            format!(
+                "$ {} shell{}{persistent}",
+                shells.running,
+                if shells.running == 1 { "" } else { "s" }
+            ),
         ));
     }
     if factory_runs > 0 {
         rows.push(line(
             RowKind::FactoryRuns,
             "factory",
-            format!("\u{2699} {factory_runs} factory runs"),
+            format!(
+                "\u{2699} {factory_runs} factory run{}",
+                if factory_runs == 1 { "" } else { "s" }
+            ),
         ));
     }
     rows
