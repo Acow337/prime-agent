@@ -143,7 +143,6 @@ impl AgentsViewMode {
                     parent_identity: None,
                     summary: serde_json::json!({
                         "shellId": id,
-                        "status": shell.get("status"),
                         "assignment": assignment,
                     }),
                     title: shell

@@ -860,16 +860,6 @@ impl Supervisor {
                 .await;
                 (vec![line], false)
             }
-            DaemonCommand::DeletePersistentShell { shell_id, .. } => {
-                let agent_dir = self.options.agent_dir.clone();
-                let shell_id = shell_id.clone();
-                let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
-                    crate::persistent_shells::delete_shell(&agent_dir, &shell_id)
-                        .map(|known| known.then(|| json!({ "shellId": shell_id })))
-                })
-                .await;
-                (vec![line], false)
-            }
             DaemonCommand::Prompt {
                 active_session_id, ..
             }

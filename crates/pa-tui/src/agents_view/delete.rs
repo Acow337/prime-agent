@@ -49,10 +49,6 @@ pub(super) enum DeleteAction {
         shell_id: String,
         name: String,
     },
-    DeleteShell {
-        shell_id: String,
-        name: String,
-    },
 }
 
 impl DeleteAction {
@@ -63,7 +59,7 @@ impl DeleteAction {
             | DeleteAction::StopShell { name, .. } => {
                 format!("Stopped {name}")
             }
-            DeleteAction::DeleteSubagent { name, .. } | DeleteAction::DeleteShell { name, .. } => {
+            DeleteAction::DeleteSubagent { name, .. } => {
                 format!("Deleted {name}")
             }
             DeleteAction::DeleteSavedSession { name, .. } => {
@@ -77,9 +73,9 @@ impl DeleteAction {
             DeleteAction::StopSubagent { .. }
             | DeleteAction::StopAgent { .. }
             | DeleteAction::StopShell { .. } => "Stop",
-            DeleteAction::DeleteSubagent { .. }
-            | DeleteAction::DeleteSavedSession { .. }
-            | DeleteAction::DeleteShell { .. } => "Delete",
+            DeleteAction::DeleteSubagent { .. } | DeleteAction::DeleteSavedSession { .. } => {
+                "Delete"
+            }
         }
     }
 
@@ -96,9 +92,7 @@ impl DeleteAction {
             DeleteAction::DeleteSubagent { .. } => {
                 data.get("deleted") != Some(&serde_json::json!(false))
             }
-            DeleteAction::StopAgent { .. }
-            | DeleteAction::StopShell { .. }
-            | DeleteAction::DeleteShell { .. } => true,
+            DeleteAction::StopAgent { .. } | DeleteAction::StopShell { .. } => true,
             DeleteAction::DeleteSavedSession { .. } => {
                 data.get("ok").map(serde_json::Value::as_bool) != Some(Some(false))
             }
@@ -175,11 +169,6 @@ pub(super) fn spawn_delete_dispatch(
                 shell_id: shell_id.clone(),
                 rest: serde_json::Map::default(),
             },
-            DeleteAction::DeleteShell { shell_id, .. } => DaemonCommand::DeletePersistentShell {
-                id: None,
-                shell_id: shell_id.clone(),
-                rest: serde_json::Map::default(),
-            },
         };
         // The outcome's tone is explicit: success muted, a no-effect stop warning, a
         // failure error — the status line never re-derives it from the text.
@@ -220,8 +209,7 @@ pub(super) fn spawn_delete_dispatch(
             | DeleteAction::StopSubagent { .. }
             | DeleteAction::DeleteSubagent { .. }
             | DeleteAction::StopAgent { .. }
-            | DeleteAction::StopShell { .. }
-            | DeleteAction::DeleteShell { .. } => None,
+            | DeleteAction::StopShell { .. } => None,
         };
         let _ = ui_tx.send(UiInput::DeleteResult {
             message: outcome,
@@ -344,7 +332,8 @@ impl AgentsViewMode {
     /// section, false for a saved-only row.
     pub(super) fn delete_arm_word(row: &AgentsViewRow) -> bool {
         if row.kind == RowKind::PersistentShell {
-            row.summary.get("status").and_then(Value::as_str) == Some("running")
+            // A listed shell is live: it always stops.
+            true
         } else if row.summary.get("rlmChildId").is_some() {
             // A child rides its own activity: the running section is its live work, an idle
             // child deletes — the retained activeSessionId on an idle child is not live work.
@@ -401,11 +390,7 @@ impl AgentsViewMode {
             RowKind::SubagentSummary | RowKind::Subagent | RowKind::Code => None,
             RowKind::PersistentShell => {
                 let shell_id = row.summary.get("shellId")?.as_str()?.to_string();
-                if Self::delete_arm_word(row) {
-                    Some(DeleteAction::StopShell { shell_id, name })
-                } else {
-                    Some(DeleteAction::DeleteShell { shell_id, name })
-                }
+                Some(DeleteAction::StopShell { shell_id, name })
             }
             RowKind::Agent => {
                 if let Some(active_session_id) = active_session_id {

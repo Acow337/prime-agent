@@ -40,7 +40,6 @@ fn serve(listener: &UnixListener) -> Vec<String> {
         }),
     );
     let mut killed = Vec::new();
-    let mut deleted = Vec::new();
     let mut pending_kill_failure: Option<String> = None;
     loop {
         let Some(line) = read_line(&mut reader) else {
@@ -74,14 +73,10 @@ fn serve(listener: &UnixListener) -> Vec<String> {
                 } else {
                     "finished"
                 };
-                let shells: Vec<Value> = [
+                json!({ "activities": [
                     shell("b", "build-watch", "p", build_status),
                     shell("l", "long-job", "gone", "running"),
-                ]
-                .into_iter()
-                .filter(|shell| !deleted.contains(&shell["id"]))
-                .collect();
-                json!({ "activities": shells })
+                ] })
             }
             "tail_persistent_shell" => {
                 // Deliver the old shell's error only once another shell's
@@ -104,10 +99,6 @@ fn serve(listener: &UnixListener) -> Vec<String> {
                     continue;
                 }
                 killed.push(command["shellId"].as_str().unwrap_or_default().to_string());
-                json!({ "shellId": command["shellId"] })
-            }
-            "delete_persistent_shell" => {
-                deleted.push(command["shellId"].clone());
                 json!({ "shellId": command["shellId"] })
             }
             "roster_unsubscribe" => Value::Null,

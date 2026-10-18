@@ -442,19 +442,6 @@ fn persistent_shell_survives_daemon_shutdown_is_reattached_and_outlives_session_
         listed["data"]["activities"][0]["status"], "finished",
         "the killed orphan stays listed as finished"
     );
-    client.request(
-        "r1",
-        &json!({ "type": "delete_persistent_shell", "shellId": shell["id"] }),
-    );
-    let listed = client.request("s3", &json!({ "type": "list_persistent_shells" }));
-    assert_eq!(listed["data"]["activities"], json!([]));
-    assert_eq!(
-        std::fs::read_dir(agent_dir.join("persistent-shells"))
-            .expect("persistent-shell home")
-            .count(),
-        0,
-        "the delete removed the record and its files"
-    );
 }
 
 fn write_faux_script(path: &Path, cell: &str) -> PathBuf {
