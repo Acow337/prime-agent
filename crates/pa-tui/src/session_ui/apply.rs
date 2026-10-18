@@ -400,6 +400,11 @@ impl SessionUi {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
                     view.working = None;
+                    self.bash_list_epoch += 1;
+                    self.factory_list_epoch += 1;
+                    self.bash_activities = serde_json::json!({"activities": []});
+                    self.factory_graph = serde_json::json!({"runs": []});
+                    self.update_subagent_summary(view);
                     match reason.as_str() {
                         "shutdown" => self.error_row(
                             "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
