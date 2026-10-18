@@ -106,8 +106,9 @@ fn spawn_tail(
 }
 
 impl AgentsViewMode {
-    /// One row per shell, its title the command, its assignment the session's title: `(deleted)`
-    /// once the loaded catalog and the roster both lack the session, nothing while it still loads.
+    /// One row per live shell (a finished one only while its bash-view detail is open), its title
+    /// the command, its assignment the session's title: `(deleted)` once the loaded catalog and
+    /// the roster both lack the session, nothing while it still loads.
     pub(super) fn persistent_shell_rows(&self, records: &[UnifiedRecord]) -> Vec<AgentsViewRow> {
         let titles: HashMap<String, String> = records
             .iter()
@@ -117,6 +118,7 @@ impl AgentsViewMode {
                 Some((session_id, session_title(&summary)))
             })
             .collect();
+        let open = self.shell_view.as_ref().and_then(BashView::detail_id);
         self.persistent_shells
             .get("activities")
             .and_then(Value::as_array)
@@ -124,6 +126,11 @@ impl AgentsViewMode {
             .flatten()
             .filter_map(|shell| {
                 let id = shell.get("id")?.as_str()?;
+                if shell.get("status").and_then(Value::as_str) == Some("finished")
+                    && open.as_deref() != Some(id)
+                {
+                    return None;
+                }
                 let assignment = shell
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -178,10 +185,15 @@ impl AgentsViewMode {
         let Some(view) = self.shell_view.as_mut() else {
             return;
         };
+        let open = view.detail_id();
         match view.handle_key(key, &self.keybindings) {
             BashViewAction::Close => self.shell_view = None,
             BashViewAction::None => {}
             action => self.pending_shell_action = Some(action),
+        }
+        // A finished shell's row lives only while its detail is open.
+        if self.shell_view.as_ref().and_then(BashView::detail_id) != open {
+            self.rebuild_rows();
         }
     }
 
@@ -198,21 +210,24 @@ impl AgentsViewMode {
     }
 }
 
+/// The bash view's shells: exactly the shells with a row, each naming its row's assignment.
 pub(super) fn activities(shells: &Value, rows: &[AgentsViewRow]) -> Vec<BashActivity> {
-    let mut activities = parse_bash_activities(shells);
-    for activity in &mut activities {
-        activity.session = rows
-            .iter()
-            .find(|row| {
+    parse_bash_activities(shells)
+        .into_iter()
+        .filter_map(|mut activity| {
+            let row = rows.iter().find(|row| {
                 row.kind == RowKind::PersistentShell
                     && row.summary.get("shellId").and_then(Value::as_str)
                         == Some(activity.id.as_str())
-            })
-            .and_then(|row| row.summary.get("assignment"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-    }
-    activities
+            })?;
+            activity.session = row
+                .summary
+                .get("assignment")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some(activity)
+        })
+        .collect()
 }
 
 fn single_line(value: &str) -> String {
