@@ -434,6 +434,64 @@ fn the_shell_drill_in_names_its_session_and_follows_re_polls() {
 }
 
 #[test]
+fn finished_persistent_shells_never_open_the_block() {
+    let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
+    mode.rebuild_rows();
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": "cargo build", "sessionId": "i", "status": "finished", "exitCode": 0 },
+        { "id": "s2", "command": "sleep 600", "sessionId": "gone", "status": "finished", "exitCode": 143 },
+    ]}));
+    let (lines, _) = mode.render_frame(100, 30);
+    let text = lines.iter().map(flat).collect::<Vec<_>>().join("\n");
+    assert!(
+        !text.contains("Persistent shells")
+            && !text.contains("cargo build")
+            && !text.contains("sleep 600"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_shells_block_and_its_overlay_list_only_live_shells() {
+    let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
+    mode.rebuild_rows();
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": "cargo build", "sessionId": "i", "status": "finished", "exitCode": 0 },
+        { "id": "s2", "command": "cargo watch", "sessionId": "i", "status": "running" },
+        { "id": "s3", "command": "sleep 600", "sessionId": "gone", "status": "finished", "exitCode": 143 },
+    ]}));
+    let render = |mode: &mut AgentsViewMode| {
+        let (lines, _) = mode.render_frame(100, 30);
+        lines.iter().map(flat).collect::<Vec<_>>()
+    };
+    let texts = render(&mut mode);
+    let heading = texts
+        .iter()
+        .position(|text| text.contains("Persistent shells (1)"))
+        .unwrap_or_else(|| panic!("the block in:\n{}", texts.join("\n")));
+    assert!(
+        texts[heading + 1].contains("$ cargo watch") && texts[heading + 2].trim().is_empty(),
+        "exactly the running row under the heading:\n{}",
+        texts.join("\n")
+    );
+    let row = mode
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::PersistentShell)
+        .cloned()
+        .expect("shell row");
+    mode.open_persistent_shell(&row);
+    mode.handle_shell_view_key("left");
+    let overlay = render(&mut mode).join("\n");
+    assert!(
+        overlay.contains("cargo watch")
+            && !overlay.contains("cargo build")
+            && !overlay.contains("sleep 600"),
+        "the overlay list keeps only the live shell:\n{overlay}"
+    );
+}
+
+#[test]
 fn persistent_shells_head_the_list_above_every_section() {
     let mut mode = fresh_mode(vec![
         roster_entry("r", "running", &parent_summary("r")),

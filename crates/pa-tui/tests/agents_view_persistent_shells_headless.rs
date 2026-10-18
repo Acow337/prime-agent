@@ -282,6 +282,8 @@ async fn enter_on_a_shell_shows_its_output_and_kills_it() {
         wait_render("watching..."),
         AgentsStep::Key("enter".to_string()),
         wait_render("finished"),
+        AgentsStep::Key("left".to_string()),
+        wait_render("long-job"),
     ])
     .await;
 
@@ -290,10 +292,16 @@ async fn enter_on_a_shell_shows_its_output_and_kills_it() {
         "the open showed the shell's output"
     );
     assert_eq!(killed, ["b"], "the kill named the selected shell");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("build-watch") && frame.contains("finished")),
+        "the killed shell's open pane shows it finished"
+    );
     let last = frames.last().expect("a frame");
     assert!(
-        last.contains("build-watch") && last.contains("finished"),
-        "the killed shell's pane shows it finished:\n{last}"
+        !last.contains("build-watch"),
+        "back on the list, the finished shell is gone:\n{last}"
     );
 }
 
@@ -358,7 +366,7 @@ async fn a_late_kill_failure_does_not_move_to_another_shell_pane() {
 }
 
 #[tokio::test]
-async fn ctrl_x_on_a_shell_row_stops_it_then_deletes_it_through_the_session_confirm() {
+async fn ctrl_x_on_a_shell_row_stops_it_and_its_finished_row_leaves_the_list() {
     let (frames, killed) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         wait_render("$ long-job"),
@@ -367,40 +375,14 @@ async fn ctrl_x_on_a_shell_row_stops_it_then_deletes_it_through_the_session_conf
         AgentsStep::Key("ctrl+x".to_string()),
         wait_render("Press Ctrl+X again to stop"),
         AgentsStep::Key("ctrl+x".to_string()),
-        wait_render("Stopped build-watch"),
-        wait_render("open   Ctrl+X delete"),
-        AgentsStep::Key("ctrl+x".to_string()),
-        wait_render("Press Ctrl+X again to delete"),
-        AgentsStep::Key("ctrl+x".to_string()),
         wait_render("Persistent shells (1)"),
     ])
     .await;
 
     assert_eq!(killed, ["b"], "the stop named the selected shell");
-    let mut needles = [
-        "open   Ctrl+X stop",
-        "Press Ctrl+X again to stop",
-        "Stopped build-watch",
-        "open   Ctrl+X delete",
-        "Press Ctrl+X again to delete",
-        "Persistent shells (1)",
-    ]
-    .into_iter()
-    .peekable();
-    for frame in &frames {
-        if needles.peek().is_some_and(|needle| frame.contains(needle)) {
-            needles.next();
-        }
-    }
-    assert_eq!(
-        needles.next(),
-        None,
-        "frames in order:\n{}",
-        frames.join("\n---\n")
-    );
     let last = frames.last().expect("a frame");
     assert!(
-        !last.contains("$ build-watch"),
-        "the deleted shell left the list:\n{last}"
+        last.contains("Stopped build-watch") && !last.contains("$ build-watch"),
+        "the stopped shell left the list:\n{last}"
     );
 }
