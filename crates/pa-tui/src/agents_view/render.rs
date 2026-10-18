@@ -508,13 +508,6 @@ impl AgentsViewMode {
         }
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
-        if row.kind == RowKind::PersistentShell {
-            let line = pad_line(
-                vec![crate::Span::raw(Self::persistent_shell_text(row, width))],
-                width,
-            );
-            return finish_session_row(theme, line, selected, hovered, width);
-        }
         if row.kind == RowKind::SubagentSummary {
             let indent = "  ".repeat(row.depth);
             let marker = if row.expanded { "\u{25be}" } else { "\u{25b8}" };
@@ -550,6 +543,7 @@ impl AgentsViewMode {
             return finish_session_row(theme, line, selected, hovered, width);
         }
         let icon = match row.section {
+            _ if row.kind == RowKind::PersistentShell => "$",
             Section::Running => ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"][self.pulse % 4],
             _ => "\u{2022}",
         };

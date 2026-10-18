@@ -240,6 +240,7 @@ fn the_pane_runs_to_the_bottom() {
             status: "finished".to_string(),
             exit_code: Some(0),
             duration_ms: Some(u64::from(n) * 1_000),
+            session: None,
         })
         .collect();
     for viewport in [10usize, 16, 24] {

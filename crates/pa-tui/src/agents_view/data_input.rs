@@ -144,6 +144,12 @@ impl AgentsViewMode {
             }
         }
         self.rows = rows;
+        if let Some(view) = self.shell_view.as_mut() {
+            view.apply_activities(super::persistent_shells::activities(
+                &self.persistent_shells,
+                &self.rows,
+            ));
+        }
         // The armed confirm only rides a row the list still carries under the session key it
         // armed with: a removed, re-created, or re-keyed row retires it.
         if let Some(pending) = &self.pending_delete {

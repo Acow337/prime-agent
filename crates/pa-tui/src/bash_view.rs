@@ -50,6 +50,7 @@ pub struct BashActivity {
     pub status: String,
     pub exit_code: Option<i64>,
     pub duration_ms: Option<u64>,
+    pub session: Option<String>,
 }
 
 impl BashActivity {
@@ -95,6 +96,7 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
                     .map_or_else(|| "unknown".to_string(), crate::menu_panel::scrub_controls),
                 exit_code: row.get("exitCode").and_then(Value::as_i64),
                 duration_ms: row.get("durationMs").and_then(Value::as_u64),
+                session: None,
             })
         })
         .collect();

@@ -1,6 +1,6 @@
 //! Headless e2e for the agents view's machine-wide persistent shells: the list's
-//! `Persistent shells` block names each shell's assigned session (`(deleted)` once the session is
-//! gone), and Enter on a shell opens its output with the kill action.
+//! `Persistent shells` block, and Enter on a shell opens its output (naming its assigned session,
+//! `(deleted)` once the session is gone) with the kill action.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -235,22 +235,39 @@ fn wait_render(needle: &str) -> AgentsStep {
 }
 
 #[tokio::test]
-async fn persistent_shells_list_with_their_session_or_deleted() {
+async fn shell_rows_are_table_rows_and_the_drill_in_names_the_session_or_deleted() {
     let (frames, _) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        wait_render("$ long-job"),
+        AgentsStep::Key("home".to_string()),
+        AgentsStep::Key("enter".to_string()),
+        wait_render("session release prep"),
+        AgentsStep::Key("escape".to_string()),
+        AgentsStep::Key("down".to_string()),
+        AgentsStep::Key("enter".to_string()),
+        wait_render("session (deleted)"),
     ])
     .await;
 
-    let last = frames.last().expect("a frame");
-    for needle in [
-        "Persistent shells (2)",
-        "$ build-watch \u{b7} 12.4s \u{b7} release prep",
-        "$ long-job \u{b7} 12.4s \u{b7} (deleted)",
+    let list = frames
+        .iter()
+        .find(|frame| frame.contains("Persistent shells (2)"))
+        .expect("a list frame");
+    for (command, tokens) in [
+        ("$ build-watch", ["$", "build-watch", "-", "-", "12.4s"]),
+        ("$ long-job", ["$", "long-job", "-", "-", "12.4s"]),
     ] {
+        let row = list
+            .lines()
+            .find(|line| line.contains(command))
+            .unwrap_or_else(|| panic!("{command:?} in:\n{list}"));
+        assert_eq!(row.split_whitespace().collect::<Vec<_>>(), tokens, "{list}");
+    }
+    for needle in ["session release prep", "session (deleted)"] {
         assert!(
-            last.contains(needle),
-            "{needle:?} in the last frame:\n{last}"
+            frames.iter().any(|frame| frame.contains(needle)),
+            "{needle:?} in a drill-in frame:\n{}",
+            frames.join("\n---\n")
         );
     }
 }
@@ -259,7 +276,7 @@ async fn persistent_shells_list_with_their_session_or_deleted() {
 async fn enter_on_a_shell_shows_its_output_and_kills_it() {
     let (frames, killed) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        wait_render("$ long-job"),
         AgentsStep::Key("home".to_string()),
         AgentsStep::Key("enter".to_string()),
         wait_render("watching..."),
@@ -284,18 +301,18 @@ async fn enter_on_a_shell_shows_its_output_and_kills_it() {
 async fn clicking_a_shell_dispatches_its_tail_without_another_key() {
     let (baseline, _) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        wait_render("$ long-job"),
     ])
     .await;
     let row = baseline
         .last()
         .expect("list frame")
         .lines()
-        .position(|line| line.contains("$ build-watch \u{b7} 12.4s \u{b7} release prep"))
+        .position(|line| line.contains("$ build-watch"))
         .expect("shell row");
     let (frames, killed) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        wait_render("$ long-job"),
         AgentsStep::Click { row, col: 3 },
         wait_render("watching..."),
         // Click where the hidden session row sits: the overlay owns it.
@@ -316,7 +333,7 @@ async fn clicking_a_shell_dispatches_its_tail_without_another_key() {
 async fn a_late_kill_failure_does_not_move_to_another_shell_pane() {
     let (frames, _) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        wait_render("$ long-job"),
         AgentsStep::Key("home".to_string()),
         AgentsStep::Key("down".to_string()),
         AgentsStep::Key("enter".to_string()),
@@ -344,7 +361,7 @@ async fn a_late_kill_failure_does_not_move_to_another_shell_pane() {
 async fn ctrl_x_on_a_shell_row_stops_it_then_deletes_it_through_the_session_confirm() {
     let (frames, killed) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("long-job \u{b7} 12.4s \u{b7} (deleted)"),
+        wait_render("$ long-job"),
         AgentsStep::Key("home".to_string()),
         wait_render("open   Ctrl+X stop"),
         AgentsStep::Key("ctrl+x".to_string()),

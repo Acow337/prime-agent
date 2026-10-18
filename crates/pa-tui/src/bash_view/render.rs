@@ -155,7 +155,7 @@ fn status_state_color(activity: &BashActivity) -> ThemeColor {
     }
 }
 
-/// The drill-in's one metadata row: pid, started, and duration joined by
+/// The drill-in's one metadata row: pid, started, duration, and session joined by
 /// dim dots, with the status dot and word trailing in its state color.
 pub(super) fn metadata_row(theme: &Theme, width: usize, activity: &BashActivity) -> Line {
     let mut row = vec![Span::raw("  ")];
@@ -171,6 +171,9 @@ pub(super) fn metadata_row(theme: &Theme, width: usize, activity: &BashActivity)
     }
     if let Some(ms) = activity.duration_ms {
         items.push(("duration ", format_duration(Some(ms))));
+    }
+    if let Some(session) = activity.session.as_deref() {
+        items.push(("session ", session.to_string()));
     }
     for (index, (label, value)) in items.iter().enumerate() {
         if index > 0 {

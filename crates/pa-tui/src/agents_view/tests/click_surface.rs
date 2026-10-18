@@ -332,14 +332,105 @@ fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
         "status": "unverified", "durationMs": 4_000, "persistent": true,
     }]}));
     let row = mode.persistent_shell_rows(&[]).remove(0);
+    let layout = build_layout(std::slice::from_ref(&row), 100);
     assert_eq!(
-        AgentsViewMode::persistent_shell_text(&row, 100),
-        "$ sleep 60 \u{b7} 4.0s"
+        flat(&mode.render_row(&row, &layout, 100, false))
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["$", "sleep", "60", "-", "-", "4.0s"]
     );
     mode.open_persistent_shell(&row);
     mode.pending_shell_action.take();
     mode.handle_shell_view_key("enter");
     assert!(mode.pending_shell_action.is_none());
+}
+
+#[test]
+fn shell_rows_render_in_the_session_table_columns() {
+    let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
+    mode.rebuild_rows();
+    let command = "python train.py --epochs 40 --config configs/sweep-large.yaml";
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": command, "sessionId": "i", "status": "running", "durationMs": 754_000 },
+    ]}));
+    let (lines, _) = mode.render_frame(100, 30);
+    let texts: Vec<String> = lines
+        .iter()
+        .map(|line| flat(line).trim_end().to_string())
+        .collect();
+    let find = |prefix: &str| {
+        texts
+            .iter()
+            .find(|text| text.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix:?} in:\n{}", texts.join("\n")))
+    };
+    let (legend, shell, session) = (find("Session"), find("$ python"), find("\u{2022} i name"));
+    let layout = build_layout(&mode.rows, 100);
+    let model_at = layout.name_width + 2;
+    let column = |text: &str, at: usize| text.chars().skip(at).collect::<String>();
+    assert_eq!(
+        shell.chars().take(model_at).collect::<String>(),
+        format!(
+            "$ {}  ",
+            crate::agents_view_state::truncate_text(command, layout.name_width - 2)
+        ),
+        "the command clips to the Session column:\n{}",
+        texts.join("\n")
+    );
+    assert!(column(legend, model_at).starts_with("Model"));
+    assert!(
+        column(session, model_at - 2).starts_with("  ")
+            && !column(session, model_at).starts_with(' ')
+    );
+    assert_eq!(
+        column(shell, model_at)
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["-", "-", "12m", "34s"],
+        "Model, Cost, and Age, then nothing"
+    );
+    assert_eq!(
+        str_width(shell),
+        str_width(legend),
+        "the elapsed ends under Age"
+    );
+}
+
+#[test]
+fn the_shell_drill_in_names_its_session_and_follows_re_polls() {
+    let mut mode = fresh_mode(vec![
+        roster_entry("r", "running", &parent_summary("r")),
+        roster_entry("i", "idle", &parent_summary("i")),
+    ]);
+    mode.rebuild_rows();
+    let shells = |session: &str| {
+        serde_json::json!({ "activities": [{
+            "id": "s1", "command": "cargo watch", "sessionId": session, "status": "running",
+            "pid": 4242, "durationMs": 754_000,
+        }]})
+    };
+    mode.apply_persistent_shells(shells("i"));
+    mode.render_frame(100, 24);
+    let row = mode
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::PersistentShell)
+        .cloned()
+        .expect("shell row");
+    mode.open_persistent_shell(&row);
+    let metadata = |mode: &mut AgentsViewMode| {
+        let (lines, _) = mode.render_frame(100, 24);
+        lines
+            .iter()
+            .map(flat)
+            .find(|text| text.contains("pid 4242"))
+            .expect("the drill-in metadata row")
+    };
+    let opened = metadata(&mut mode);
+    assert!(opened.contains("session i name"), "{opened}");
+    mode.apply_persistent_shells(shells("r"));
+    let re_polled = metadata(&mut mode);
+    assert!(re_polled.contains("session r name"), "{re_polled}");
 }
 
 #[test]

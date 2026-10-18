@@ -1,6 +1,6 @@
-//! The machine-wide persistent shells: the rows under the list's `Persistent shells` heading
-//! (each shell with the session it is assigned to, `(deleted)` once that session is gone), and
-//! the bash view their open mounts over the view (output and kill).
+//! The machine-wide persistent shells: the rows under the list's `Persistent shells` heading, and
+//! the bash view their open mounts over the view (output, kill, and the session each shell is
+//! assigned to, `(deleted)` once that session is gone).
 use std::collections::HashMap;
 
 use super::{
@@ -9,7 +9,9 @@ use super::{
 };
 use crate::agents_view_forest::session_title;
 use crate::agents_view_state::{summary_for_record, UnifiedRecord};
-use crate::bash_view::{format_duration, parse_bash_activities, BashView, BashViewAction};
+use crate::bash_view::{
+    format_duration, parse_bash_activities, BashActivity, BashView, BashViewAction,
+};
 
 /// The daemon capability that serves the machine-wide shell list, output, and kill.
 pub(super) const CAPABILITY: &str = "persistent_shells";
@@ -104,8 +106,8 @@ fn spawn_tail(
 }
 
 impl AgentsViewMode {
-    /// One row per shell, its title the assigned session's title: `(deleted)` once the loaded
-    /// catalog and the roster both lack the session, nothing while the catalog still loads.
+    /// One row per shell, its title the command, its assignment the session's title: `(deleted)`
+    /// once the loaded catalog and the roster both lack the session, nothing while it still loads.
     pub(super) fn persistent_shell_rows(&self, records: &[UnifiedRecord]) -> Vec<AgentsViewRow> {
         let titles: HashMap<String, String> = records
             .iter()
@@ -126,8 +128,7 @@ impl AgentsViewMode {
                     .get("sessionId")
                     .and_then(Value::as_str)
                     .and_then(|session_id| titles.get(session_id).cloned())
-                    .or_else(|| self.saved_catalog_loaded.then(|| "(deleted)".to_string()))
-                    .unwrap_or_default();
+                    .or_else(|| self.saved_catalog_loaded.then(|| "(deleted)".to_string()));
                 Some(AgentsViewRow {
                     kind: RowKind::PersistentShell,
                     section: Section::Inactive,
@@ -135,14 +136,17 @@ impl AgentsViewMode {
                     parent_identity: None,
                     summary: serde_json::json!({
                         "shellId": id,
-                        "command": shell.get("command").and_then(Value::as_str).map(single_line),
-                        "durationMs": shell.get("durationMs").and_then(Value::as_u64),
                         "status": shell.get("status"),
+                        "assignment": assignment,
                     }),
-                    title: assignment,
-                    model: String::new(),
+                    title: shell
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .map(single_line)
+                        .unwrap_or_default(),
+                    model: "-".to_string(),
                     cost: 0.0,
-                    age: String::new(),
+                    age: format_duration(shell.get("durationMs").and_then(Value::as_u64)),
                     depth: 0,
                     descendant_count: 0,
                     running_subagent_count: 0,
@@ -153,36 +157,13 @@ impl AgentsViewMode {
             .collect()
     }
 
-    /// The text of one shell row: `$ <command> · <elapsed> · <session>`, the command clipped so
-    /// the elapsed time and the assignment stay readable; no assignment while the catalog loads.
-    pub(super) fn persistent_shell_text(row: &AgentsViewRow, width: usize) -> String {
-        let command = row
-            .summary
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let mut tail = format!(
-            " \u{b7} {}",
-            format_duration(row.summary.get("durationMs").and_then(Value::as_u64))
-        );
-        if !row.title.is_empty() {
-            tail.push_str(" \u{b7} ");
-            tail.push_str(&row.title);
-        }
-        let room = width
-            .saturating_sub(2 + crate::width::str_width(&tail))
-            .max(8);
-        let command = crate::width::truncate_to_width(command, room, "\u{2026}");
-        format!("$ {command}{tail}")
-    }
-
     /// Enter on a shell row: the bash view over every persistent shell, opened on this one.
     pub(super) fn open_persistent_shell(&mut self, row: &AgentsViewRow) {
         let Some(id) = row.summary.get("shellId").and_then(Value::as_str) else {
             return;
         };
         let mut view = BashView::new(
-            parse_bash_activities(&self.persistent_shells),
+            activities(&self.persistent_shells, &self.rows),
             self.last_height,
         );
         self.pending_shell_action = Some(view.open(id));
@@ -210,12 +191,28 @@ impl AgentsViewMode {
             return;
         }
         if let Some(view) = self.shell_view.as_mut() {
-            view.apply_activities(parse_bash_activities(&data));
             view.clear_error();
         }
         self.persistent_shells = data;
         self.rebuild_rows();
     }
+}
+
+pub(super) fn activities(shells: &Value, rows: &[AgentsViewRow]) -> Vec<BashActivity> {
+    let mut activities = parse_bash_activities(shells);
+    for activity in &mut activities {
+        activity.session = rows
+            .iter()
+            .find(|row| {
+                row.kind == RowKind::PersistentShell
+                    && row.summary.get("shellId").and_then(Value::as_str)
+                        == Some(activity.id.as_str())
+            })
+            .and_then(|row| row.summary.get("assignment"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    activities
 }
 
 fn single_line(value: &str) -> String {

@@ -401,12 +401,6 @@ impl AgentsViewMode {
             RowKind::SubagentSummary | RowKind::Subagent | RowKind::Code => None,
             RowKind::PersistentShell => {
                 let shell_id = row.summary.get("shellId")?.as_str()?.to_string();
-                let name = row
-                    .summary
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
                 if Self::delete_arm_word(row) {
                     Some(DeleteAction::StopShell { shell_id, name })
                 } else {
