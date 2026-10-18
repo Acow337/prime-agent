@@ -93,9 +93,9 @@ fn child_lines_sit_one_indent_step_past_their_row() {
     assert_eq!(
         [
             column("\u{2022} p name"),
-            column("\u{25be} 1 subagents"),
+            column("\u{25be} 1 subagent"),
             column("worker one"),
-            column("$ 1 shells"),
+            column("$ 1 shell"),
             column("$ 2 shells"),
         ],
         [0, 4, 6, 8, 4]

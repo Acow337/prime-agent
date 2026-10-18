@@ -136,7 +136,7 @@ fn the_merged_dropdown_rows_hover_like_every_row() {
     crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
     let mut mode = mode_with_parent_and_child();
     let (lines, _) = mode.render_frame(120, 36);
-    let summary = row_of(&lines, "1 subagents · 1 running").expect("the merged line renders");
+    let summary = row_of(&lines, "1 subagent · 1 running").expect("the merged line renders");
     let light = mode.theme.hover_row_style().bg;
     mode.handle_mouse(&hover_motion(summary));
     assert_eq!(mode.hover_row, Some(summary));

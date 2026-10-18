@@ -416,7 +416,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the grandchild stays hidden until the resumed child expands:\n{expanded}"
     );
     assert!(
-        expanded.contains("\u{25b8} 1 subagents · 0 running"),
+        expanded.contains("\u{25b8} 1 subagent · 0 running"),
         "the resumed child's own subtree stays behind its collapsed summary row:\n{expanded}"
     );
     assert!(

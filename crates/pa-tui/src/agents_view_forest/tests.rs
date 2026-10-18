@@ -94,7 +94,7 @@ fn an_opened_child_nests_under_its_parent() {
     );
     assert!(
         rows.iter().any(|row| {
-            row.kind == RowKind::SubagentSummary && row.title == "1 subagents · 0 running"
+            row.kind == RowKind::SubagentSummary && row.title == "1 subagent · 0 running"
         }),
         "the parent's ONE line labels the aggregate: {rows:?}"
     );
@@ -164,7 +164,7 @@ fn session_model_reads_every_wire_shape() {
     );
 }
 
-/// The ONE line under a parent (the operator's 2026-09-28 merge): `1 subagents · 1 running`,
+/// The ONE line under a parent (the operator's 2026-09-28 merge): `1 subagent · 1 running`,
 /// with the `subagents:` identity, expanding to the child at depth 1.
 #[test]
 fn parent_with_child_renders_the_summary_row_and_nested_child() {
@@ -178,13 +178,13 @@ fn parent_with_child_renders_the_summary_row_and_nested_child() {
     assert_eq!(rows[1].kind, RowKind::SubagentSummary);
     assert_eq!(rows[1].identity, "subagents:file:/x/p.jsonl");
     assert_eq!(rows[1].parent_identity.as_deref(), Some("file:/x/p.jsonl"));
-    assert_eq!(rows[1].title, "1 subagents · 1 running");
+    assert_eq!(rows[1].title, "1 subagent · 1 running");
     assert!(!rows[1].expanded);
     assert_eq!(rows[0].descendant_count, 1);
     assert_eq!(rows[0].running_subagent_count, 1);
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[1].title, "1 subagents · 1 running");
+    assert_eq!(rows[1].title, "1 subagent · 1 running");
     assert!(rows[1].expanded);
     assert_eq!(rows[2].kind, RowKind::Subagent);
     assert_eq!(rows[2].depth, 1);
@@ -219,7 +219,7 @@ fn deeper_descendants_roll_up_and_nest_recursively() {
             (RowKind::SubagentSummary, 2),
         ]
     );
-    assert_eq!(rows[3].title, "1 subagents · 1 running");
+    assert_eq!(rows[3].title, "1 subagent · 1 running");
     assert_eq!(rows[3].parent_identity, Some(rows[2].identity.clone()));
     // Expanding the child's line reveals the grandchild at depth 2 (the expansion keys off
     // the rendered row's parent-qualified `agent:` alias).
@@ -271,7 +271,7 @@ fn summary_rows_stay_count_only() {
         .iter()
         .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
         .expect("nested summary row");
-    assert_eq!(nested.title, "1 subagents · 0 running");
+    assert_eq!(nested.title, "1 subagent · 0 running");
     // A FOUR-level chain folds at every depth: the great-grandchild still reaches the root's
     // count (the tally walk's dynamic bound).
     let mut gc = child_summary("gc", "c", "grandkid");
@@ -311,7 +311,7 @@ fn idle_descendants_aggregate_into_the_summary_row() {
         .iter()
         .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
         .expect("child summary row");
-    assert_eq!(child_summary_row.title, "1 subagents · 0 running");
+    assert_eq!(child_summary_row.title, "1 subagent · 0 running");
 }
 
 #[test]
@@ -580,7 +580,7 @@ fn saved_child_nests_under_its_saved_parent() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].kind, RowKind::Agent);
     assert_eq!(rows[0].title, "root agent");
-    assert_eq!(rows[1].title, "1 subagents · 0 running");
+    assert_eq!(rows[1].title, "1 subagent · 0 running");
     let expanded: HashSet<String> = [rows[0].identity.clone()].into_iter().collect();
     let rows = build_rows(
         &records,
@@ -1066,7 +1066,7 @@ fn a_nested_line_bills_its_own_subtree() {
         .iter()
         .find(|row| row.identity == format!("{SUMMARY_ROW_PREFIX}{child_identity}"))
         .expect("the child's own line");
-    assert_eq!(nested.title, "1 subagents · 1 running");
+    assert_eq!(nested.title, "1 subagent · 1 running");
     assert!(
         (nested.cost - 0.25).abs() < f64::EPSILON,
         "only the grandchild's spend"
@@ -1269,9 +1269,9 @@ fn activity_lines_follow_each_nodes_subagents_block() {
             (RowKind::Agent, 0, "p name"),
             (RowKind::SubagentSummary, 1, "3 subagents · 1 running"),
             (RowKind::Subagent, 1, "first child"),
-            (RowKind::SubagentSummary, 2, "1 subagents · 0 running"),
+            (RowKind::SubagentSummary, 2, "1 subagent · 0 running"),
             (RowKind::Subagent, 2, "grandchild"),
-            (RowKind::Shells, 2, "$ 1 shells"),
+            (RowKind::Shells, 2, "$ 1 shell"),
             (RowKind::Subagent, 1, "second child"),
             (RowKind::Shells, 1, "$ 2 shells"),
             (
