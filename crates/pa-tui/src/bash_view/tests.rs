@@ -1170,3 +1170,13 @@ fn registry_changes_preserve_failed_tail_fetches_and_their_retry() {
         "a vanished row retires its fetch error"
     );
 }
+
+#[test]
+fn running_shell_count_skips_finished_shells() {
+    let data = json!({"activities": [
+        {"id": "a", "command": "x", "status": "running"},
+        {"id": "b", "command": "y", "status": "done"},
+        {"id": "c", "command": "z", "status": "failed"},
+    ]});
+    assert_eq!(running_shell_count(&data), 1);
+}

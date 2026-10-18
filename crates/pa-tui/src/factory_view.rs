@@ -189,6 +189,15 @@ pub fn factory_reply_lists_runs(data: &Value) -> bool {
     data.get("runs").is_some_and(Value::is_array)
 }
 
+/// The live runs in a graph reply ([`FactoryRunSnapshot::is_live`]).
+#[must_use]
+pub fn live_run_count(data: &Value) -> usize {
+    parse_factory_runs(data)
+        .iter()
+        .filter(|run| run.is_live())
+        .count()
+}
+
 /// The malformed-lane error line (one message for the mount and the
 /// fold): a reply without the runs list is a malformed lane, never
 /// zero runs.
@@ -496,8 +505,7 @@ impl FactoryView {
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
         if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             // Esc backs out of the open action rows before it closes
-            // the page — the drill-in's back, on the one close key the
-            // page carries (the keyset stays arrows + Enter + Esc).
+            // the page — the drill-in's back.
             if self.mode != Mode::Feed {
                 self.mode = Mode::Feed;
                 return FactoryViewAction::None;
@@ -514,6 +522,19 @@ impl FactoryView {
             return FactoryViewAction::None;
         }
         if kb.matches(key, "tui.select.confirm") {
+            return self.confirm_selection();
+        }
+        // The horizontal arrows mirror back/confirm — as fallbacks only,
+        // after the configured bindings, so a rebound Left/Right keeps
+        // its configured action.
+        if key == "left" {
+            if self.mode != Mode::Feed {
+                self.mode = Mode::Feed;
+                return FactoryViewAction::None;
+            }
+            return FactoryViewAction::Close;
+        }
+        if key == "right" {
             return self.confirm_selection();
         }
         FactoryViewAction::None

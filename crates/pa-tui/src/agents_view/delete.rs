@@ -242,7 +242,9 @@ impl AgentsViewMode {
         let row = self.rows.get(self.selected)?;
         let stop = Self::delete_arm_word(row);
         match row.kind {
-            RowKind::SubagentSummary | RowKind::Code => None,
+            RowKind::SubagentSummary | RowKind::Code | RowKind::Shells | RowKind::FactoryRuns => {
+                None
+            }
             RowKind::PersistentShell => Some(()),
             // An agent with a live session stops (an idle-but-live row still stops, never
             // deletes its file); a saved-only row deletes.
@@ -365,7 +367,10 @@ impl AgentsViewMode {
         // Subagent rows (and promoted children) target the child through
         // the parent's live session.
         if let Some(child_id) = child_id {
-            if row.kind == RowKind::SubagentSummary {
+            if matches!(
+                row.kind,
+                RowKind::SubagentSummary | RowKind::Shells | RowKind::FactoryRuns
+            ) {
                 return None;
             }
             // The child arms always run through the PARENT's session: a scoped promoted child has
@@ -387,7 +392,11 @@ impl AgentsViewMode {
         // Agent rows: a live session stops (idle-but-live included); a saved-only row deletes
         // its file.
         match row.kind {
-            RowKind::SubagentSummary | RowKind::Subagent | RowKind::Code => None,
+            RowKind::SubagentSummary
+            | RowKind::Subagent
+            | RowKind::Code
+            | RowKind::Shells
+            | RowKind::FactoryRuns => None,
             RowKind::PersistentShell => {
                 let shell_id = row.summary.get("shellId")?.as_str()?.to_string();
                 Some(DeleteAction::StopShell { shell_id, name })
