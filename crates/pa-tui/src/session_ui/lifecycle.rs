@@ -903,7 +903,10 @@ mod backfill_tests {
                 "prime",
                 crate::theme::ColorMode::TrueColor,
             ));
-            session.open_agents_view_panel(crate::interactive::SessionPanel::Shells, &mut view);
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::Shells { shell_id: None },
+                &mut view,
+            );
             session.rebuild_view(&mut view, &RebuildKind::Rebind);
             assert!(view.bash_view.is_none(), "the rebind tore the panel down");
             session.open_bash_view(&mut view);

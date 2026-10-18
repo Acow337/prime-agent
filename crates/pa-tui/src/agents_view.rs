@@ -112,7 +112,7 @@ pub struct OpenedRow {
     /// The opened session's own directory (the roster summary's `cwd`): the session run rides it
     /// as its cwd, not the view's launch directory.
     pub cwd: Option<String>,
-    /// The panel the opened session mounts (an activity line's open).
+    /// The panel the opened session mounts (an activity line's or a persistent shell row's open).
     pub panel: Option<SessionPanel>,
 }
 
@@ -175,7 +175,7 @@ pub struct AgentsViewOutcome {
     pub opened_cwd: Option<std::path::PathBuf>,
     /// A status message the session opener left (the unattachable-child fallback).
     pub status_message: Option<String>,
-    /// The panel the opened session mounts (an activity line's open).
+    /// The panel the opened session mounts (an activity line's or a persistent shell row's open).
     pub panel: Option<SessionPanel>,
     /// The view actions this run performed (`program_shown`, `renamed`): the composition root
     /// emits the `tui agents action` adoption events at the run's end.
@@ -1363,7 +1363,7 @@ async fn run_agents_view_surface(
                 .and_then(|row| row.cwd.clone())
                 .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
-            panel: opened.as_ref().and_then(|row| row.panel),
+            panel: opened.as_ref().and_then(|row| row.panel.clone()),
             actions: std::mem::take(&mut mode.actions),
             incident_notice_state: mode.incident_notice_state,
         },

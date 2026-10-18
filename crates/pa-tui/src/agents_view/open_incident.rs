@@ -22,7 +22,9 @@ impl AgentsViewMode {
             RowKind::PersistentShell => self.open_persistent_shell(&row),
             // A program row is read-only context: the open action never fires on it.
             RowKind::Code => {}
-            RowKind::Shells => self.open_activity_line(&row, SessionPanel::Shells),
+            RowKind::Shells => {
+                self.open_activity_line(&row, SessionPanel::Shells { shell_id: None });
+            }
             RowKind::FactoryRuns => self.open_activity_line(&row, SessionPanel::FactoryRuns),
         }
     }

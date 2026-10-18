@@ -50,7 +50,6 @@ pub struct BashActivity {
     pub status: String,
     pub exit_code: Option<i64>,
     pub duration_ms: Option<u64>,
-    pub session: Option<String>,
 }
 
 impl BashActivity {
@@ -96,7 +95,6 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
                     .map_or_else(|| "unknown".to_string(), crate::menu_panel::scrub_controls),
                 exit_code: row.get("exitCode").and_then(Value::as_i64),
                 duration_ms: row.get("durationMs").and_then(Value::as_u64),
-                session: None,
             })
         })
         .collect();
@@ -180,6 +178,7 @@ pub struct BashView {
     /// keeps the registry-refresh lifecycle, [`BashView::clear_error`]).
     fetch_error: bool,
     viewport_rows: usize,
+    subtitle: Option<String>,
 }
 
 impl BashView {
@@ -200,9 +199,23 @@ impl BashView {
             error: None,
             fetch_error: false,
             viewport_rows,
+            subtitle: None,
         };
         view.selected_id = view.activities.first().map(|row| row.id.clone());
         view
+    }
+
+    /// The list's muted line under its title.
+    #[must_use]
+    pub fn with_subtitle(mut self, subtitle: &str) -> Self {
+        self.subtitle = Some(subtitle.to_string());
+        self
+    }
+
+    /// Select row `id` in the list; an empty registry keeps the selection for the rows that land
+    /// later.
+    pub fn select(&mut self, id: &str) {
+        self.selected_id = Some(id.to_string());
     }
 
     /// Reset the open detail's fetched-output state (new open, back, or
@@ -217,15 +230,15 @@ impl BashView {
     }
 
     /// A landed registry refresh: replace the rows, keep the selection on
-    /// the surviving id, and drop a detail pane whose row vanished.
+    /// the surviving id (an empty registry keeps it), and drop a detail pane whose row vanished.
     pub fn apply_activities(&mut self, activities: Vec<BashActivity>) {
         self.activities = activities;
         let selected = self.selected_id.clone();
         let exists = selected
             .as_deref()
             .is_some_and(|id| self.activities.iter().any(|row| row.id == id));
-        if !exists {
-            self.selected_id = self.activities.first().map(|row| row.id.clone());
+        if let Some(first) = self.activities.first().filter(|_| !exists) {
+            self.selected_id = Some(first.id.clone());
         }
         if let Mode::Detail { id } = self.mode.clone() {
             if !self.activities.iter().any(|row| row.id == id) {
@@ -442,12 +455,6 @@ impl BashView {
         }
     }
 
-    /// Open row `id`'s detail drill-in directly, as Enter on its list row does.
-    pub fn open(&mut self, id: &str) -> BashViewAction {
-        self.selected_id = Some(id.to_string());
-        self.confirm_selection()
-    }
-
     /// Enter on the list opens the row's detail drill-in (the host fetches
     /// the output tail); Enter in the detail runs the cancel action.
     fn confirm_selection(&mut self) -> BashViewAction {
@@ -484,7 +491,9 @@ impl BashView {
     }
 
     fn visible_items(&self) -> usize {
-        let reserved = LIST_FRAME_ROWS + if self.error.is_some() { 2 } else { 0 };
+        let reserved = LIST_FRAME_ROWS
+            + usize::from(self.subtitle.is_some())
+            + if self.error.is_some() { 2 } else { 0 };
         // The shared layout floors at one row so a picker never reads empty; this view
         // never renders past its viewport, so a frame too short for any row renders none.
         if self.viewport_rows <= reserved {
@@ -515,7 +524,7 @@ impl BashView {
             .filter(|activity| activity.running())
             .count();
         let counts = vec![(ThemeColor::Success, format!("{running} running"))];
-        let mut lines = pane_header_lines(theme, width, "Bash", &counts, None);
+        let mut lines = pane_header_lines(theme, width, "Bash", &counts, self.subtitle.as_deref());
         if self.activities.is_empty() {
             lines.push(vec![
                 Span::raw("  "),

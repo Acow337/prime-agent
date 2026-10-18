@@ -1,13 +1,12 @@
-//! The machine-wide persistent shells: the rows under the list's `Persistent shells` heading, and
-//! the bash view their open mounts over the view (output, kill, and the session each shell is
-//! assigned to, `(deleted)` once that session is gone).
+//! The machine-wide persistent shells: the rows under the list's `Persistent shells` heading. A
+//! shell's open lands on its session's Bash panel; an orphan's (its session deleted) mounts the
+//! bash view over the orphans (output and kill).
 use std::collections::HashMap;
 
 use super::{
-    mpsc, AgentsViewMode, AgentsViewRow, DaemonClient, DaemonCommand, RowKind, Section, UiInput,
-    Value,
+    mpsc, scope_ancestors, AgentsViewMode, AgentsViewRow, AgentsViewScope, DaemonClient,
+    DaemonCommand, RowKind, Section, SessionPanel, UiInput, Value, ANCHOR_LOADING_HINT,
 };
-use crate::agents_view_forest::session_title;
 use crate::agents_view_state::{summary_for_record, UnifiedRecord};
 use crate::bash_view::{
     format_duration, parse_bash_activities, BashActivity, BashView, BashViewAction,
@@ -107,15 +106,14 @@ fn spawn_tail(
 
 impl AgentsViewMode {
     /// One row per live shell (a finished one only while its bash-view detail is open), its title
-    /// the command, its assignment the session's title: `(deleted)` once the loaded catalog and
-    /// the roster both lack the session, nothing while it still loads.
+    /// the command, carrying its session's summary while the roster or the catalog lists it.
     pub(super) fn persistent_shell_rows(&self, records: &[UnifiedRecord]) -> Vec<AgentsViewRow> {
-        let titles: HashMap<String, String> = records
+        let sessions: HashMap<String, Value> = records
             .iter()
             .map(summary_for_record)
             .filter_map(|summary| {
                 let session_id = summary.get("sessionId")?.as_str()?.to_string();
-                Some((session_id, session_title(&summary)))
+                Some((session_id, summary))
             })
             .collect();
         let open = self.shell_view.as_ref().and_then(BashView::detail_id);
@@ -131,11 +129,10 @@ impl AgentsViewMode {
                 {
                     return None;
                 }
-                let assignment = shell
+                let session = shell
                     .get("sessionId")
                     .and_then(Value::as_str)
-                    .and_then(|session_id| titles.get(session_id).cloned())
-                    .or_else(|| self.saved_catalog_loaded.then(|| "(deleted)".to_string()));
+                    .and_then(|session_id| sessions.get(session_id).cloned());
                 Some(AgentsViewRow {
                     kind: RowKind::PersistentShell,
                     section: Section::Inactive,
@@ -143,7 +140,7 @@ impl AgentsViewMode {
                     parent_identity: None,
                     summary: serde_json::json!({
                         "shellId": id,
-                        "assignment": assignment,
+                        "session": session,
                     }),
                     title: shell
                         .get("command")
@@ -163,16 +160,53 @@ impl AgentsViewMode {
             .collect()
     }
 
-    /// Enter on a shell row: the bash view over every persistent shell, opened on this one.
+    /// Enter on a shell row: its session opens on the Bash panel with the shell selected; an orphan
+    /// opens the bash view over the orphans with it selected, once the catalog says the session is
+    /// gone.
     pub(super) fn open_persistent_shell(&mut self, row: &AgentsViewRow) {
         let Some(id) = row.summary.get("shellId").and_then(Value::as_str) else {
             return;
         };
+        if let Some(session) = row
+            .summary
+            .get("session")
+            .filter(|session| !session.is_null())
+        {
+            let ancestors = scope_ancestors(
+                &self.records(),
+                &AgentsViewScope {
+                    session_id: session
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    active_session_id: None,
+                    session_name: None,
+                },
+            );
+            self.open_row(
+                &AgentsViewRow {
+                    summary: session.clone(),
+                    ..row.clone()
+                },
+                ancestors,
+            );
+            if let Some(opened) = self.opened.as_mut() {
+                opened.panel = Some(SessionPanel::Shells {
+                    shell_id: Some(id.to_string()),
+                });
+            }
+            return;
+        }
+        if !self.saved_catalog_loaded {
+            self.set_status(ANCHOR_LOADING_HINT);
+            return;
+        }
         let mut view = BashView::new(
             activities(&self.persistent_shells, &self.rows),
             self.last_height,
-        );
-        self.pending_shell_action = Some(view.open(id));
+        )
+        .with_subtitle("Session deleted");
+        view.select(id);
         self.shell_view = Some(view);
     }
 
@@ -209,22 +243,17 @@ impl AgentsViewMode {
     }
 }
 
-/// The bash view's shells: exactly the shells with a row, each naming its row's assignment.
+/// The orphan bash view's shells: exactly the shells whose row has no session.
 pub(super) fn activities(shells: &Value, rows: &[AgentsViewRow]) -> Vec<BashActivity> {
     parse_bash_activities(shells)
         .into_iter()
-        .filter_map(|mut activity| {
-            let row = rows.iter().find(|row| {
+        .filter(|activity| {
+            rows.iter().any(|row| {
                 row.kind == RowKind::PersistentShell
                     && row.summary.get("shellId").and_then(Value::as_str)
                         == Some(activity.id.as_str())
-            })?;
-            activity.session = row
-                .summary
-                .get("assignment")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            Some(activity)
+                    && row.summary["session"].is_null()
+            })
         })
         .collect()
 }

@@ -15,6 +15,12 @@ fn theme() -> Theme {
     Theme::builtin("prime", ColorMode::TrueColor)
 }
 
+/// Enter on row `id`'s list row: its detail opens.
+fn open(view: &mut BashView, id: &str) -> BashViewAction {
+    view.select(id);
+    view.handle_key("enter", &kb())
+}
+
 fn activities() -> Vec<BashActivity> {
     parse_bash_activities(&json!({"activities": [
         {"id":"a","command":"cargo build --release","pid":42,"startedAt":"2026-09-22T01:00:00Z","status":"running","durationMs":3412},
@@ -240,7 +246,6 @@ fn the_pane_runs_to_the_bottom() {
             status: "finished".to_string(),
             exit_code: Some(0),
             duration_ms: Some(u64::from(n) * 1_000),
-            session: None,
         })
         .collect();
     for viewport in [10usize, 16, 24] {
@@ -1114,11 +1119,11 @@ fn durations_format_compactly() {
 #[test]
 fn replacing_the_entire_view_rejects_previous_output_and_errors() {
     let mut previous = BashView::new(activities(), 40);
-    previous.open("a");
+    open(&mut previous, "a");
     let old_generation = previous.detail_generation;
     for id in ["a", "b"] {
         let mut replacement = BashView::new(activities(), 40);
-        replacement.open(id);
+        open(&mut replacement, id);
         replacement.set_output(id, "current output", replacement.detail_generation);
         replacement.set_output(id, "stale output", old_generation);
         replacement.set_error("stale error".to_string(), true, Some(old_generation));
@@ -1134,7 +1139,7 @@ fn replacing_the_entire_view_rejects_previous_output_and_errors() {
 #[test]
 fn registry_changes_preserve_failed_tail_fetches_and_their_retry() {
     let mut view = BashView::new(activities(), 40);
-    let action = view.open("a");
+    let action = open(&mut view, "a");
     let BashViewAction::OpenDetail { generation, .. } = action else {
         panic!("open detail")
     };

@@ -287,6 +287,7 @@ fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
         .find(|(_, row_index)| *row_index == index)
         .copied()
         .expect("session row");
+    mode.saved_catalog_loaded = true;
     mode.apply_persistent_shells(serde_json::json!({ "activities": [{
         "id": "shell-a", "command": "watch build", "status": "running", "persistent": true
     }]}));
@@ -297,6 +298,7 @@ fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
         .cloned()
         .expect("shell row");
     mode.open_persistent_shell(&row);
+    mode.handle_shell_view_key("enter");
     let crate::bash_view::BashViewAction::OpenDetail { generation, .. } =
         mode.pending_shell_action.take().expect("tail action")
     else {
@@ -327,6 +329,7 @@ fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
 #[test]
 fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
     let (mut mode, _) = mode_with_row("holder", "mock-1");
+    mode.saved_catalog_loaded = true;
     mode.apply_persistent_shells(serde_json::json!({ "activities": [{
         "id": "orphan", "command": "sleep 60", "sessionId": "deleted",
         "status": "unverified", "durationMs": 4_000, "persistent": true,
@@ -340,6 +343,7 @@ fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
         ["$", "sleep", "60", "-", "-", "4.0s"]
     );
     mode.open_persistent_shell(&row);
+    mode.handle_shell_view_key("enter");
     mode.pending_shell_action.take();
     mode.handle_shell_view_key("enter");
     assert!(mode.pending_shell_action.is_none());
@@ -397,43 +401,6 @@ fn shell_rows_render_in_the_session_table_columns() {
 }
 
 #[test]
-fn the_shell_drill_in_names_its_session_and_follows_re_polls() {
-    let mut mode = fresh_mode(vec![
-        roster_entry("r", "running", &parent_summary("r")),
-        roster_entry("i", "idle", &parent_summary("i")),
-    ]);
-    mode.rebuild_rows();
-    let shells = |session: &str| {
-        serde_json::json!({ "activities": [{
-            "id": "s1", "command": "cargo watch", "sessionId": session, "status": "running",
-            "pid": 4242, "durationMs": 754_000,
-        }]})
-    };
-    mode.apply_persistent_shells(shells("i"));
-    mode.render_frame(100, 24);
-    let row = mode
-        .rows
-        .iter()
-        .find(|row| row.kind == RowKind::PersistentShell)
-        .cloned()
-        .expect("shell row");
-    mode.open_persistent_shell(&row);
-    let metadata = |mode: &mut AgentsViewMode| {
-        let (lines, _) = mode.render_frame(100, 24);
-        lines
-            .iter()
-            .map(flat)
-            .find(|text| text.contains("pid 4242"))
-            .expect("the drill-in metadata row")
-    };
-    let opened = metadata(&mut mode);
-    assert!(opened.contains("session i name"), "{opened}");
-    mode.apply_persistent_shells(shells("r"));
-    let re_polled = metadata(&mut mode);
-    assert!(re_polled.contains("session r name"), "{re_polled}");
-}
-
-#[test]
 fn finished_persistent_shells_never_open_the_block() {
     let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
     mode.rebuild_rows();
@@ -454,10 +421,10 @@ fn finished_persistent_shells_never_open_the_block() {
 #[test]
 fn the_shells_block_and_its_overlay_list_only_live_shells() {
     let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
-    mode.rebuild_rows();
+    mode.apply_saved_loaded(Vec::new());
     mode.apply_persistent_shells(serde_json::json!({ "activities": [
-        { "id": "s1", "command": "cargo build", "sessionId": "i", "status": "finished", "exitCode": 0 },
-        { "id": "s2", "command": "cargo watch", "sessionId": "i", "status": "running" },
+        { "id": "s1", "command": "cargo build", "sessionId": "gone", "status": "finished", "exitCode": 0 },
+        { "id": "s2", "command": "cargo watch", "sessionId": "gone", "status": "running" },
         { "id": "s3", "command": "sleep 600", "sessionId": "gone", "status": "finished", "exitCode": 143 },
     ]}));
     let render = |mode: &mut AgentsViewMode| {
@@ -481,7 +448,6 @@ fn the_shells_block_and_its_overlay_list_only_live_shells() {
         .cloned()
         .expect("shell row");
     mode.open_persistent_shell(&row);
-    mode.handle_shell_view_key("left");
     let overlay = render(&mut mode).join("\n");
     assert!(
         overlay.contains("cargo watch")

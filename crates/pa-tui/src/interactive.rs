@@ -80,9 +80,12 @@ pub enum SessionSelection {
 
 /// The session panel an agents-view activity line mounts when its session opens; the panel's close
 /// returns to the agents view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionPanel {
-    Shells,
+    /// The Bash panel, on `shell_id`'s row when a persistent shell row opened it.
+    Shells {
+        shell_id: Option<String>,
+    },
     FactoryRuns,
 }
 
