@@ -43,6 +43,7 @@ use render::Renderer;
 
 mod delete;
 mod heartbeats;
+mod persistent_shells;
 mod session_activity;
 
 #[cfg(test)]
@@ -264,6 +265,19 @@ enum UiInput {
     },
     /// One shells/factory-runs fetch cycle landed: the activity lines re-count.
     SessionActivityLoaded(Vec<session_activity::ActivityRead>),
+    /// A `list_persistent_shells` fetch landed (`None`: it failed, the last list stays).
+    PersistentShellsLoaded(Option<Value>),
+    /// The open bash view's output tail for shell `id`, stamped with its open's generation.
+    PersistentShellTail {
+        id: String,
+        generation: u64,
+        outcome: Result<String, String>,
+    },
+    /// A persistent-shell kill settled.
+    PersistentShellKilled {
+        id: String,
+        outcome: Result<(), String>,
+    },
 }
 
 /// The flow's roster connection: one daemon connection alive across the flow's view runs, so a
@@ -431,6 +445,12 @@ struct AgentsViewMode {
     heartbeats: Vec<crate::heartbeats_picker::HeartbeatEntry>,
     /// Each live session's own shells and factory-run counts, keyed by `activeSessionId`.
     session_activity: std::collections::HashMap<String, SessionActivity>,
+    /// The latest `list_persistent_shells` data: every persistent shell machine-wide.
+    persistent_shells: Value,
+    /// The bash view a shell row's open mounts over the list.
+    shell_view: Option<crate::bash_view::BashView>,
+    /// The open bash view's action the run loop dispatches (output fetch or kill).
+    pending_shell_action: Option<crate::bash_view::BashViewAction>,
 }
 
 /// The press state of one left click, row-scoped: the release must land on the same row.
@@ -532,6 +552,9 @@ impl AgentsViewMode {
             actions: Vec::new(),
             heartbeats: Vec::new(),
             session_activity: std::collections::HashMap::new(),
+            persistent_shells: Value::Null,
+            shell_view: None,
+            pending_shell_action: None,
         }
     }
 }
@@ -774,6 +797,11 @@ async fn run_agents_view_surface(
         ));
     }
     let mut activity_fetch_at: Option<tokio::time::Instant> = None;
+    // The persistent shells' list poll: one fetch in flight, the next armed when it lands.
+    if client.supports_server_capability(persistent_shells::CAPABILITY) {
+        persistent_shells::spawn_list_fetch(&client, ui_tx.clone());
+    }
+    let mut shells_fetch_at: Option<tokio::time::Instant> = None;
     // TS `start()`'s open-time settle (`armSavedSearchFetch` followed by
     // `resolveMissingSelectionAnchor`): a carried catalog arms no fetch,
     // so no terminal load ever arrives to settle the entry anchor's wait -
@@ -934,6 +962,9 @@ async fn run_agents_view_surface(
                     deleted_saved_path,
                 } => {
                     mode.delete_result(&message, tone, deleted_saved_path);
+                    if shells_fetch_at.is_some() {
+                        shells_fetch_at = Some(tokio::time::Instant::now());
+                    }
                 }
                 UiInput::RenameResult { rename, outcome } => {
                     mode.rename_result(rename, outcome);
@@ -1003,11 +1034,60 @@ async fn run_agents_view_surface(
                         tokio::time::Instant::now() + crate::interactive::ACTIVITY_POLL_INTERVAL,
                     );
                 }
+                UiInput::PersistentShellsLoaded(data) => {
+                    if let Some(data) = data {
+                        mode.apply_persistent_shells(data);
+                    }
+                    shells_fetch_at =
+                        Some(tokio::time::Instant::now() + persistent_shells::POLL_INTERVAL);
+                }
+                UiInput::PersistentShellTail {
+                    id,
+                    generation,
+                    outcome,
+                } => {
+                    if let Some(view) = mode
+                        .shell_view
+                        .as_mut()
+                        .filter(|view| view.detail_id().as_deref() == Some(id.as_str()))
+                    {
+                        match outcome {
+                            Ok(tail) => view.set_output(&id, &tail, generation),
+                            Err(error) => view.set_error(error, true, Some(generation)),
+                        }
+                    }
+                }
+                // A landed kill re-reads the list now unless a read is already in flight.
+                UiInput::PersistentShellKilled { id, outcome } => match outcome {
+                    Ok(()) => {
+                        if shells_fetch_at.is_some() {
+                            shells_fetch_at = Some(tokio::time::Instant::now());
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(view) = mode
+                            .shell_view
+                            .as_mut()
+                            .filter(|view| view.detail_id().as_deref() == Some(id.as_str()))
+                        {
+                            view.set_error(error, false, None);
+                        }
+                    }
+                },
                 // The headless plan ended: the run stops here (the
                 // interactive harness's `HeadlessDone` contract). A plan
                 // that ends without an exit key still captures its frames
                 // and returns instead of spinning forever.
                 UiInput::Done => mode.running = false,
+            }
+            // Keys and row clicks can both open the shell overlay. Dispatch only
+            // after the input has been applied, regardless of its source.
+            if let Some(action) = mode.pending_shell_action.take() {
+                action_dispatches.extend(persistent_shells::spawn_action(
+                    &client,
+                    ui_tx.clone(),
+                    action,
+                ));
             }
             // An exit decision skips sync terminal I/O: a wedged pty must
             // not prevent the reader-armed force-quit deadline from firing.
@@ -1020,6 +1100,7 @@ async fn run_agents_view_surface(
             // loop state: select evaluates EVERY branch expression whether or not its
             // precondition passes, so the arms below must never unwrap an Option.
             let flush_at = saved_flush;
+            let shells_at = shells_fetch_at;
             let status_at = mode.status_expiry(std::time::Instant::now());
             tokio::select! {
                     maybe_event = events.recv() => {
@@ -1115,6 +1196,15 @@ async fn run_agents_view_surface(
                             &client,
                             mode.live_session_ids(),
                         ));
+                    }
+                    () = async {
+                        match shells_at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        shells_fetch_at = None;
+                        persistent_shells::spawn_list_fetch(&client, ui_tx.clone());
                     }
                     // The incident-notice poll's wake-up: the drain below the select
                     // does the refresh, so the arm only ends the wait.
@@ -1315,6 +1405,9 @@ fn is_daemon_answer(input: &UiInput) -> bool {
             | UiInput::KillResult { .. }
             | UiInput::HeartbeatsLoaded { .. }
             | UiInput::SessionActivityLoaded(_)
+            | UiInput::PersistentShellsLoaded(_)
+            | UiInput::PersistentShellTail { .. }
+            | UiInput::PersistentShellKilled { .. }
     )
 }
 
