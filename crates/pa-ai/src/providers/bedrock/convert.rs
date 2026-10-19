@@ -444,7 +444,6 @@ mod supports_always_on_adaptive_thinking_tests {
     }
 }
 
-
 #[cfg(test)]
 mod convert_messages_tests {
     use serde_json::{json, Value};
