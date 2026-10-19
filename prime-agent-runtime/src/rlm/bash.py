@@ -1012,17 +1012,14 @@ class _OutputFile:
 
 
 class PersistentBashHandle(BashHandle):
-    """bash(..., persistent=True): a shell that outlives this kernel and its session.
+    """bash(..., persistent=True); see bash() for its lifecycle.
 
     Its record (assigned to the session), output, and exit status are files in
-    the agent dir's persistent-shells home instead of an orphan journal entry,
-    so kernel death, restarts, worker/daemon shutdown, and the session's delete
-    or archive leave it running; a deleted session's shells run on as orphans.
-    The session's next kernel re-attaches it (see persistent_shells()). Only its
-    own exit or kill() ends it. Awaits never own it: cancelling an await leaves
-    it running. Finished output is kept in memory. Files remain recoverable on
-    read errors or when a leaderless group cannot be verified; such a group is
-    never signalled using only its old numeric process-group id.
+    the agent dir's persistent-shells home instead of an orphan journal entry.
+    Awaits never own it: cancelling an await leaves it running. Finished
+    output is kept in memory. Files remain recoverable on read errors or when
+    a leaderless group cannot be verified; such a group is never signalled
+    using only its old numeric process-group id.
     """
 
     def __init__(

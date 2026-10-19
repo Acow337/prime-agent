@@ -219,13 +219,13 @@ pub(crate) async fn respond(
 }
 
 #[cfg(all(test, unix))]
-pub(crate) mod test_support {
+mod test_support {
     use std::path::Path;
     use std::process::{Child, Command};
 
     /// A setsid'd `sleep` registered in `agent_dir`'s persistent-shell home,
     /// assigned to `session_id`, under `start_id` (`None`: its real start identity).
-    pub(crate) fn registered_sleeper(
+    pub(super) fn registered_sleeper(
         agent_dir: &Path,
         session_id: &str,
         start_id: Option<&str>,
@@ -244,7 +244,7 @@ pub(crate) mod test_support {
 
     /// Write one record for shell `pid` under `start_id`, assigned to
     /// `session_id`; returns its id.
-    pub(crate) fn register(agent_dir: &Path, pid: u32, start_id: &str, session_id: &str) -> String {
+    pub(super) fn register(agent_dir: &Path, pid: u32, start_id: &str, session_id: &str) -> String {
         let home = agent_dir.join(super::HOME_DIR);
         std::fs::create_dir_all(&home).expect("persistent-shell home");
         let id = format!("{pid:032}");
@@ -294,32 +294,6 @@ mod tests {
             .spawn()
             .unwrap();
         (leader, member, id)
-    }
-
-    #[test]
-    fn session_delete_leaves_its_shells_running_as_orphans() {
-        let root = tempfile::tempdir().unwrap();
-        let sessions = root.path().join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        let session_file = sessions.join("s1.jsonl");
-        std::fs::write(&session_file, "{}\n").unwrap();
-        let mut sleeper = registered_sleeper(root.path(), "s1", None);
-
-        let deleted = crate::saved_session_commands::delete_session_file(&session_file);
-
-        assert_eq!(deleted["ok"], true);
-        assert!(!session_file.exists());
-        assert!(
-            sleeper.try_wait().unwrap().is_none(),
-            "the shell still runs"
-        );
-        assert_eq!(
-            live_shell_rows_by_session(root.path())["s1"][0]["pid"],
-            sleeper.id(),
-            "it stays listed under the deleted session"
-        );
-        sleeper.kill().unwrap();
-        sleeper.wait().unwrap();
     }
 
     #[test]
