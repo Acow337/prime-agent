@@ -1250,7 +1250,7 @@ async fn run_interactive_surface(
         // paint; a keystroke's toast or hint) must not park behind a select that has no other wake.
         // The headless barriers' deadlines and the hint/toast expiry arm HERE, not after the frame
         // gate.
-        if session.dirty && render_deadline.is_none() {
+        if (session.dirty || session.wants_transcript_page(&view)) && render_deadline.is_none() {
             render_deadline = Some(Instant::now());
         }
         for deadline in [

@@ -95,6 +95,33 @@ fn resume_does_not_wait_for_a_pending_backfill_page() {
     leave_with_pending_backfill(b"/resume s2\r");
 }
 
+/// The top key (shift+alt+up) as an escape sequence.
+const TOP_KEY: &[u8] = b"\x1b[1;4A";
+
+/// The top key as the last input: the terminal paints the key inline, so nothing but
+/// the loop's own wake starts the head page, and the session start must render.
+#[test]
+fn the_top_key_loads_the_session_start_as_the_last_input() {
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let held = Arc::new(AtomicUsize::new(0));
+    let served = Arc::new(AtomicUsize::new(0));
+    let mut harness = ExitBackfillHarness::start(Arc::clone(&held), Some(Arc::clone(&served)));
+    harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
+    harness.write(KITTY_ANSWER);
+    harness.wait_from_start(LAST_ROW, "the attach tail rendered");
+    harness.settle();
+    let mark = harness.output().len();
+    harness.write(TOP_KEY);
+    harness.master.wait_from(
+        mark,
+        b"SESSION-START-ROW",
+        "the session start after the top key",
+    );
+}
+
 /// Older pages the window keeps resident above the tail; one more evicts the
 /// chunk next to the tail.
 const RESIDENT_CHUNKS: usize = 3;
@@ -530,12 +557,16 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
                 }
-                // An older page with history served: one page of `old row`s.
-                "get_messages" if history.is_some() && command["page"]["from"] == "end" => {
+                // With history served: an older page or the head page of `old row`s.
+                "get_messages"
+                    if history.is_some()
+                        && (command["page"]["from"] == "end"
+                            || command["page"].get("after").is_none()) =>
+                {
                     history
                         .expect("history mode")
                         .fetch_add(1, Ordering::SeqCst);
-                    write_json(&mut writer, &older_page(id, &command["page"]));
+                    write_json(&mut writer, &history_page(id, &command["page"]));
                 }
                 // A page request: counted and held — the run loop starts it
                 // from the windowed attach's cursor, and the exit must not
@@ -567,24 +598,36 @@ fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// One older page over `HISTORY_BEFORE` messages `old row 0..`, ids `e<index>`.
-fn older_page(id: &str, page: &Value) -> Value {
-    let before = page["before"]
-        .as_str()
-        .and_then(|cursor| cursor[1..].parse::<usize>().ok())
-        .expect("older page cursor");
+/// One page over `HISTORY_BEFORE` messages `old row 0..`, ids `e<index>`: an
+/// older page, or the head page.
+fn history_page(id: &str, page: &Value) -> Value {
+    let cursor = |key: &str| {
+        page[key]
+            .as_str()
+            .and_then(|cursor| cursor[1..].parse::<usize>().ok())
+    };
     let limit = page["limit"].as_u64().expect("page limit") as usize;
-    let start = before.saturating_sub(limit);
-    let messages: Vec<Value> = (start..before)
-        .map(|index| json!({ "role": "user", "content": format!("old row {index}") }))
+    let (start, end) = if page["from"] == "end" {
+        let end = cursor("before").expect("older page cursor");
+        (end.saturating_sub(limit), end)
+    } else {
+        (0, limit.min(cursor("until").expect("head page bound")))
+    };
+    let messages: Vec<Value> = (start..end)
+        .map(|index| match index {
+            // A row the terminal's cell diff must write whole: it shares no cell with an
+            // `old row` line.
+            0 => json!({ "role": "user", "content": "SESSION-START-ROW" }),
+            _ => json!({ "role": "user", "content": format!("old row {index}") }),
+        })
         .collect();
     json!({
         "type": "response", "id": id, "command": "get_messages", "success": true,
         "data": {
             "messages": messages,
             "firstEntryId": format!("e{start}"),
-            "lastEntryId": format!("e{}", before - 1),
-            "more": start > 0,
+            "lastEntryId": format!("e{}", end - 1),
+            "more": if page["from"] == "end" { start > 0 } else { end < HISTORY_BEFORE },
             "historyLeafId": "attach-leaf",
         },
     })
