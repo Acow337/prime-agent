@@ -926,6 +926,8 @@ async fn a_saved_session_listing_reads_each_sessions_harness_store_once() {
         cwd: Some("/tmp".to_string()),
         session_dir: Some(sessions.to_string_lossy().to_string()),
         scope: Value::Null,
+        limit: None,
+        cursor: None,
         rest: Map::new(),
     };
     let (stream, mut frames) = mpsc::channel(64);
