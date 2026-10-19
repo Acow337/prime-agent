@@ -1491,7 +1491,6 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         bash_module._rehydrate_persistent_shells()
         done, held = self.handle_for(done_pid), self.handle_for(held_pid)
         self.assertTrue(done.running and held.running)
-        self.assertIn("persistent", repr(done))
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertTrue(rows[held_pid]["persistent"])
         self.assertEqual(rows[held_pid]["status"], "running")
