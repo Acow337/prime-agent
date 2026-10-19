@@ -823,14 +823,22 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
         output_tokens: 110,
         cost: 0.5,
     });
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(
         row["deletedDescendantUsage"],
         json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
     );
     // Absent again: the field never rides as a null.
     info.deleted_descendant_usage = None;
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert!(row.get("deletedDescendantUsage").is_none());
 }
 
@@ -846,7 +854,11 @@ async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
     session.set_path(path.clone());
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
-    assert!(saved_session_row(&info, &std::collections::HashMap::new())
+    let shells = std::collections::HashMap::new();
+    let specs = super::sessions::stored_factory_specs(vec![info.clone()])
+        .await
+        .unwrap();
+    assert!(saved_session_row(&info, &shells, &specs)
         .get("factorySpecs")
         .is_none());
     let harness = pa_core::refinement::get_local_harness_state_dir(
@@ -854,24 +866,96 @@ async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
     )
     .unwrap();
     crate::test_support::write_factory_specs(&harness, &["a", "b"]);
+    let specs = super::sessions::stored_factory_specs(vec![info.clone()])
+        .await
+        .unwrap();
     assert_eq!(
-        saved_session_row(&info, &std::collections::HashMap::new())["factorySpecs"],
+        saved_session_row(&info, &shells, &specs)["factorySpecs"],
         json!(2)
     );
     #[cfg(unix)]
     {
         let state_path = pa_core::refinement::get_harness_state_path(&harness);
-        let rows = crate::test_support::assert_async_file_read(
+        let specs = crate::test_support::assert_async_file_read(
             &state_path,
-            super::sessions::saved_session_rows(
-                vec![info],
-                Arc::new(std::collections::HashMap::new()),
-            ),
+            super::sessions::stored_factory_specs(vec![info.clone()]),
         )
         .await
-        .expect("asynchronous catalog rows");
-        assert_eq!(rows[0]["factorySpecs"], json!(2));
+        .expect("asynchronous factory spec read");
+        assert_eq!(
+            saved_session_row(&info, &shells, &specs)["factorySpecs"],
+            json!(2)
+        );
     }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// One catalog listing reads each session's harness store once: the streamed rows and the final
+/// response share that read, so they publish the same rows.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_saved_session_listing_reads_each_sessions_harness_store_once() {
+    let root = std::env::temp_dir().join(format!("pa-saved-once-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut counters = Vec::new();
+    for specs in [&["a"][..], &["a", "b"][..]] {
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = sessions.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        let harness = pa_core::refinement::get_local_harness_state_dir(
+            crate::scheduled_jobs::session_artifact_dir(&path, session.session_id()).as_deref(),
+        )
+        .unwrap();
+        crate::test_support::write_factory_specs(&harness, specs);
+        counters.push(crate::test_support::count_file_reads(
+            &pa_core::refinement::get_harness_state_path(&harness),
+        ));
+    }
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: root.join("daemon.sock"),
+            agent_dir: root.join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let command = DaemonCommand::ListSavedSessions {
+        id: None,
+        active_session_id: None,
+        cwd: Some("/tmp".to_string()),
+        session_dir: Some(sessions.to_string_lossy().to_string()),
+        scope: Value::Null,
+        rest: Map::new(),
+    };
+    let (stream, mut frames) = mpsc::channel(64);
+    let lines = supervisor
+        .handle_saved_session_list(&command, "list", &stream)
+        .await;
+    drop(stream);
+    let reads: Vec<usize> = counters
+        .into_iter()
+        .map(crate::test_support::FileReadCounter::finish)
+        .collect();
+    assert_eq!(reads, [1, 1], "one harness read per session per listing");
+    let mut streamed = Vec::new();
+    while let Some((bundle, _)) = frames.recv().await {
+        for frame in bundle {
+            if let Outbound::Line(line) = frame {
+                if line["type"] == "session_list_item" {
+                    streamed.push(line["session"].clone());
+                }
+            }
+        }
+    }
+    let sessions_served = lines[0]["data"]["sessions"].as_array().unwrap();
+    assert_eq!(&streamed, sessions_served);
+    let mut specs: Vec<u64> = streamed
+        .iter()
+        .map(|row| row["factorySpecs"].as_u64().unwrap())
+        .collect();
+    specs.sort_unstable();
+    assert_eq!(specs, [1, 2]);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -891,7 +975,11 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     let summary = saved_session_summary(&info);
     assert_eq!(summary["thinkingLevel"], json!("high"));
     assert!(summary["model"].is_null(), "saved rows carry no model");
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(row["thinkingLevel"], json!("high"));
     assert_eq!(row["model"], json!({ "provider": "p", "modelId": "m" }));
     // A session file without a persisted level stays bare (a fresh
@@ -905,11 +993,13 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     assert!(saved_session_summary(&draft_info)
         .get("thinkingLevel")
         .is_none());
-    assert!(
-        saved_session_row(&draft_info, &std::collections::HashMap::new())
-            .get("thinkingLevel")
-            .is_none()
-    );
+    assert!(saved_session_row(
+        &draft_info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new()
+    )
+    .get("thinkingLevel")
+    .is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -932,7 +1022,11 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     }));
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(
         row["usage"],
         json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
@@ -948,11 +1042,13 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     draft.set_path(draft_path.clone());
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
-    assert!(
-        saved_session_row(&draft_info, &std::collections::HashMap::new())
-            .get("usage")
-            .is_none()
-    );
+    assert!(saved_session_row(
+        &draft_info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new()
+    )
+    .get("usage")
+    .is_none());
     assert!(saved_session_summary(&draft_info).get("usage").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -996,7 +1092,11 @@ fn saved_session_rows_match_the_catalog_row_golden() {
 
     let info = crate::session_store::read_session_info(&path).unwrap();
     assert_eq!(
-        saved_session_row(&info, &std::collections::HashMap::new()),
+        saved_session_row(
+            &info,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new()
+        ),
         json!({
             "path": path.to_string_lossy(),
             "id": "golden-session",
