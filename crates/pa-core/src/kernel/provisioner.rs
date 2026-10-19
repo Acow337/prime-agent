@@ -18,7 +18,7 @@ use crate::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use crate::kernel::shared::ExecuteStatus;
 use crate::kernel::shared::{
     ExecuteOptions, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
-    KernelSnapshotConfig, BOOTSTRAP_EXECUTION_TIMEOUT_MS,
+    KernelSnapshotConfig, BASH_COMPLETED_REQUEST_TYPE, BOOTSTRAP_EXECUTION_TIMEOUT_MS,
 };
 use crate::kernel::state_snapshot::RestoreResult;
 use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
@@ -1035,7 +1035,15 @@ async fn start_kernel_impl(
         gate().await;
     }
     let snapshot_dir = options.snapshot_dir.clone();
-    let bootstrap_code = build_rlm_bootstrap_code(&options.python_skills);
+    // The bounded-await default keys on the bash.completed host handler:
+    // one source of truth (the registry the daemon registers the notice in).
+    let bootstrap_code = build_rlm_bootstrap_code(
+        &options.python_skills,
+        options
+            .host_handlers
+            .get(BASH_COMPLETED_REQUEST_TYPE)
+            .is_some(),
+    );
     let mut env = options.env.clone();
     if let Some(shell_path) = &options.shell_path {
         env.insert(
@@ -1359,6 +1367,83 @@ mod tests {
         .unwrap();
         let engine = shell_test_session(cwd, agent_dir).await.unwrap();
         assert_eq!(engine.provisioner.inner.options.shell_path, Some(project));
+    }
+
+    #[tokio::test]
+    async fn session_settings_reach_the_kernel_command_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "shellCommandPrefix": "shopt -s expand_aliases" }).to_string(),
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        assert_eq!(
+            engine.provisioner.inner.options.command_prefix.as_deref(),
+            Some("shopt -s expand_aliases")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_serper_key_reaches_the_kernel_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            r#"{ "serper": { "type": "api_key", "key": "!printf key-from-cmd" } }"#,
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        let injected = engine
+            .provisioner
+            .inner
+            .options
+            .env
+            .get("SERPER_API_KEY")
+            .map(String::as_str);
+        // A nonblank ambient SERPER_API_KEY wins (TS parity): the ambient key
+        // reaches the kernel through the inherited env, not the wiring.
+        if std::env::var("SERPER_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+            assert_eq!(injected, None);
+        } else {
+            assert_eq!(injected, Some("key-from-cmd"));
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_websearch_skill_no_serper_key_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "bundledSkills": { "websearch": false } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            r#"{ "serper": { "type": "api_key", "key": "!printf key-from-cmd" } }"#,
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        assert!(
+            !engine
+                .provisioner
+                .inner
+                .options
+                .env
+                .contains_key("SERPER_API_KEY"),
+            "the key rides the env only when a websearch skill is loaded"
+        );
     }
 
     #[tokio::test]
