@@ -166,6 +166,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "remove_mcp_connection",
     "mark_anthropic_warning_shown",
     "list_persistent_shells",
+    "tail_persistent_shell",
+    "kill_persistent_shell",
 ];
 
 /// Parsed client command envelope.
@@ -929,6 +931,8 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::CommitUpdateRestart { .. }
         | DaemonCommand::UpdateRestoreStatus { .. }
         | DaemonCommand::ListPersistentShells { .. }
+        | DaemonCommand::TailPersistentShell { .. }
+        | DaemonCommand::KillPersistentShell { .. }
         | DaemonCommand::Restart { .. }
         | DaemonCommand::Shutdown { .. } => None,
     }
@@ -978,6 +982,8 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::TailKernelBash { .. } => "tail_kernel_bash",
         DaemonCommand::KillKernelBash { .. } => "kill_kernel_bash",
         DaemonCommand::ListPersistentShells { .. } => "list_persistent_shells",
+        DaemonCommand::TailPersistentShell { .. } => "tail_persistent_shell",
+        DaemonCommand::KillPersistentShell { .. } => "kill_persistent_shell",
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",

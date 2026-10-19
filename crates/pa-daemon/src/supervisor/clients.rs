@@ -826,22 +826,39 @@ impl Supervisor {
                 )
             }
             DaemonCommand::ListPersistentShells { .. } => {
+                // The machine-wide persistent shells, each with its assigned session id.
                 let agent_dir = self.options.agent_dir.clone();
-                let response = match tokio::task::spawn_blocking(move || {
-                    crate::persistent_shells::live_shell_rows(&agent_dir)
+                let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
+                    Ok(Some(
+                        json!({ "activities": crate::persistent_shells::shell_rows(&agent_dir) }),
+                    ))
                 })
-                .await
-                {
-                    Ok(activities) => response_success(
-                        Some(&command_id),
-                        &type_name,
-                        Some(json!({ "activities": activities })),
-                    ),
-                    Err(error) => {
-                        response_failure(Some(&command_id), &type_name, &error.to_string(), None)
-                    }
-                };
-                (vec![response_line(&response)], false)
+                .await;
+                (vec![line], false)
+            }
+            DaemonCommand::TailPersistentShell {
+                shell_id, lines, ..
+            } => {
+                let agent_dir = self.options.agent_dir.clone();
+                let (shell_id, lines) = (shell_id.clone(), *lines as usize);
+                let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
+                    Ok(
+                        crate::persistent_shells::output_tail(&agent_dir, &shell_id, lines)
+                            .map(|tail| json!({ "shellId": shell_id, "tail": tail })),
+                    )
+                })
+                .await;
+                (vec![line], false)
+            }
+            DaemonCommand::KillPersistentShell { shell_id, .. } => {
+                let agent_dir = self.options.agent_dir.clone();
+                let shell_id = shell_id.clone();
+                let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
+                    crate::persistent_shells::kill_shell(&agent_dir, &shell_id)
+                        .map(|known| known.then(|| json!({ "shellId": shell_id })))
+                })
+                .await;
+                (vec![line], false)
             }
             DaemonCommand::Prompt {
                 active_session_id, ..
