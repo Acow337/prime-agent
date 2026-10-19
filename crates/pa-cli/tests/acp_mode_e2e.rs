@@ -1473,7 +1473,7 @@ fn acp_daemon_attached_settled_model_error_publishes_the_envelope_and_fails_the_
                 "terminalQuiescence".to_string(),
                 Some("error".to_string()),
                 None,
-                false
+                true
             ),
         ],
         "exactly the boundary and the terminal frame, in order, seal the error envelope: {shapes:?}"
