@@ -907,9 +907,55 @@ fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
     );
 }
 
+/// Creates a resident RLM child of `root_id`, both on `prime-inference`.
+fn create_auth_child(client: &mut Client, dir: &std::path::Path, root_id: &str) -> String {
+    let agent_dir = dir.join("agent");
+    let child_dir = agent_dir.join("child-artifacts");
+    std::fs::create_dir_all(&child_dir).expect("child dir");
+    let parent_file = std::fs::read_dir(agent_dir.join("sessions"))
+        .expect("root session directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("root session file");
+    client.send_command(
+        "create-child",
+        &json!({
+            "type": "create",
+            "name": "auth-child",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": child_dir.to_string_lossy(),
+                "parentSessionPath": parent_file.to_string_lossy(),
+                "rlmDepth": 1,
+                "provider": "prime-inference",
+                "model": "mock-1"
+            },
+            "runtimeMetadata": {
+                "kind": "subagent",
+                "rlmChildId": "auth-child-id",
+                "parentActiveSessionId": root_id,
+                "parentSessionFile": parent_file.to_string_lossy(),
+                "parentSessionId": "root-session",
+                "rlmDepth": 1,
+                "createdAt": 0
+            },
+            "lifecycle": "resident"
+        }),
+    );
+    let child = client.request("create-child");
+    assert_eq!(child["success"], true, "child create failed: {child}");
+    child["data"]["id"]
+        .as_str()
+        .or_else(|| child["data"]["sessionId"].as_str())
+        .expect("child id")
+        .to_string()
+}
+
 /// A completed `auth_changed` fanout updates both an already-built root and
-/// an already-built child without restarting either worker. The mock captures
-/// the authorization/team pair actually sent to the provider.
+/// an already-built child without restarting either worker, a logout clears
+/// the removed key from both, and a worker that cannot apply the change fails
+/// the fanout. The mock captures the authorization/team pair actually sent to
+/// the provider.
 #[test]
 fn saved_login_fans_out_to_running_root_and_child() {
     let primary = FailingMock::start(0, ReplyMode::Text("served"));
@@ -941,45 +987,7 @@ fn saved_login_fans_out_to_running_root_and_child() {
         &json!({"type":"prompt_and_wait", "activeSessionId":root_id,"message":"root first"}),
     );
     assert_eq!(client.request("p-root-1")["success"], true);
-    let child_dir = agent_dir.join("child-artifacts");
-    std::fs::create_dir_all(&child_dir).expect("child dir");
-    let parent_file = std::fs::read_dir(agent_dir.join("sessions"))
-        .expect("root session directory")
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-        .expect("root session file");
-    client.send_command(
-        "create-child",
-        &json!({
-            "type": "create",
-            "name": "auth-child",
-            "config": {
-                "cwd": dir.path().to_string_lossy(),
-                "sessionDir": child_dir.to_string_lossy(),
-                "parentSessionPath": parent_file.to_string_lossy(),
-                "rlmDepth": 1,
-                "provider": "prime-inference",
-                "model": "mock-1"
-            },
-            "runtimeMetadata": {
-                "kind": "subagent",
-                "rlmChildId": "auth-child-id",
-                "parentActiveSessionId": root_id,
-                "parentSessionFile": parent_file.to_string_lossy(),
-                "parentSessionId": "root-session",
-                "rlmDepth": 1,
-                "createdAt": 0
-            },
-            "lifecycle": "resident"
-        }),
-    );
-    let child = client.request("create-child");
-    assert_eq!(child["success"], true, "child create failed: {child}");
-    let child_id = child["data"]["id"]
-        .as_str()
-        .or_else(|| child["data"]["sessionId"].as_str())
-        .expect("child id")
-        .to_string();
+    let child_id = create_auth_child(&mut client, dir.path(), &root_id);
     client.send_command(
         "p-child-1",
         &json!({"type":"prompt_and_wait", "activeSessionId":child_id,"message":"child first"}),
@@ -1012,4 +1020,40 @@ fn saved_login_fans_out_to_running_root_and_child() {
     assert!(after[2..]
         .iter()
         .all(|pair| pair == &("Bearer new-login".to_string(), "new-team".to_string())));
+
+    // A logout stops both workers serving the removed key and team.
+    std::fs::write(agent_dir.join("auth.json"), "{}").expect("log out");
+    client.send_command(
+        "auth-logout",
+        &json!({"type":"auth_changed", "providerId":"prime-inference"}),
+    );
+    let logged_out = client.request("auth-logout");
+    assert_eq!(
+        logged_out["success"], true,
+        "logout fanout failed: {logged_out}"
+    );
+    for (id, session) in [("p-root-3", &root_id), ("p-child-3", &child_id)] {
+        client.send_command(
+            id,
+            &json!({"type":"prompt_and_wait", "activeSessionId":session,"message":"after logout"}),
+        );
+        assert_eq!(client.request(id)["success"], true);
+    }
+    let after = primary.auth_headers();
+    assert_eq!(after.len(), 6);
+    assert!(after[4..]
+        .iter()
+        .all(|(auth, team)| auth != "Bearer new-login" && team != "new-team"));
+
+    // A worker that cannot apply the change fails the whole fanout.
+    std::fs::write(agent_dir.join("auth.json"), "not json").expect("corrupt store");
+    client.send_command(
+        "auth-unreadable",
+        &json!({"type":"auth_changed", "providerId":"prime-inference"}),
+    );
+    let failed = client.request("auth-unreadable");
+    assert_eq!(
+        failed["success"], false,
+        "an unapplied change reported success: {failed}"
+    );
 }

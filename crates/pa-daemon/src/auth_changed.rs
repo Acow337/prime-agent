@@ -1,6 +1,7 @@
 //! One-shot auth-change notification: refresh serving credentials in all
-//! currently resident session workers, including RLM children.
+//! live session workers, including RLM children.
 
+use pa_core::auth::PRIME_INFERENCE_PROVIDER_ID;
 use serde_json::json;
 
 use crate::backpressure::RouteAdmission;
@@ -8,18 +9,20 @@ use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS};
 
 impl Supervisor {
-    /// Notify every resident (including RLM children) after a saved Prime
-    /// credential changes. No credential material crosses this boundary.
+    /// Notify every live connected worker (including RLM children) after a
+    /// saved Prime credential changes. Workers that are not live yet build
+    /// their target from the already-written store at spawn, so they are
+    /// not counted. No credential material crosses this boundary.
     pub(crate) async fn handle_auth_changed_broadcast(
         &self,
         command_id: &str,
         type_name: &str,
         provider_id: &str,
     ) -> DaemonResponse {
-        if provider_id != "prime-inference" {
+        if provider_id != PRIME_INFERENCE_PROVIDER_ID {
             return response_failure(Some(command_id), type_name, "Unsupported provider", None);
         }
-        let residents = self.registry.list().await;
+        let residents = self.live_workers_in_creation_order().await;
         let responses = futures::future::join_all(residents.iter().map(|resident| async move {
             self.route_command_typed(
                 resident,

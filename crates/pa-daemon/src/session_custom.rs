@@ -313,64 +313,44 @@ impl Worker {
     /// touches the MCP auth store, whose snapshot takes a blocking lock —
     /// it parks on a blocking thread, the same posture as
     /// `get_mcp_connections`.
-    pub(crate) async fn handle_auth_changed(&self) -> DaemonResponse {
-        if let Some(engine) = &self.agent_engine {
-            let engine = std::sync::Arc::clone(engine);
-            match tokio::task::spawn_blocking(move || engine.apply_auth_changed()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    return response_failure(
-                        None,
-                        "auth_changed",
-                        &format!("auth refresh failed: {error}"),
-                        None,
-                    );
-                }
-                Err(error) => {
-                    return response_failure(
-                        None,
-                        "auth_changed",
-                        &format!("auth refresh failed: {error}"),
-                        None,
-                    );
-                }
-            }
-        }
-        response_success(None, "auth_changed", None)
-    }
-
     pub(crate) async fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
         }
+        self.reload_engine_live_inputs("reload").await
+    }
+
+    /// `auth_changed`: the supervisor's fanout after a saved Prime login or
+    /// logout. It runs the same live-input reload as `/reload`, without the
+    /// created-session gate: a worker with no built target has nothing to
+    /// refresh and answers success.
+    pub(crate) async fn handle_auth_changed(&self) -> DaemonResponse {
+        self.reload_engine_live_inputs("auth_changed").await
+    }
+
+    async fn reload_engine_live_inputs(&self, type_name: &str) -> DaemonResponse {
         if let Some(engine) = &self.agent_engine {
             let engine = std::sync::Arc::clone(engine);
             // The blocking thread's reload can fail two ways: the auth
             // store's reload (a malformed document, an unacquirable lock)
-            // or the join itself (a panic). Both answer the client's
-            // reload with the failure, never a success the session did
-            // not apply.
-            match tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    return response_failure(
-                        None,
-                        "reload",
-                        &format!("session reload failed: {error}"),
-                        None,
-                    );
-                }
-                Err(error) => {
-                    return response_failure(
-                        None,
-                        "reload",
-                        &format!("session reload failed: {error}"),
-                        None,
-                    );
-                }
+            // or the join itself (a panic). Both answer with the failure,
+            // never a success the session did not apply.
+            let error = match tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await
+            {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(error) = error {
+                return response_failure(
+                    None,
+                    type_name,
+                    &format!("session reload failed: {error}"),
+                    None,
+                );
             }
         }
-        response_success(None, "reload", None)
+        response_success(None, type_name, None)
     }
 }
 

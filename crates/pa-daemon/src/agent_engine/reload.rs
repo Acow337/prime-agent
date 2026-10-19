@@ -1,44 +1,38 @@
-//! The session's live-input reload (`/reload`'s daemon half): re-read the
-//! request auth from the credential store and the MCP manager's settings
-//! and auth state — the pieces another process (a `/login`, a `/mcp` key
-//! flow) can change under a running session.
+//! The session's live-input reload (`/reload`'s daemon half, and the
+//! saved-auth change notification): re-read the request auth from the
+//! credential store and the MCP manager's settings and auth state — the
+//! pieces another process (a `/login`, a `/mcp` key flow) can change under
+//! a running session.
 use super::AgentSessionEngine;
 use pa_core::session_engine::provider_adapter::ProviderTarget;
 
 impl AgentSessionEngine {
-    /// The stored request auth for the target's OWN model, applied in
-    /// place: only the key and headers change, and only when the
-    /// resolution serves a live credential for the model's provider —
-    /// stored, or the ambient environment/runtime override (a logout
-    /// that empties the store leaves the session on the env key, like a
-    /// fresh resolution). The configured `models.json` fallback key —
-    /// what the resolution serves when the store is unreadable OR
-    /// resolves no credential from any live source — is not a credential
-    /// and never replaces what the target already serves with. A
-    /// resolved credential REPLACES the pair: its headers land even when
-    /// it carries none, so a rotated credential without a team header
-    /// clears the previous credential's `X-Prime-Team-ID` instead of
-    /// serving it on the new key.
-    fn refresh_request_auth(&self, target: &mut ProviderTarget) {
-        let (api_key, headers, store_auth) =
-            self.resolve_request_key_and_headers_and_store_health(&target.model);
-        if store_auth {
-            if let Some(api_key) = api_key {
-                target.api_key = Some(api_key);
-                target.headers = headers;
-            }
-        }
+    /// The one rebind rule for every cached target (the live slot, an
+    /// armed image route, and the route's saved session target): the
+    /// target serves exactly the pair a fresh resolution yields for its
+    /// OWN model — the stored credential, the environment/runtime
+    /// override, the configured `models.json` key, or none. Only the key
+    /// and headers change, together, so a credential without a team
+    /// header clears the previous `X-Prime-Team-ID`.
+    ///
+    /// The rule is applied even when the credential has left the store:
+    /// a logout must stop serving the removed key, and every running
+    /// session then serves what a newly spawned worker would. Callers
+    /// gate the walk on a readable store, so a failed read never touches
+    /// a target.
+    fn rebind_request_auth(&self, target: &mut ProviderTarget) {
+        let (api_key, headers) = self.resolve_request_key_and_headers(&target.model);
+        target.api_key = api_key;
+        target.headers = headers;
     }
 
-    /// `/reload`'s session half: re-read the live inputs another process
-    /// may have changed — the request auth from the credential store
-    /// (rebinding the live target and an armed image route's pair in
-    /// place: the model and service tier never change), and the MCP
-    /// manager's settings and auth state. A rebind lands only off live
-    /// STORE auth (stored, or the ambient environment/runtime override);
-    /// the configured `models.json` fallback key never replaces a
-    /// last-good pair. A failed auth-store read fails the reload before
-    /// any target is touched.
+    /// `/reload`'s session half, also run for a saved-auth change
+    /// notification: re-read the live inputs another process may have
+    /// changed — the MCP manager's settings and auth state, then the
+    /// request auth of every cached target under
+    /// [`Self::rebind_request_auth`]'s rule (the model and service tier
+    /// never change). A failed auth-store read fails the call before any
+    /// target is touched.
     pub(crate) fn reload_live_inputs(&self) -> Result<(), String> {
         // The whole refresh is serialized against every other
         // resolve-and-install (the session's reload lock): overlapping
@@ -72,11 +66,15 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
         {
-            self.refresh_request_auth(&mut route.target);
+            self.rebind_request_auth(&mut route.target);
             if let Some(saved) = route.session_target.as_mut() {
-                self.refresh_request_auth(saved);
+                self.rebind_request_auth(saved);
             }
         }
+        // The live slot resolves outside its write lock (the resolution
+        // can OAuth-refresh); a target that moved under the read (a
+        // switch or route swap) re-resolves for whatever is live NOW, and
+        // a cleared slot stays cleared.
         let live_model = self
             .provider_target
             .read()
@@ -84,78 +82,19 @@ impl AgentSessionEngine {
             .as_ref()
             .map(|target| target.model.clone());
         if let Some(model) = live_model {
-            let (api_key, headers, store_auth) =
-                self.resolve_request_key_and_headers_and_store_health(&model);
-            if store_auth {
-                let mut slot = self
-                    .provider_target
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(target) = slot.as_mut() {
-                    // The model may have moved under the store read: a
-                    // switch or route swap installed a new target. The
-                    // auth then re-resolves for whatever is live NOW,
-                    // under the same gate; a cleared slot stays cleared.
-                    let (api_key, headers) = if target.model == model {
-                        (api_key, headers)
-                    } else {
-                        match self.resolve_request_key_and_headers_and_store_health(&target.model) {
-                            (Some(key), headers, true) => (Some(key), headers),
-                            // The moved-to model's provider has no live
-                            // stored credential: the target keeps its
-                            // last-good pair.
-                            _ => (None, None),
-                        }
-                    };
-                    // A resolved credential replaces the pair: headers
-                    // clear when the fresh credential carries none.
-                    if let Some(api_key) = api_key {
-                        target.api_key = Some(api_key);
-                        target.headers = headers;
-                    }
+            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
+            let mut slot = self
+                .provider_target
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(target) = slot.as_mut() {
+                if target.model == model {
+                    target.api_key = api_key;
+                    target.headers = headers;
+                } else {
+                    self.rebind_request_auth(target);
                 }
             }
-        }
-        Ok(())
-    }
-
-    /// One Prime auth-change notification (not a user `/reload`): resolve
-    /// the serving pair from the healthy store, including a logout's
-    /// environment/models.json fallback or an explicit runtime override.
-    pub(crate) fn apply_auth_changed(&self) -> Result<(), String> {
-        let _serialized = self
-            .reload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        if let Some(error) = auth.load_error() {
-            return Err(error.to_string());
-        }
-        let update = |target: &mut ProviderTarget| {
-            if target.model.provider == "prime-inference" {
-                let (key, headers) = self.resolve_request_key_and_headers(&target.model);
-                target.api_key = key;
-                target.headers = headers;
-            }
-        };
-        if let Some(route) = self
-            .image_route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_mut()
-        {
-            update(&mut route.target);
-            if let Some(saved) = route.session_target.as_mut() {
-                update(saved);
-            }
-        }
-        if let Some(target) = self
-            .provider_target
-            .write()
-            .expect("provider target lock")
-            .as_mut()
-        {
-            update(target);
         }
         Ok(())
     }
