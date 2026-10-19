@@ -173,6 +173,10 @@ impl TranscriptWindow {
             return 0;
         };
         let mut entries = page.entries;
+        // A page that reaches the tail joins it, as an older page joins what lies below.
+        if kind != PageKind::Older && !page.more {
+            crate::snapshot::join_backfilled_entries(&mut entries, self.tail_seam);
+        }
         let chunk = |entries: usize| Chunk {
             first_id,
             last_id,
@@ -270,6 +274,11 @@ fn gap_row() -> ChatEntry {
 }
 
 impl SessionUi {
+    /// Whether the viewport needs a page that is not yet in flight.
+    pub(crate) fn wants_transcript_page(&self, view: &AgentView) -> bool {
+        self.window.next_page(view).is_some()
+    }
+
     /// Start the page the viewport needs, if any. Runs at the loop top after a paint,
     /// so the visible range is the painted one.
     pub(crate) fn spawn_transcript_page(&mut self, view: &AgentView) {
@@ -559,5 +568,42 @@ mod tests {
         drop(session);
         server.abort();
         }).await.expect("mock session open, rebuild and stale-note delivery complete within ten seconds");
+    }
+
+    #[test]
+    fn a_page_reaching_the_tail_joins_its_retry_seam() {
+        let attempt = json!({
+            "role": "assistant", "content": [], "stopReason": "error",
+            "errorMessage": "attempt failed", "timestamp": 2,
+        });
+        let (entries, seam) = crate::snapshot::transcript_with_backfill_seam(&[
+            json!({"role": "user", "content": "run", "timestamp": 1}),
+            attempt,
+        ]);
+        let mut window = TranscriptWindow::default();
+        window.reset(
+            Some("leaf".to_string()),
+            Some("tail".to_string()),
+            BackfillSeam::RetryOutcome,
+        );
+        let mut view = AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ));
+        let page = LoadedPage {
+            entries,
+            seam,
+            first_id: Some("e0".to_string()),
+            last_id: Some("e1".to_string()),
+            more: false,
+        };
+        window.apply(PageKind::Head, page, &mut view);
+        assert_eq!(
+            view.chat,
+            vec![ChatEntry::User {
+                text: "run".to_string()
+            }],
+            "the tail's retry outcome supersedes the attempt the head page ends with"
+        );
     }
 }
