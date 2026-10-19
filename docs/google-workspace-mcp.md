@@ -84,8 +84,8 @@ settings usually live in a repository.
 Then run `/mcp login google-drive` and `/mcp login google-sheets` inside Prime
 Agent and finish Google's consent screen in the browser. Prime Agent asks Google
 for offline access, so the stored grant includes a refresh token and renews
-itself; the client secret stays in settings and is sent only to Google's token
-endpoint. For SSH sessions, forward the callback port or paste the final
+itself. The client secret stays in settings (it is not copied into the stored
+login grant) and is sent to Google only on token requests. For SSH sessions, forward the callback port or paste the final
 redirect URL into the auth panel.
 
 ## Tools
