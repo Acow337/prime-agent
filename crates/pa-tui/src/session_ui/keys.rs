@@ -422,11 +422,13 @@ impl SessionUi {
         }
         if to_top {
             view.scroll_to_top();
+            self.window.request_head();
             self.track_scroll("top", view.is_following());
             self.dirty = true;
             return Ok(());
         }
         if follow {
+            self.collapse_transcript_window(view);
             view.scroll_to_bottom();
             self.track_scroll("follow", view.is_following());
             self.dirty = true;
