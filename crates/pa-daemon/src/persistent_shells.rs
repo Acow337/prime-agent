@@ -2,9 +2,9 @@
 //! `bash(..., persistent=True)`): every session's shells live in one home,
 //! `<agent dir>/persistent-shells/`, as a `<id>.json` record assigned to the
 //! session that started it, plus the shell's `<id>.out` and `<id>.rc`. The
-//! daemon reads the records to list each saved session's live shells. Nothing
-//! in the session lifecycle kills them: a deleted session's shells keep
-//! running as orphans, still assigned to it.
+//! daemon reads the records to list each saved session's live shells and every
+//! live shell machine-wide. Nothing in the session lifecycle kills them: a
+//! deleted session's shells keep running as orphans, still assigned to it.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -67,6 +67,20 @@ pub(crate) fn live_shell_rows_by_session(agent_dir: &Path) -> HashMap<String, Ve
         }));
     }
     rows
+}
+
+/// Every live persistent shell machine-wide: [`live_shell_rows_by_session`]'s rows, each with its
+/// assigned `sessionId`.
+pub(crate) fn live_shell_rows(agent_dir: &Path) -> Vec<Value> {
+    live_shell_rows_by_session(agent_dir)
+        .into_iter()
+        .flat_map(|(session_id, rows)| {
+            rows.into_iter().map(move |mut row| {
+                row["sessionId"] = json!(session_id);
+                row
+            })
+        })
+        .collect()
 }
 
 #[cfg(all(test, unix))]

@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::agents_view_forest::{
     ancestor_session_ids, build_rows, compute_rollups, has_session_children, resolve_selection,
-    scope_ancestors, scope_root, scope_to_subtree, AgentsViewRow, RowKind, ScopeRoot, SelectionKey,
-    SessionActivity,
+    scope_ancestors, scope_root, scope_to_subtree, ActivityCounts, AgentsViewRow, RowKind,
+    ScopeRoot, SelectionKey, SessionActivity,
 };
 use crate::agents_view_state::truncate_text;
 use crate::agents_view_state::{
@@ -263,7 +263,7 @@ enum UiInput {
         heartbeats: Vec<crate::heartbeats_picker::HeartbeatEntry>,
     },
     /// One shells/factory-runs fetch cycle landed: the activity lines re-count.
-    SessionActivityLoaded(Vec<session_activity::ActivityRead>),
+    SessionActivityLoaded(session_activity::ActivityCycle),
 }
 
 /// The flow's roster connection: one daemon connection alive across the flow's view runs, so a
@@ -277,10 +277,10 @@ pub struct AgentsViewLink {
     saved_catalog_loaded: bool,
     /// The activity counts the previous run held: a re-entry renders the line the user opened on
     /// its first frame, so the carried selection restores onto it.
-    session_activity: std::collections::HashMap<String, SessionActivity>,
+    session_activity: ActivityCounts,
     /// An unfinished cycle follows the roster link across session handoffs; re-entry consumes
     /// its result instead of starting another batch while these requests still wait.
-    activity_fetch: Option<tokio::sync::oneshot::Receiver<Vec<session_activity::ActivityRead>>>,
+    activity_fetch: Option<tokio::sync::oneshot::Receiver<session_activity::ActivityCycle>>,
 }
 
 impl AgentsViewLink {
@@ -291,7 +291,7 @@ impl AgentsViewLink {
             events,
             saved_sessions: Vec::new(),
             saved_catalog_loaded: false,
-            session_activity: std::collections::HashMap::new(),
+            session_activity: ActivityCounts::default(),
             activity_fetch: None,
         })
     }
@@ -429,8 +429,8 @@ struct AgentsViewMode {
     /// The daemon's heartbeat catalog (the dock's source, TS
     /// `heartbeats`): each row counts its own session's jobs.
     heartbeats: Vec<crate::heartbeats_picker::HeartbeatEntry>,
-    /// Each live session's own shells and factory-run counts, keyed by `activeSessionId`.
-    session_activity: std::collections::HashMap<String, SessionActivity>,
+    /// The activity poll's counts behind the shells and factory-run lines.
+    session_activity: ActivityCounts,
 }
 
 /// The press state of one left click, row-scoped: the release must land on the same row.
@@ -531,7 +531,7 @@ impl AgentsViewMode {
             pressed_click: None,
             actions: Vec::new(),
             heartbeats: Vec::new(),
-            session_activity: std::collections::HashMap::new(),
+            session_activity: ActivityCounts::default(),
         }
     }
 }
@@ -997,8 +997,8 @@ async fn run_agents_view_surface(
                         mode.heartbeats = heartbeats;
                     }
                 }
-                UiInput::SessionActivityLoaded(reads) => {
-                    mode.apply_session_activity(reads);
+                UiInput::SessionActivityLoaded(cycle) => {
+                    mode.apply_session_activity(cycle);
                     activity_fetch_at = Some(
                         tokio::time::Instant::now() + crate::interactive::ACTIVITY_POLL_INTERVAL,
                     );
@@ -1078,8 +1078,8 @@ async fn run_agents_view_surface(
                         }
                     } => {
                         activity_fetch = None;
-                        if let Ok(reads) = result {
-                            pending.push(UiInput::SessionActivityLoaded(reads));
+                        if let Ok(cycle) = result {
+                            pending.push(UiInput::SessionActivityLoaded(cycle));
                         } else {
                             activity_fetch_at = Some(
                                 tokio::time::Instant::now() + crate::interactive::ACTIVITY_POLL_INTERVAL,
@@ -1221,8 +1221,8 @@ async fn run_agents_view_surface(
             UiInput::KillResult { key, outcome } => {
                 mode.kill_result(&key, outcome);
             }
-            UiInput::SessionActivityLoaded(reads) => {
-                mode.apply_session_activity(reads);
+            UiInput::SessionActivityLoaded(cycle) => {
+                mode.apply_session_activity(cycle);
             }
             _ => {}
         }

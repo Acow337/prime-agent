@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use super::lineage::{depth_consistent_parent, is_subagent_descendant};
 use super::{
-    session_model, session_title, AgentsViewRow, AgentsViewScope, Rollup, RowKind, SessionActivity,
-    SUMMARY_ROW_PREFIX,
+    session_model, session_title, ActivityCounts, AgentsViewRow, AgentsViewScope, Rollup, RowKind,
+    SessionActivity, SUMMARY_ROW_PREFIX,
 };
 use crate::agents_view_state::{
     is_unnamed_empty, now_ms, relative_age, section_rank, summary_for_record, Section,
@@ -42,7 +42,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     expanded: &HashSet<String, S>,
     program_shown: &HashSet<String, S>,
     rollups: &HashMap<String, Rollup, S>,
-    activity: &HashMap<String, SessionActivity, S>,
+    activity: &ActivityCounts,
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
     let now = now_ms();
@@ -100,23 +100,24 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
         let activity = match summary.get("activeSessionId").and_then(Value::as_str) {
-            Some(active) => activity.get(active).copied().unwrap_or_default(),
-            // Without a live kernel, the catalog row's live persistent shells and stored factory
-            // specs are the session's.
-            None => record
-                .saved
-                .as_ref()
-                .map(|saved| SessionActivity {
-                    shells: saved
-                        .get("persistentShells")
-                        .map(crate::bash_view::running_shell_counts)
-                        .unwrap_or_default(),
-                    factory: crate::factory_view::FactoryCounts {
-                        specs: crate::factory_view::stored_spec_count(saved),
-                        runs: 0,
-                    },
-                })
-                .unwrap_or_default(),
+            Some(active) => activity.live.get(active).copied().unwrap_or_default(),
+            // Without a live kernel, the session's own live persistent shells and the catalog
+            // row's stored factory specs.
+            None => SessionActivity {
+                shells: summary
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .and_then(|session_id| activity.persistent_shells.get(session_id))
+                    .copied()
+                    .unwrap_or_default(),
+                factory: crate::factory_view::FactoryCounts {
+                    specs: record
+                        .saved
+                        .as_ref()
+                        .map_or(0, crate::factory_view::stored_spec_count),
+                    runs: 0,
+                },
+            },
         };
         base.push(BaseRow {
             kind,
