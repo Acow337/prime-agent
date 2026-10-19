@@ -471,7 +471,7 @@ mod convert_messages_tests {
         }
     }
 
-    fn assistant(content: Value) -> Value {
+    fn assistant(content: &Value) -> Value {
         json!({
             "role": "assistant",
             "content": content,
@@ -509,7 +509,7 @@ mod convert_messages_tests {
     fn user_turns_around_a_dropped_empty_reply_join() {
         let converted = convert(vec![
             json!({ "role": "user", "content": "first", "timestamp": 1 }),
-            assistant(json!([{ "type": "text", "text": "" }])),
+            assistant(&json!([{ "type": "text", "text": "" }])),
             json!({ "role": "user", "content": "second", "timestamp": 3 }),
         ]);
         assert_eq!(
@@ -522,7 +522,7 @@ mod convert_messages_tests {
     fn a_user_message_after_tool_results_joins_their_turn() {
         let converted = convert(vec![
             json!({ "role": "user", "content": "run it", "timestamp": 1 }),
-            assistant(json!([
+            assistant(&json!([
                 { "type": "toolCall", "id": "call_1", "name": "bash", "arguments": { "cmd": "ls" } },
             ])),
             json!({
