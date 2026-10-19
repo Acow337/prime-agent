@@ -107,10 +107,16 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
+/// One display-transcript page ([`SessionFile::transcript_page`]).
 #[derive(Debug, Clone)]
-pub struct WindowedTranscript {
+pub struct TranscriptPageRows {
     pub messages: Vec<Value>,
-    pub omitted: usize,
+    pub first_entry_id: Option<String>,
+    pub last_entry_id: Option<String>,
+    /// Rows exist past the page's far side: older ones for an end page, newer
+    /// ones before `until` for a start page.
+    pub more: bool,
+    /// The newest user prompt's time anywhere on the branch.
     pub last_user_prompt_ms: Option<u64>,
 }
 
