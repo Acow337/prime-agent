@@ -795,7 +795,7 @@ mod backfill_tests {
     /// One session attached over a mock daemon that answers `attach` and `get_messages`.
     async fn mock_session(
         socket: &std::path::Path,
-        backfill_tx: mpsc::UnboundedSender<TranscriptBackfillNote>,
+        backfill_tx: mpsc::UnboundedSender<TranscriptPageNote>,
     ) -> (SessionUi, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
         let server = tokio::spawn(async move {
