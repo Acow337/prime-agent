@@ -541,7 +541,6 @@ impl SessionUi {
     /// The one transcript replacement: clear the chat, render the entries,
     /// and re-register decoded pending tool cards.
     pub(crate) fn replace_transcript(&mut self, entries: Vec<ChatEntry>, view: &mut AgentView) {
-        self.compaction_refresh_pending = false;
         view.clear_chat();
         self.last_status_index = None;
         self.pressed_click = None;

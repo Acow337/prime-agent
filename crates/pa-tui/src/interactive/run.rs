@@ -1293,8 +1293,6 @@ async fn run_interactive_surface(
             }
         }
         let was_active = session.turn_active;
-        let was_compacting = view.compaction.is_some();
-        let compaction_generation = view.compaction_generation;
         // The quiet tick's arming state, snapshotted before the select: the arm future reads these
         // locals instead of borrowing the surface.
         let autocomplete_pending = view.editor.has_pending_autocomplete();

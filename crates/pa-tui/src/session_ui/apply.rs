@@ -523,6 +523,7 @@ impl SessionUi {
             TurnUpdate::CompactionEnd {
                 reason,
                 result,
+                custom_instructions,
                 aborted,
                 error_message,
                 error_severity,

@@ -1767,6 +1767,7 @@ fn decodes_compaction_events() {
         Some(TurnUpdate::CompactionEnd {
             reason: "manual".to_string(),
             result: Some(json!({ "summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 12 })),
+            custom_instructions: Some("focus".to_string()),
             aborted: false,
             error_message: None,
             error_severity: None,
@@ -1784,6 +1785,7 @@ fn decodes_compaction_events() {
         Some(TurnUpdate::CompactionEnd {
             reason: "manual".to_string(),
             result: None,
+            custom_instructions: None,
             aborted: false,
             error_message: Some("Session is too short to compact".to_string()),
             error_severity: Some("warning".to_string()),
