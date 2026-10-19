@@ -345,6 +345,19 @@ async fn pages_continue_into_pre_compaction_history_with_one_summary() {
         "the display walk is the whole branch in order with the summary once at the compaction"
     );
 
+    // A zero limit is an empty page at either end, never a panic under the core lock.
+    for empty in [
+        json!({ "from": "end", "limit": 0 }),
+        json!({ "from": "start", "until": tail_first, "limit": 0 }),
+    ] {
+        let response = page(&worker, empty, None).await;
+        assert!(response.success, "a zero-limit page failed: {response:?}");
+        assert_eq!(
+            response.data.expect("empty page data")["messages"],
+            json!([])
+        );
+    }
+
     // The head page and a newer page stop at their bounds.
     let head = page(
         &worker,

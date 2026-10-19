@@ -421,6 +421,7 @@ impl SessionFile {
                 .min(until);
                 let end = match start.saturating_add(*limit) {
                     end if end >= until => until,
+                    end if end == start => start,
                     end => Some(settle_cut(&rows, end))
                         .filter(|cut| *cut > start)
                         .unwrap_or(until),
@@ -572,7 +573,7 @@ fn prompt_timestamp_ms(message: &Value) -> Option<u64> {
 /// result nor a custom row, and no tool call is split from its result.
 fn settle_cut(rows: &[(&str, std::borrow::Cow<'_, Value>)], mut cut: usize) -> usize {
     let role = |index: usize| rows[index].1.get("role").and_then(Value::as_str);
-    while cut > 0 && matches!(role(cut), Some("toolResult" | "custom")) {
+    while cut > 0 && cut < rows.len() && matches!(role(cut), Some("toolResult" | "custom")) {
         cut -= 1;
     }
     // User bash and other message rows can land between a call and its
