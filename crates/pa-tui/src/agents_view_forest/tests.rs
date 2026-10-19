@@ -60,7 +60,10 @@ fn rows_with_activity(
         &expanded,
         &HashSet::default(),
         &rollups,
-        activity,
+        &ActivityCounts {
+            live: activity.clone(),
+            ..ActivityCounts::default()
+        },
         None,
     )
 }
@@ -614,7 +617,7 @@ fn saved_child_nests_under_its_saved_parent() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     assert_eq!(rows.len(), 2);
@@ -628,7 +631,7 @@ fn saved_child_nests_under_its_saved_parent() {
         &expanded,
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     assert_eq!(rows[2].title, "saved child");
@@ -811,7 +814,7 @@ fn rollups_sum_costs_over_descendants_only() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &empty,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     // Without rollups the per-pass walk fills the same totals.
@@ -878,7 +881,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
         &expanded,
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
@@ -955,7 +958,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     assert_eq!(
@@ -1039,7 +1042,7 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         &HashSet::new(),
         &HashSet::new(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     let summary = rows
@@ -1234,7 +1237,7 @@ fn a_ledger_child_nests_across_the_windows_path_forms() {
         &HashSet::default(),
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     // RED on main: the child's `file:\\?\...` parent key never matches the
@@ -1381,43 +1384,33 @@ fn a_live_shells_line_counts_its_persistent_shells() {
     );
 }
 
-/// A session without a live kernel shows its catalog row's live persistent shells (every one
-/// running and persistent); a live session counts its kernel rows only, never the catalog's too.
+/// A session without a live kernel shows its live persistent shells from the poll's daemon list
+/// (by `sessionId`); a live session counts its kernel rows only, never the list's too.
 #[test]
 fn an_inactive_node_shows_its_live_persistent_shells() {
-    let shell = |id: &str| {
-        json!({
-            "id": id,
-            "command": "python -m http.server",
-            "pid": 7,
-            "startedAt": "2026-10-15T00:00:00Z",
-            "status": "running",
-            "persistent": true,
-        })
-    };
     let roster = vec![roster_entry("live", "idle", &parent_summary("live"))];
     let saved = vec![
-        json!({
-            "id": "gone",
-            "path": "/x/gone.jsonl",
-            "messageCount": 2,
-            "persistentShells": [shell("s1"), shell("s2")],
-        }),
-        json!({
-            "id": "live",
-            "path": "/x/live.jsonl",
-            "messageCount": 2,
-            "persistentShells": [shell("s3")],
-        }),
+        json!({ "id": "gone", "path": "/x/gone.jsonl", "messageCount": 2 }),
+        json!({ "id": "live", "path": "/x/live.jsonl", "messageCount": 2 }),
     ];
     let records = reconcile_unified_sessions(&roster, &saved);
+    let persistent = |shells| ShellCounts {
+        running: shells,
+        persistent: shells,
+    };
     let rows = build_rows(
         &records,
         None,
         &HashSet::default(),
         &HashSet::default(),
         &compute_rollups(&records),
-        &HashMap::new(),
+        &ActivityCounts {
+            live: HashMap::new(),
+            persistent_shells: HashMap::from([
+                ("gone".to_string(), persistent(2)),
+                ("live".to_string(), persistent(1)),
+            ]),
+        },
         None,
     );
     assert_eq!(

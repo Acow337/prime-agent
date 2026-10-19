@@ -100,11 +100,12 @@ impl AgentsViewMode {
     /// Fold one cycle into the counts (a failed read keeps that session's last count) and
     /// rebuild only when a count moved.
     pub(super) fn apply_session_activity(&mut self, reads: Vec<ActivityRead>) {
-        let activity = reads
+        let live = reads
             .into_iter()
             .map(|read| {
                 let last = self
                     .session_activity
+                    .live
                     .get(&read.active_session_id)
                     .copied()
                     .unwrap_or_default();
@@ -115,8 +116,8 @@ impl AgentsViewMode {
                 (read.active_session_id, counts)
             })
             .collect();
-        if activity != self.session_activity {
-            self.session_activity = activity;
+        if live != self.session_activity.live {
+            self.session_activity.live = live;
             self.rebuild_rows();
         }
     }

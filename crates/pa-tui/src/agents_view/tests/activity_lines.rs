@@ -7,7 +7,7 @@ use crate::bash_view::ShellCounts;
 use crate::interactive::SessionPanel;
 
 fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory_runs: usize) {
-    mode.session_activity.insert(
+    mode.session_activity.live.insert(
         active.to_string(),
         SessionActivity {
             shells: ShellCounts {
