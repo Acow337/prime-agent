@@ -3,8 +3,10 @@
 //! journaled for the orphan reaper nor killed by the kernel's exit hook), shows
 //! on the INACTIVE session's saved-catalog row, is re-attached by the kernel of
 //! the reopened session, and keeps running after the session's delete, its
-//! record still assigned to the deleted session. The live-kernel test skips
-//! (with a note) without a kernel install.
+//! record still assigned to the deleted session. The machine-wide
+//! `list_persistent_shells` lists every shell with its assignment, and
+//! `kill_persistent_shell` ends an orphan. The live-kernel test skips (with a
+//! note) without a kernel install.
 #![cfg(target_os = "linux")]
 // Narrowing casts sit at OS boundaries (pid) where the kernel bounds the values.
 #![allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -201,7 +203,7 @@ fn persistent_python_unit_regressions() {
 }
 
 #[test]
-fn inactive_session_row_lists_only_its_live_persistent_shells() {
+fn saved_row_lists_its_live_shells_and_the_machine_wide_list_every_shell() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");

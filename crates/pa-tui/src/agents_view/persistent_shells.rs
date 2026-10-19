@@ -15,9 +15,6 @@ use crate::bash_view::{
 /// The daemon capability that serves the machine-wide shell list, output, and kill.
 pub(super) const CAPABILITY: &str = "persistent_shells";
 
-/// The list poll's cadence: the next fetch arms when the last one landed.
-pub(super) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// The row identity prefix of a shell row.
 const ROW_PREFIX: &str = "shell:";
 

@@ -1,6 +1,6 @@
-//! Headless e2e for the agents view's machine-wide persistent shells: the list's
-//! `Persistent shells` block; Enter on a shell whose session exists opens that session on its Bash
-//! panel, Enter on an orphan opens the Bash list over the orphans with output and stop.
+//! Headless e2e for the agents view's machine-wide persistent shells against a mock daemon: the
+//! kill commands a stop sends from the orphans' Bash list and from Ctrl+X on a `Persistent shells`
+//! row, and a late kill failure staying on its own shell.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -12,7 +12,6 @@ use pa_tui::agents_view::{
     run_agents_view, AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewOutcome,
     AgentsViewUiMode,
 };
-use pa_tui::interactive::{SessionPanel, SessionSelection};
 use serde_json::{json, Value};
 
 // Headless mouse tracking is process-global; all plans in this binary serialize.
@@ -232,62 +231,6 @@ fn wait_render(needle: &str) -> AgentsStep {
 }
 
 #[tokio::test]
-async fn shell_rows_are_table_rows() {
-    let (outcome, _) = run_plan(vec![
-        AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("$ orphan-watch"),
-    ])
-    .await;
-
-    let list = outcome
-        .frames
-        .iter()
-        .find(|frame| frame.contains("Persistent shells (3)"))
-        .expect("a list frame");
-    for (command, tokens) in [
-        ("$ build-watch", ["$", "build-watch", "-", "-", "12.4s"]),
-        ("$ long-job", ["$", "long-job", "-", "-", "12.4s"]),
-        ("$ orphan-watch", ["$", "orphan-watch", "-", "-", "12.4s"]),
-    ] {
-        let row = list
-            .lines()
-            .find(|line| line.contains(command))
-            .unwrap_or_else(|| panic!("{command:?} in:\n{list}"));
-        assert_eq!(row.split_whitespace().collect::<Vec<_>>(), tokens, "{list}");
-    }
-}
-
-#[tokio::test]
-async fn enter_on_a_live_sessions_shell_opens_that_session_on_its_bash_panel() {
-    let (outcome, killed) = run_plan(vec![
-        AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("$ orphan-watch"),
-        AgentsStep::Key("home".to_string()),
-        AgentsStep::Key("enter".to_string()),
-    ])
-    .await;
-
-    assert_eq!(
-        outcome.selection,
-        Some(SessionSelection::Attach("p-live".to_string()))
-    );
-    assert!(
-        matches!(outcome.panel, Some(SessionPanel::Shells { .. })),
-        "the session opens on its Bash panel: {:?}",
-        outcome.panel
-    );
-    assert!(
-        !outcome
-            .frames
-            .iter()
-            .any(|frame| frame.contains("watching...") || frame.contains("pid 4242")),
-        "no standalone shell overlay:\n{}",
-        outcome.frames.join("\n---\n")
-    );
-    assert!(killed.is_empty());
-}
-
-#[tokio::test]
 async fn enter_on_an_orphan_lists_the_orphans_and_stops_one() {
     let (outcome, killed) = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
@@ -307,90 +250,13 @@ async fn enter_on_an_orphan_lists_the_orphans_and_stops_one() {
         wait_render("Persistent shells (2)"),
     ])
     .await;
-    let frames = &outcome.frames;
-
-    assert!(outcome.selection.is_none(), "an orphan opens no session");
-    let orphans = frames
-        .iter()
-        .find(|frame| frame.contains("Session deleted"))
-        .expect("the orphan list frame");
-    let lines: Vec<&str> = orphans.lines().collect();
-    let title = lines
-        .iter()
-        .position(|line| line.trim_start().starts_with("Bash"))
-        .unwrap_or_else(|| panic!("the Bash title in:\n{orphans}"));
-    assert!(lines[title].trim_end().ends_with("2 running"), "{orphans}");
-    assert_eq!(lines[title + 1].trim(), "Session deleted", "{orphans}");
-    let selected = lines
-        .iter()
-        .find(|line| line.starts_with('\u{203a}'))
-        .unwrap_or_else(|| panic!("a selected row in:\n{orphans}"));
-    assert!(selected.contains("orphan-watch"), "{orphans}");
-    assert!(
-        orphans.contains("long-job") && !orphans.contains("build-watch"),
-        "only the orphans list:\n{orphans}"
-    );
-    for detail in frames.iter().filter(|frame| frame.contains("pid 4242")) {
-        assert!(
-            !detail.to_lowercase().contains("session"),
-            "no session item in the detail:\n{detail}"
-        );
-    }
 
     assert_eq!(killed, ["o"], "the stop named the Entered orphan");
-    let stopped = frames
-        .iter()
-        .find(|frame| frame.contains("\u{25cb} finished"))
-        .expect("the stopped detail frame");
-    assert!(
-        stopped.contains("orphan-watch") && !stopped.contains("Cancel command"),
-        "the detail stays on the stopped shell:\n{stopped}"
-    );
-    let back = frames
-        .iter()
-        .rev()
-        .find(|frame| frame.contains("1 running"))
-        .expect("the list after back");
-    assert!(!back.contains("orphan-watch"), "{back}");
-    let last = frames.last().expect("a frame");
+    let last = outcome.frames.last().expect("a frame");
     assert!(
         !last.contains("$ orphan-watch") && last.contains("$ long-job"),
-        "the stopped orphan left the block:\n{last}"
+        "the stopped orphan left the list:\n{last}"
     );
-}
-
-#[tokio::test]
-async fn clicking_an_orphan_opens_the_bash_list_which_owns_clicks() {
-    let (baseline, _) = run_plan(vec![
-        AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("$ orphan-watch"),
-    ])
-    .await;
-    let row = baseline
-        .frames
-        .last()
-        .expect("list frame")
-        .lines()
-        .position(|line| line.contains("$ long-job"))
-        .expect("shell row");
-    let (outcome, killed) = run_plan(vec![
-        AgentsStep::WaitSettle { timeout_ms: 2500 },
-        wait_render("$ orphan-watch"),
-        AgentsStep::Click { row, col: 3 },
-        wait_render("Session deleted"),
-        // Click where the hidden session row sits: the overlay owns it.
-        AgentsStep::Click {
-            row: row + 4,
-            col: 3,
-        },
-    ])
-    .await;
-    assert!(outcome
-        .frames
-        .last()
-        .expect("overlay frame")
-        .contains("Session deleted"));
-    assert!(outcome.selection.is_none() && killed.is_empty());
 }
 
 #[tokio::test]

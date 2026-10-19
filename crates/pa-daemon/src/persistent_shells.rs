@@ -62,13 +62,9 @@ fn find_shell(agent_dir: &Path, id: &str) -> Option<Shell> {
         .find(|shell| shell.id == id)
 }
 
-fn pid_alive(pid: u32) -> bool {
-    matches!(crate::lease::is_process_alive(pid), Ok(true))
-}
-
 /// Whether the shell's pid still runs under the recorded start identity.
 fn runs_as_registered(shell: &Shell) -> bool {
-    pid_alive(shell.pid)
+    matches!(crate::lease::is_process_alive(shell.pid), Ok(true))
         && crate::lease::get_process_start_id(shell.pid).as_deref() == Some(shell.start_id.as_str())
 }
 

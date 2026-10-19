@@ -445,7 +445,7 @@ struct AgentsViewMode {
     heartbeats: Vec<crate::heartbeats_picker::HeartbeatEntry>,
     /// The latest `list_persistent_shells` data: every persistent shell machine-wide.
     persistent_shells: Value,
-    /// The bash view a shell row's open mounts over the list.
+    /// The bash view an orphan's open mounts over the list.
     shell_view: Option<crate::bash_view::BashView>,
     /// The open bash view's action the run loop dispatches (output fetch or kill).
     pending_shell_action: Option<crate::bash_view::BashViewAction>,
@@ -1032,8 +1032,9 @@ async fn run_agents_view_surface(
                     if let Some(data) = data {
                         mode.apply_persistent_shells(data);
                     }
-                    shells_fetch_at =
-                        Some(tokio::time::Instant::now() + persistent_shells::POLL_INTERVAL);
+                    shells_fetch_at = Some(
+                        tokio::time::Instant::now() + crate::interactive::ACTIVITY_POLL_INTERVAL,
+                    );
                 }
                 UiInput::PersistentShellTail {
                     id,
@@ -1080,8 +1081,8 @@ async fn run_agents_view_surface(
                 // and returns instead of spinning forever.
                 UiInput::Done => mode.running = false,
             }
-            // Keys and row clicks can both open the shell overlay. Dispatch only
-            // after the input has been applied, regardless of its source.
+            // The bash view's keys and wheel scrolls queue its action: dispatch
+            // it after the input has been applied.
             if let Some(action) = mode.pending_shell_action.take() {
                 action_dispatches.extend(persistent_shells::spawn_action(
                     &client,

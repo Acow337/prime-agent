@@ -97,7 +97,7 @@ pub enum SessionPanel {
 pub const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
 /// The kernel activity poll cadence: the session's shells/factory refresh and the agents view's
-/// activity-line counts.
+/// activity-line counts and persistent shells list.
 pub(crate) const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Explicit model selection carried into every `create` config: the CLI

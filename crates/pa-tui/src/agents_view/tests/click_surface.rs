@@ -270,7 +270,7 @@ fn short_session_names_pad_to_the_name_column() {
 }
 
 #[test]
-fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
+fn an_orphans_bash_list_consumes_hidden_row_clicks_and_scrolls_its_output() {
     let _guard = crate::mouse_tracking::STATE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -321,7 +321,7 @@ fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
     let wheel = crate::mouse::parse_sgr_mouse_event("\x1b[<64;3;3M").unwrap();
     mode.handle_mouse(&wheel);
     let after = mode.render_frame(100, 24);
-    assert_ne!(before, after, "the wheel scrolls the overlay's output");
+    assert_ne!(before, after, "the wheel scrolls the shell's output");
     assert_eq!(mode.selected, selected);
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
@@ -401,7 +401,7 @@ fn shell_rows_render_in_the_session_table_columns() {
 }
 
 #[test]
-fn finished_persistent_shells_never_open_the_block() {
+fn finished_persistent_shells_never_show_the_persistent_shells_heading() {
     let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
     mode.rebuild_rows();
     mode.apply_persistent_shells(serde_json::json!({ "activities": [
@@ -419,7 +419,7 @@ fn finished_persistent_shells_never_open_the_block() {
 }
 
 #[test]
-fn the_shells_block_and_its_overlay_list_only_live_shells() {
+fn the_persistent_shells_heading_and_the_orphans_bash_list_show_only_live_shells() {
     let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
     mode.apply_saved_loaded(Vec::new());
     mode.apply_persistent_shells(serde_json::json!({ "activities": [
@@ -435,7 +435,7 @@ fn the_shells_block_and_its_overlay_list_only_live_shells() {
     let heading = texts
         .iter()
         .position(|text| text.contains("Persistent shells (1)"))
-        .unwrap_or_else(|| panic!("the block in:\n{}", texts.join("\n")));
+        .unwrap_or_else(|| panic!("the heading in:\n{}", texts.join("\n")));
     assert!(
         texts[heading + 1].contains("$ cargo watch") && texts[heading + 2].trim().is_empty(),
         "exactly the running row under the heading:\n{}",
@@ -448,12 +448,12 @@ fn the_shells_block_and_its_overlay_list_only_live_shells() {
         .cloned()
         .expect("shell row");
     mode.open_persistent_shell(&row);
-    let overlay = render(&mut mode).join("\n");
+    let bash_list = render(&mut mode).join("\n");
     assert!(
-        overlay.contains("cargo watch")
-            && !overlay.contains("cargo build")
-            && !overlay.contains("sleep 600"),
-        "the overlay list keeps only the live shell:\n{overlay}"
+        bash_list.contains("cargo watch")
+            && !bash_list.contains("cargo build")
+            && !bash_list.contains("sleep 600"),
+        "the Bash list keeps only the live shell:\n{bash_list}"
     );
 }
 

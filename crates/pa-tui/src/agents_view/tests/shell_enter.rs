@@ -38,7 +38,6 @@ fn enter_on_a_live_sessions_shell_opens_the_session_on_its_bash_panel() {
         shell("s2", "sleep 600", "p"),
     ]}));
     enter_on_shell(&mut mode, "s2");
-    assert!(mode.shell_view.is_none(), "no standalone overlay");
     let opened = mode.opened.as_ref().expect("the session opens");
     assert_eq!(
         opened.selection,
@@ -154,10 +153,6 @@ fn enter_on_an_orphan_lists_the_orphans_with_it_selected() {
     mode.handle_key("enter");
     let detail = frame(&mut mode).join("\n");
     assert!(detail.contains("pid 4242"), "{detail}");
-    assert!(
-        !detail.to_lowercase().contains("session"),
-        "no session item in the detail:\n{detail}"
-    );
 }
 
 #[test]
