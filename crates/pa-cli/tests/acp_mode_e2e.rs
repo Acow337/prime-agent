@@ -1455,9 +1455,7 @@ fn acp_daemon_attached_settled_model_error_publishes_the_envelope_and_fails_the_
     }
     let lifecycle: Vec<_> = shapes
         .iter()
-        .filter(|(phase, _, _, _)| {
-            *phase == "responseBoundary" || *phase == "terminalQuiescence"
-        })
+        .filter(|(phase, _, _, _)| *phase == "responseBoundary" || *phase == "terminalQuiescence")
         .cloned()
         .collect();
     assert_eq!(
@@ -1483,7 +1481,6 @@ fn acp_daemon_attached_settled_model_error_publishes_the_envelope_and_fails_the_
         "the quiescence event publishes between them: {shapes:?}"
     );
 }
-
 
 #[cfg(unix)]
 #[test]

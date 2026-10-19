@@ -2060,10 +2060,7 @@ mod tests {
             turn_model_failure(&state(Some(hosted)))
         };
         assert_eq!(failure_of(None, None), None);
-        assert_eq!(
-            failure_of(Some(pa_types::ai::StopReason::Stop), None),
-            None
-        );
+        assert_eq!(failure_of(Some(pa_types::ai::StopReason::Stop), None), None);
         assert_eq!(
             failure_of(Some(pa_types::ai::StopReason::Error), None),
             Some("the model request failed".to_string())
