@@ -89,7 +89,13 @@ fn authorization_server_metadata(
         bail!("Authorization server metadata for {issuer} is missing its issuer");
     };
     if require_exact_issuer {
-        if metadata_issuer != issuer {
+        // Issuers compare as URLs: Google's PRM names "https://accounts.google.com/" for the
+        // metadata issuer "https://accounts.google.com".
+        let same = matches!(
+            (Url::parse(metadata_issuer), Url::parse(issuer)),
+            (Ok(advertised), Ok(expected)) if advertised == expected
+        );
+        if !same {
             bail!("Authorization server metadata issuer does not exactly match {issuer}");
         }
     } else {
