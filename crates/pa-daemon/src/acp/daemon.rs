@@ -1622,9 +1622,8 @@ async fn prompt_turn(
     // degraded status would spin the loop. Each barrier pass re-reads the
     // turn's settled model error (TS `finalFailure`), so a continuation
     // that errors inside the waits reports on the terminal frame and the
-    // request response; the last pass before the seal is the one kept.
-    let mut settled_failure = None;
-    let settled_status = loop {
+    // request response; the pass that seals the terminal is the one kept.
+    let (settled_status, settled_failure) = loop {
         let status = match fetch_autonomous_status(link, &hosted_daemon_session_id, true).await {
             Ok(status) => status,
             Err(error) => {
@@ -1639,7 +1638,7 @@ async fn prompt_turn(
             producer.finish_prompt(turn_id).await;
             return cancelled_response(&id);
         }
-        settled_failure = turn_model_failure(&*state.lock().await);
+        let settled_failure = turn_model_failure(&*state.lock().await);
         let children = match fetch_rlm_children(link, &hosted_daemon_session_id).await {
             Ok(children) => children,
             Err(error) => {
@@ -1668,6 +1667,8 @@ async fn prompt_turn(
                 ..Default::default()
             }),
         };
+        // TS terminal publication: the post-settlement failure wins the
+        // terminal outcome, the pre-boundary one holds otherwise.
         let terminal_published = producer
             .publish(
                 &terminal,
@@ -1683,7 +1684,7 @@ async fn prompt_turn(
         if !published || !completion_published || !terminal_published {
             return super::internal_error(&id, "Failed to publish ACP completion");
         }
-        break status;
+        break (status, settled_failure);
     };
     // The stop reason follows the TS mapping (acp-stop-reason.ts) plus the
     // turn's final assistant stop reason (#3363): the abort flag read after

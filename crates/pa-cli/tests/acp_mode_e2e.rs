@@ -1436,10 +1436,12 @@ fn acp_daemon_attached_settled_model_error_publishes_the_envelope_and_fails_the_
             .contains("prime-agent turn failed: No more faux responses queued"),
         "the failure text is the settled row's own error, not a paraphrase: {prompt_response}"
     );
-    // The envelope shape: the boundary declares a terminal expectation and
-    // the error outcome, the quiescence event rides between, and the
-    // terminal frame carries the error outcome - the admission catch's
-    // lone no-terminal-expectation boundary must not appear.
+    // The lifecycle envelope, as an ordered subsequence of the lifecycle
+    // frames (the streamed model events may ride before the boundary):
+    // the boundary declares a terminal expectation and the error outcome,
+    // the quiescence event identifies by its own meta, the terminal frame
+    // carries the error outcome, and no admission-catch boundary
+    // (terminalQuiescenceExpected false) ever appears.
     let mut shapes = Vec::new();
     for update in &updates {
         let body = &update["params"]["update"];
@@ -1448,53 +1450,37 @@ fn acp_daemon_attached_settled_model_error_publishes_the_envelope_and_fails_the_
             meta["phase"].as_str().unwrap_or_default().to_string(),
             meta["outcome"].as_str().map(str::to_string),
             meta["terminalQuiescenceExpected"].as_bool(),
+            meta["quiescence"].is_object(),
         ));
     }
-    assert!(
-        !shapes.contains(&(
-            "responseBoundary".to_string(),
-            Some("error".to_string()),
-            Some(false)
-        )),
-        "the admission-catch boundary never appears for a settled model error: {shapes:?}"
-    );
+    let lifecycle: Vec<_> = shapes
+        .iter()
+        .filter(|(phase, _, _, _)| {
+            *phase == "responseBoundary" || *phase == "terminalQuiescence"
+        })
+        .cloned()
+        .collect();
     assert_eq!(
-        shapes[0],
-        (
-            "responseBoundary".to_string(),
-            Some("error".to_string()),
-            Some(true)
-        ),
-        "the boundary opens the error envelope: {shapes:?}"
-    );
-    assert_eq!(
-        shapes.last(),
-        Some(&(
-            "terminalQuiescence".to_string(),
-            Some("error".to_string()),
-            None
-        )),
-        "the terminal frame seals the error envelope: {shapes:?}"
+        lifecycle,
+        vec![
+            (
+                "responseBoundary".to_string(),
+                Some("error".to_string()),
+                Some(true),
+                false
+            ),
+            (
+                "terminalQuiescence".to_string(),
+                Some("error".to_string()),
+                None,
+                false
+            ),
+        ],
+        "exactly the boundary and the terminal frame, in order, seal the error envelope: {shapes:?}"
     );
     assert!(
-        shapes.contains(&("event".to_string(), None, None)),
+        shapes.contains(&("event".to_string(), None, None, true)),
         "the quiescence event publishes between them: {shapes:?}"
-    );
-    assert_eq!(
-        shapes
-            .iter()
-            .filter(|(phase, _, _)| *phase == "responseBoundary")
-            .count(),
-        1,
-        "exactly one boundary publishes (no admission-catch duplicate): {shapes:?}"
-    );
-    assert_eq!(
-        shapes
-            .iter()
-            .filter(|(phase, _, _)| *phase == "terminalQuiescence")
-            .count(),
-        1,
-        "exactly one terminal frame publishes: {shapes:?}"
     );
 }
 
