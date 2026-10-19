@@ -1,8 +1,9 @@
-//! The per-session shells and factory-run counts behind the agents-view activity lines.
+//! The per-session shells and factory counts behind the agents-view activity lines.
 use std::collections::HashMap;
 
 use super::{ActivityCounts, AgentsViewMode, DaemonClient, DaemonCommand, SessionActivity};
 use crate::bash_view::ShellCounts;
+use crate::factory_view::FactoryCounts;
 use anyhow::Result;
 use serde_json::{Map, Value};
 use tokio::sync::oneshot;
@@ -12,7 +13,7 @@ use tokio::sync::oneshot;
 pub(super) struct ActivityRead {
     pub(super) active_session_id: String,
     pub(super) shells: Option<ShellCounts>,
-    pub(super) factory_runs: Option<usize>,
+    pub(super) factory: Option<FactoryCounts>,
 }
 
 /// One fetch cycle's reads.
@@ -24,8 +25,8 @@ pub(super) struct ActivityCycle {
 }
 
 /// One fetch cycle off the key loop: each live session's kernel answers its own shells list and
-/// factory graph, and the daemon answers the machine-wide live persistent shells; the cycle lands
-/// once every read answered.
+/// factory graph (its stored specs and live runs), and the daemon answers the machine-wide live
+/// persistent shells; the cycle lands once every read answered.
 pub(super) fn spawn_session_activity_fetch(
     client: &DaemonClient,
     sessions: Vec<String>,
@@ -71,9 +72,9 @@ pub(super) fn spawn_session_activity_fetch(
                         Some(crate::bash_view::running_shell_counts(data))
                     })
                 };
-                let factory_runs = async {
+                let factory = async {
                     if !factory_supported {
-                        return Some(0);
+                        return Some(FactoryCounts::default());
                     }
                     let reply = client
                         .request_ok(DaemonCommand::FactoryActivity {
@@ -88,14 +89,14 @@ pub(super) fn spawn_session_activity_fetch(
                         .await;
                     count(reply, |data| {
                         crate::factory_view::factory_reply_lists_runs(data)
-                            .then(|| crate::factory_view::live_run_count(data))
+                            .then(|| FactoryCounts::of(data))
                     })
                 };
-                let (shells, factory_runs) = tokio::join!(shells, factory_runs);
+                let (shells, factory) = tokio::join!(shells, factory);
                 ActivityRead {
                     active_session_id,
                     shells,
-                    factory_runs,
+                    factory,
                 }
             });
         }
@@ -168,7 +169,7 @@ impl AgentsViewMode {
                     .unwrap_or_default();
                 let counts = SessionActivity {
                     shells: read.shells.unwrap_or(last.shells),
-                    factory_runs: read.factory_runs.unwrap_or(last.factory_runs),
+                    factory: read.factory.unwrap_or(last.factory),
                 };
                 (read.active_session_id, counts)
             })

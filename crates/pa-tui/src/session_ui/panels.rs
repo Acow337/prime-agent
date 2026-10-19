@@ -138,6 +138,7 @@ impl SessionUi {
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             shells,
             shells_persistent: crate::bash_view::ShellCounts::of(&shell_rows).persistent,
+            factory_specs: crate::factory_view::stored_spec_count(&self.factory_graph),
             factory_runs,
             // The group renders exactly while the daemon advertises the
             // lane: the factory's opt-in gate (a daemon without the

@@ -1,9 +1,10 @@
-//! The shells and factory-run lines: Enter on a line opens its node's session with the matching
+//! The shells and factory lines: Enter on a line opens its node's session with the matching
 //! panel requested, the line's identity carried for the return.
 
 use super::*;
 use crate::agents_view_forest::SessionActivity;
 use crate::bash_view::ShellCounts;
+use crate::factory_view::FactoryCounts;
 use crate::interactive::SessionPanel;
 
 fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory_runs: usize) {
@@ -14,7 +15,10 @@ fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory
                 running: shells,
                 persistent: 0,
             },
-            factory_runs,
+            factory: FactoryCounts {
+                specs: 0,
+                runs: factory_runs,
+            },
         },
     );
     mode.rebuild_rows();
@@ -59,7 +63,7 @@ fn enter_on_a_nested_factory_line_opens_the_child_with_the_factory_panel() {
     let mut mode = mode_with_parent_and_child();
     mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
     with_activity(&mut mode, "c-live", 0, 1);
-    select_title(&mut mode, "\u{2699} 1 factory run");
+    select_title(&mut mode, "\u{2699} 0 factories \u{b7} 1 running");
     mode.handle_key("enter");
     let opened = mode.opened.as_ref().expect("open recorded");
     assert_eq!(
