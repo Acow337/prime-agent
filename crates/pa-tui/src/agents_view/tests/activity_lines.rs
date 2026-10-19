@@ -1,4 +1,4 @@
-//! The shells and factory-run lines: Enter on a line opens its node's session with the matching
+//! The shells and factory lines: Enter on a line opens its node's session with the matching
 //! panel requested, the line's identity carried for the return.
 
 use super::*;

@@ -268,7 +268,7 @@ struct RowForest<'a, S: std::hash::BuildHasher + Default> {
 }
 
 impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
-    /// Emit one row, then its subagents block, then its shells and factory-run lines (after the
+    /// Emit one row, then its subagents block, then its shells and factory lines (after the
     /// block, so an expanded summary line stays directly above its children).
     fn emit(
         &self,
