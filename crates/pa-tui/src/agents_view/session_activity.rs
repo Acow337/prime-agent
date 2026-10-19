@@ -77,7 +77,7 @@ pub(super) fn spawn_session_activity_fetch(
     rx
 }
 
-/// A session without a running kernel hosts nothing: zero, not a failed read.
+/// The daemon's no-kernel refusal reads as zero, not a failed read.
 fn count<T: Default>(reply: Result<Value>, count: impl Fn(&Value) -> Option<T>) -> Option<T> {
     match reply {
         Ok(data) => count(&data),
@@ -87,7 +87,7 @@ fn count<T: Default>(reply: Result<Value>, count: impl Fn(&Value) -> Option<T>) 
 }
 
 impl AgentsViewMode {
-    /// The roster's live sessions a fetch cycle asks: saved rows have no kernel and render no lines.
+    /// The roster's live sessions a fetch cycle asks: saved rows have no kernel.
     pub(super) fn live_session_ids(&self) -> Vec<String> {
         self.roster
             .iter()

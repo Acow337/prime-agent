@@ -65,7 +65,8 @@ pub enum RowKind {
     Subagent,
     /// A read-only spawn-program line.
     Code,
-    /// The node's own running kernel shells line.
+    /// The node's own shells line: its kernel's running shells, or a saved row's live persistent
+    /// shells from the catalog.
     Shells,
     /// The node's own live factory runs line.
     FactoryRuns,
