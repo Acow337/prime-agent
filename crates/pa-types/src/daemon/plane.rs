@@ -123,6 +123,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "wait_for_idle",
     "list_kernel_bash",
     "tail_kernel_bash",
+    "list_persistent_shells",
     "get_session_header",
     "get_state",
     "get_connection_state",

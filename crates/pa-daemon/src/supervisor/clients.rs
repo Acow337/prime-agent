@@ -825,6 +825,24 @@ impl Supervisor {
                     false,
                 )
             }
+            DaemonCommand::ListPersistentShells { .. } => {
+                let agent_dir = self.options.agent_dir.clone();
+                let response = match tokio::task::spawn_blocking(move || {
+                    crate::persistent_shells::live_shell_rows(&agent_dir)
+                })
+                .await
+                {
+                    Ok(activities) => response_success(
+                        Some(&command_id),
+                        &type_name,
+                        Some(json!({ "activities": activities })),
+                    ),
+                    Err(error) => {
+                        response_failure(Some(&command_id), &type_name, &error.to_string(), None)
+                    }
+                };
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::Prompt {
                 active_session_id, ..
             }
