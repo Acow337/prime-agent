@@ -45,9 +45,10 @@ In **Google Auth Platform > Clients > Create Client**:
 
 ## 3. Prime Agent settings
 
-Add the servers to `mcpServers` in `~/.prime/agent/settings.json`. Keep the
-secret in this user-level file, not in a project `.prime/agent/settings.json`
-that may be committed.
+Add the servers to `mcpServers` in the user-level settings file
+`~/.prime/agent/settings.json`. A project's `.prime/agent/settings.json` is
+merged into `mcpServers` too, but never put `clientSecret` there: project
+settings usually live in a repository.
 
 ```json
 {
