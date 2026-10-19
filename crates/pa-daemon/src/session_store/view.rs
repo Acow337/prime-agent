@@ -533,9 +533,6 @@ pub(super) fn message_role(message: &Value) -> Option<&str> {
     message.get("role").and_then(Value::as_str)
 }
 
-/// Whether one entry contributes a message to the fold: `message` rows need
-/// their persisted message; `custom_message` rows rejoin as their wire form.
-/// The borrowing twin of the `entry_message` Some-ness.
 /// A row's wire message (`custom_message` rows rejoin as `role: "custom"`).
 fn entry_message(entry: &SessionEntry) -> Option<std::borrow::Cow<'_, Value>> {
     match entry.type_.as_str() {
@@ -618,6 +615,9 @@ fn settle_cut(rows: &[(&str, std::borrow::Cow<'_, Value>)], mut cut: usize) -> u
     cut
 }
 
+/// Whether one entry contributes a message to the fold: `message` rows need
+/// their persisted message; `custom_message` rows rejoin as their wire form.
+/// The borrowing twin of the `entry_message` Some-ness.
 fn entry_bears_message(entry: &SessionEntry) -> bool {
     match entry.type_.as_str() {
         "message" => entry.fields.get("message").is_some(),

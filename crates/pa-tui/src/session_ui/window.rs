@@ -328,7 +328,7 @@ impl SessionUi {
                 self.window.failed = true;
                 view.push_entry(ChatEntry::Status {
                     text: format!(
-                        "Older history could not be loaded: {error}. Reopen the session to retry."
+                        "History could not be loaded: {error}. Reopen the session to retry."
                     ),
                     kind: StatusKind::Warning,
                 });

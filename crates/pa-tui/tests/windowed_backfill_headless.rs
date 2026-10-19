@@ -487,7 +487,7 @@ fn an_unverified_history_leaf_echo_keeps_the_attached_tail_and_reports_incomplet
             /*failures*/ 0,
             history_leaf_id,
             vec![HeadlessStep::WaitRender {
-                needle: "Older history could not be loaded".to_string(),
+                needle: "History could not be loaded".to_string(),
                 timeout_ms: 5000,
             }],
         );
@@ -499,7 +499,7 @@ fn an_unverified_history_leaf_echo_keeps_the_attached_tail_and_reports_incomplet
         assert!(
             frames
                 .iter()
-                .any(|frame| frame.contains("Older history could not be loaded")),
+                .any(|frame| frame.contains("History could not be loaded")),
             "an absent or wrong history anchor must fail visibly: {history_leaf_id:?}"
         );
         assert_eq!(requests[0]["historyLeafId"], json!(HISTORY_LEAF_ID));
@@ -558,13 +558,13 @@ fn a_rejected_backfill_retries_then_reports_incomplete_history() {
         true,
         /*failures*/ 2,
         vec![HeadlessStep::WaitRender {
-            needle: "Older history could not be loaded".to_string(),
+            needle: "History could not be loaded".to_string(),
             timeout_ms: 5000,
         }],
     );
     assert!(frames
         .iter()
-        .any(|frame| frame.contains("Older history could not be loaded")));
+        .any(|frame| frame.contains("History could not be loaded")));
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
 }
