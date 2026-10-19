@@ -1526,6 +1526,13 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
 
+    async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
+        handle = bash("( sleep 30 & ); exit 0", persistent=True)
+        self.pgids.append(handle.pid)
+        self.assertEqual((await handle).exit_code, 0)
+        self.assertEqual(self.files(), [])
+        await _poll_group_dead(handle.pid)
+
     async def test_persistent_requires_a_saved_session(self):
         with mock.patch.dict(os.environ):
             del os.environ["RLM_SESSION_ID"]
