@@ -1398,6 +1398,107 @@ fn acp_daemon_attached_failed_turn_publishes_only_the_error_boundary() {
     );
 }
 
+#[test]
+fn acp_daemon_attached_settled_model_error_publishes_the_envelope_and_fails_the_prompt() {
+    // A settled model error (the empty faux queue's exhaustion row) keeps
+    // the TS `turnFailure` flow, unlike the admission catch above: the
+    // full completion envelope still publishes - boundary, quiescence
+    // event, terminal frame, each stamped outcome "error" - and only then
+    // the request response fails with the settled row's own error text.
+    // The prompt is non-empty, so the empty queue is the model error, not
+    // an admission rejection, and the turn settles within the retry
+    // budget (no hang): the response arrives inside the harness timeout.
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "responses": [] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["error"]["code"], -32603,
+        "the settled model error fails the request: {prompt_response}"
+    );
+    assert!(
+        prompt_response["error"]["data"]["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("prime-agent turn failed: No more faux responses queued"),
+        "the failure text is the settled row's own error, not a paraphrase: {prompt_response}"
+    );
+    // The envelope shape: the boundary declares a terminal expectation and
+    // the error outcome, the quiescence event rides between, and the
+    // terminal frame carries the error outcome - the admission catch's
+    // lone no-terminal-expectation boundary must not appear.
+    let mut shapes = Vec::new();
+    for update in &updates {
+        let body = &update["params"]["update"];
+        let meta = &body["_meta"]["ai.primeintellect.prime-agent"];
+        shapes.push((
+            meta["phase"].as_str().unwrap_or_default().to_string(),
+            meta["outcome"].as_str().map(str::to_string),
+            meta["terminalQuiescenceExpected"].as_bool(),
+        ));
+    }
+    assert!(
+        !shapes.contains(&(
+            "responseBoundary".to_string(),
+            Some("error".to_string()),
+            Some(false)
+        )),
+        "the admission-catch boundary never appears for a settled model error: {shapes:?}"
+    );
+    assert_eq!(
+        shapes[0],
+        (
+            "responseBoundary".to_string(),
+            Some("error".to_string()),
+            Some(true)
+        ),
+        "the boundary opens the error envelope: {shapes:?}"
+    );
+    assert_eq!(
+        shapes.last(),
+        Some(&(
+            "terminalQuiescence".to_string(),
+            Some("error".to_string()),
+            None
+        )),
+        "the terminal frame seals the error envelope: {shapes:?}"
+    );
+    assert!(
+        shapes.contains(&("event".to_string(), None, None)),
+        "the quiescence event publishes between them: {shapes:?}"
+    );
+    assert_eq!(
+        shapes
+            .iter()
+            .filter(|(phase, _, _)| *phase == "responseBoundary")
+            .count(),
+        1,
+        "exactly one boundary publishes (no admission-catch duplicate): {shapes:?}"
+    );
+    assert_eq!(
+        shapes
+            .iter()
+            .filter(|(phase, _, _)| *phase == "terminalQuiescence")
+            .count(),
+        1,
+        "exactly one terminal frame publishes: {shapes:?}"
+    );
+}
+
+
 #[cfg(unix)]
 #[test]
 fn acp_daemon_attached_supervisor_loss_fails_the_prompt() {
