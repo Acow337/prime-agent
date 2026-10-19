@@ -68,7 +68,7 @@ pub enum RowKind {
     /// The node's own shells line: its kernel's running shells, or a saved row's live persistent
     /// shells from the catalog.
     Shells,
-    /// The node's own live factory runs line.
+    /// The node's own factory line: its stored specs and live runs.
     FactoryRuns,
 }
 
@@ -107,11 +107,11 @@ pub struct SelectionKey {
 }
 
 /// One session's own activity counts (a live one's keyed by its `activeSessionId`): the shells and
-/// factory-run lines render them.
+/// factory lines render them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionActivity {
     pub shells: crate::bash_view::ShellCounts,
-    pub factory_runs: usize,
+    pub factory: crate::factory_view::FactoryCounts,
 }
 
 /// One recursive rollup over the record hierarchy (TS

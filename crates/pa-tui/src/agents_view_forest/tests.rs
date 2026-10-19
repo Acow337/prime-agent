@@ -1,6 +1,7 @@
 use super::*;
 use crate::agents_view_state::reconcile_unified_sessions;
 use crate::bash_view::ShellCounts;
+use crate::factory_view::FactoryCounts;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -1223,7 +1224,10 @@ fn activity(entries: &[(&str, usize, usize)]) -> HashMap<String, SessionActivity
                         running: *shells,
                         persistent: 0,
                     },
-                    factory_runs: *factory_runs,
+                    factory: FactoryCounts {
+                        specs: 0,
+                        runs: *factory_runs,
+                    },
                 },
             )
         })
@@ -1270,7 +1274,11 @@ fn activity_lines_follow_each_nodes_subagents_block() {
             (RowKind::Shells, 2, "$ 1 shell"),
             (RowKind::Subagent, 1, "second child"),
             (RowKind::Shells, 1, "$ 2 shells"),
-            (RowKind::FactoryRuns, 1, "\u{2699} 1 factory run"),
+            (
+                RowKind::FactoryRuns,
+                1,
+                "\u{2699} 0 factories \u{b7} 1 running"
+            ),
         ]
     );
     let shells = &rows[7];
@@ -1280,21 +1288,26 @@ fn activity_lines_follow_each_nodes_subagents_block() {
     assert!(shells.selectable());
 }
 
-/// A node without subagents shows its lines directly under its row; a node with no counts shows
-/// none.
+/// A node without subagents shows its lines directly under its row: stored factory specs show the
+/// factory line without a live run; a node with no counts shows none.
 #[test]
 fn activity_lines_without_subagents_and_without_counts() {
     let roster = vec![
         roster_entry("a", "idle", &parent_summary("a")),
         roster_entry("b", "idle", &parent_summary("b")),
     ];
-    let rows = rows_with_activity(&roster, None, &[], &activity(&[("a-live", 0, 3)]));
+    let specs_only = SessionActivity {
+        factory: FactoryCounts { specs: 2, runs: 0 },
+        ..SessionActivity::default()
+    };
+    let counts = HashMap::from([("a-live".to_string(), specs_only)]);
+    let rows = rows_with_activity(&roster, None, &[], &counts);
     let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
     let a = titles
         .iter()
         .position(|title| *title == "a name")
         .expect("a row");
-    assert_eq!(titles[a + 1], "\u{2699} 3 factory runs");
+    assert_eq!(titles[a + 1], "\u{2699} 2 factories \u{b7} 0 running");
     assert_eq!(
         rows.len(),
         3,
@@ -1322,7 +1335,7 @@ fn a_live_shells_line_counts_its_persistent_shells() {
             running,
             persistent,
         },
-        factory_runs: 0,
+        ..SessionActivity::default()
     };
     let counts = HashMap::from([
         ("a-live".to_string(), shells(2, 1)),
@@ -1382,5 +1395,38 @@ fn an_inactive_node_shows_its_live_persistent_shells() {
     assert_eq!(
         shells_lines(&rows),
         vec![("shells:file:/x/gone.jsonl", "$ 2 shells · 2 persistent")]
+    );
+}
+
+/// A session without a live kernel shows its catalog row's stored factory specs with no runs; a live
+/// session's factory line comes from its own graph poll only, never the catalog's count too.
+#[test]
+fn an_inactive_node_shows_its_stored_factory_specs() {
+    let roster = vec![roster_entry("live", "idle", &parent_summary("live"))];
+    let saved = vec![
+        json!({ "id": "gone", "path": "/x/gone.jsonl", "messageCount": 2, "factorySpecs": 2 }),
+        json!({ "id": "live", "path": "/x/live.jsonl", "messageCount": 2, "factorySpecs": 5 }),
+    ];
+    let records = reconcile_unified_sessions(&roster, &saved, None);
+    let rows = build_rows(
+        &records,
+        None,
+        &HashSet::default(),
+        &HashSet::default(),
+        &compute_rollups(&records),
+        &HashMap::new(),
+        None,
+    );
+    let factory_lines: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|row| row.kind == RowKind::FactoryRuns)
+        .map(|row| (row.identity.as_str(), row.title.as_str()))
+        .collect();
+    assert_eq!(
+        factory_lines,
+        vec![(
+            "factory:file:/x/gone.jsonl",
+            "\u{2699} 2 factories \u{b7} 0 running"
+        )]
     );
 }
