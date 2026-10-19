@@ -156,7 +156,11 @@ fn sample_runs(
 
 /// One scenario pass; returns the sample in ms and the owned-tree RSS
 /// bytes (`None` off Linux).
-fn scenario_once(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Option<u64>)> {
+fn scenario_once(
+    ctx: &RunCtx,
+    scenario: Scenario,
+    run: usize,
+) -> anyhow::Result<(f64, Option<u64>)> {
     let (sample, rss, _) = launch(ctx, scenario, run)?;
     Ok((sample, rss))
 }
