@@ -1506,8 +1506,7 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
 
         held.kill()
         await held
-        with self.assertRaises(ProcessLookupError):
-            os.killpg(held_pid, 0)
+        await _poll_group_dead(held_pid)
         self.assertEqual(self.files(), [])
 
     async def test_fresh_persistent_shell_reports_through_files(self):
