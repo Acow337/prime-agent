@@ -1,7 +1,6 @@
-//! Headless e2e for the compaction-window queued prompt under the in-stream
-//! collapse: the transcript arrives ON `compaction_end`, so a queued prompt
+//! Headless e2e for the compaction-window queued prompt: a queued prompt
 //! renders once and the compaction path never refetches. The mock still
-//! answers `get_messages`, so the PRE-FIX tree's rebuild is recorded.
+//! answers `get_messages`, so a refetch would be recorded.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -58,7 +57,6 @@ fn compaction_and_queued_frames() -> Vec<Value> {
                     "summary": SUMMARY_TEXT,
                     "firstKeptEntryId": "e1",
                     "tokensBefore": 100,
-                    "transcript": [compaction_summary_message()],
                 },
                 "aborted": false,
                 "willRetry": false,
@@ -94,7 +92,6 @@ fn compaction_only_frames() -> Vec<Value> {
                     "summary": SUMMARY_TEXT,
                     "firstKeptEntryId": "e1",
                     "tokensBefore": 100,
-                    "transcript": [compaction_summary_message()],
                 },
                 "aborted": false,
                 "willRetry": false,
@@ -387,10 +384,7 @@ fn custom_rows_before_and_after_collapse_render_once() {
         session_event(
             &json!({
                 "type": "compaction_end", "reason": "manual",
-                "result": {
-                    "summary": SUMMARY_TEXT, "tokensBefore": 100,
-                    "transcript": [compaction_summary_message(), before],
-                },
+                "result": { "summary": SUMMARY_TEXT, "tokensBefore": 100 },
                 "aborted": false, "willRetry": false,
             }),
             4,
@@ -424,57 +418,4 @@ fn custom_rows_before_and_after_collapse_render_once() {
         assert_eq!(frame.matches(text).count(), 1, "{text}: {frame}");
     }
     assert!(!commands.iter().any(|command| command == "get_messages"));
-}
-
-/// TS and older Rust protocol-7 daemons do not include `result.transcript`.
-/// Both manual and automatic successful compactions still replace the chat
-/// from `get_messages`; the new in-stream path above must continue to skip it.
-#[test]
-fn legacy_compaction_results_refresh_the_transcript() {
-    std::env::remove_var("TMUX");
-    for reason in ["manual", "threshold"] {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let socket = dir.path().join("tui.sock");
-        let supervisor = MockSupervisor {
-            listener: UnixListener::bind(&socket).expect("bind mock socket"),
-        };
-        let mut frames = compaction_only_frames();
-        for frame in &mut frames {
-            frame["event"]["reason"] = json!(reason);
-            if let Some(result) = frame["event"]
-                .get_mut("result")
-                .and_then(Value::as_object_mut)
-            {
-                result.remove("transcript");
-            }
-        }
-        let handle = std::thread::spawn(move || supervisor.serve(&frames));
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        let plan = HeadlessPlan {
-            steps: vec![HeadlessStep::WaitRender {
-                needle: SUMMARY_TEXT.to_string(),
-                timeout_ms: 5000,
-            }],
-            width: 100,
-            height: 40,
-        };
-        let outcome = runtime
-            .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
-            .expect("legacy compaction run");
-        let commands = handle.join().expect("mock supervisor finished");
-        let frame = outcome.frames.last().expect("a rendered frame");
-        assert_eq!(frame.matches(SUMMARY_TEXT).count(), 1, "{reason}: {frame}");
-        assert_eq!(frame.matches(QUEUED_TEXT).count(), 1, "{reason}: {frame}");
-        assert_eq!(
-            commands
-                .iter()
-                .filter(|command| *command == "get_messages")
-                .count(),
-            1,
-            "legacy {reason} refreshes exactly once: {commands:?}"
-        );
-    }
 }

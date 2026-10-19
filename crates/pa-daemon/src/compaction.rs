@@ -255,15 +255,8 @@ impl CompactionManager {
     }
 
     /// Sequence and broadcast one compaction `session_event` frame.
-    fn emit_session_event(&self, mut event: Value) -> serde_json::Result<()> {
+    fn emit_session_event(&self, event: Value) -> serde_json::Result<()> {
         let mut core = self.core.lock().unwrap();
-        // A replacement transcript must cover every row sequenced before it.
-        if let (Some("compaction_end"), Some(store)) = (
-            event.get("type").and_then(Value::as_str),
-            core.store.as_ref(),
-        ) {
-            attach_collapse_transcript(&mut event, store);
-        }
         let sequence = core.last_event_sequence + 1;
         core.last_event_sequence = sequence;
         let meta = crate::protocol::create_daemon_event_meta(
@@ -338,20 +331,6 @@ pub(crate) fn compaction_end_success(
         event["customInstructions"] = json!(custom_instructions);
     }
     event
-}
-
-/// Inject the store's post-compaction walk (the same one `get_messages`
-/// serves, image payloads elided) into a succeeded `compaction_end` result.
-pub(crate) fn attach_collapse_transcript(
-    event: &mut Value,
-    store: &crate::session_store::SessionFile,
-) {
-    let Some(result) = event.get_mut("result").and_then(Value::as_object_mut) else {
-        return;
-    };
-    let mut transcript = store.messages();
-    crate::snapshot_stream::elide_snapshot_image_payloads(&mut transcript);
-    result.insert("transcript".to_string(), json!(transcript));
 }
 
 /// The `compaction_end` payload of an unsuccessful compaction: `aborted` marks a cancelled
@@ -452,78 +431,6 @@ fn compaction_end_event(outcome: &CompactionOutcome, custom_instructions: Option
 mod tests {
     use super::*;
 
-    #[test]
-    fn manual_collapse_includes_rows_committed_before_its_event_sequence() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("session.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                r#"{"type":"session","id":"collapse-race","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-        let store = crate::session_store::SessionFile::open(&path).unwrap();
-        let core = Arc::new(Mutex::new(SessionCore::test_core(
-            Some(store),
-            dir.path().display().to_string(),
-        )));
-        let events = Arc::new(EventPump::new());
-        let mut subscription = events.subscribe();
-        let manager = CompactionManager::new(
-            Arc::new(crate::engine::ScriptedEngine::default()),
-            Arc::clone(&events),
-            Arc::clone(&core),
-            "collapse-race".to_string(),
-            dir.path().to_path_buf(),
-        );
-        let mut end = compaction_end_success(
-            "manual",
-            &json!({ "summary": "the collapsed history", "tokensBefore": 1234 }),
-            false,
-            None,
-        );
-        // Reproduce a custom append between preparing the collapse and sequencing it.
-        {
-            let core = core.lock().unwrap();
-            attach_collapse_transcript(&mut end, core.store.as_ref().unwrap());
-        }
-        let row = json!({
-            "role": "custom", "customType": "notice", "content": "raced notice",
-            "display": true, "details": null,
-        });
-        {
-            let mut core = core.lock().unwrap();
-            core.store
-                .as_mut()
-                .unwrap()
-                .persist_entry(
-                    "custom_message",
-                    json!({
-                        "customType": "notice", "content": "raced notice",
-                        "display": true, "details": null,
-                    }),
-                )
-                .unwrap();
-        }
-        for event_type in ["message_start", "message_end"] {
-            manager
-                .emit_session_event(json!({ "type": event_type, "message": row }))
-                .unwrap();
-        }
-        manager.emit_session_event(end).unwrap();
-        let frames: Vec<Value> = (0..3)
-            .map(|_| serde_json::from_slice(&subscription.try_recv().unwrap().payload).unwrap())
-            .collect();
-        assert_eq!(frames[2]["meta"]["sequence"], json!(3));
-        assert_eq!(
-            frames[2]["event"]["result"]["transcript"],
-            json!(core.lock().unwrap().store.as_ref().unwrap().messages()),
-            "the collapse must not erase the custom row whose frames precede it",
-        );
-    }
-
     #[tokio::test]
     async fn custom_rows_on_each_side_of_collapse_appear_once_in_wire_order() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -562,14 +469,6 @@ mod tests {
         let before = row("before collapse");
         let after = row("after collapse");
         worker.emit_custom_row(&before);
-        let transcript = worker
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_ref()
-            .unwrap()
-            .messages();
         let result = json!({ "summary": "collapsed history", "tokensBefore": 1234 });
         worker
             .compaction
@@ -584,10 +483,7 @@ mod tests {
             json!({ "type": "message_end", "message": before }),
             json!({
                 "type": "compaction_end", "reason": "manual",
-                "result": {
-                    "summary": "collapsed history", "tokensBefore": 1234,
-                    "transcript": transcript,
-                },
+                "result": { "summary": "collapsed history", "tokensBefore": 1234 },
                 "aborted": false, "willRetry": false,
             }),
             json!({ "type": "message_start", "message": after }),
@@ -602,22 +498,6 @@ mod tests {
         assert_eq!(
             sequences,
             vec![json!(1), json!(2), json!(3), json!(4), json!(5)]
-        );
-        let mut visible = Vec::new();
-        for event in &actual {
-            if event["type"] == "compaction_end" {
-                visible = event["result"]["transcript"].as_array().unwrap().clone();
-            } else if event["type"] == "message_start" {
-                visible.push(event["message"].clone());
-            }
-        }
-        let contents: Vec<Value> = visible
-            .iter()
-            .map(|message| message["content"].clone())
-            .collect();
-        assert_eq!(
-            contents,
-            vec![json!("before collapse"), json!("after collapse")]
         );
     }
 

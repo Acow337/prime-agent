@@ -652,12 +652,6 @@ impl TurnRunner {
                     }
                     _ => {}
                 }
-                // The store walk at this sequence rides the event.
-                if let EngineEvent::Compaction { ref mut event, .. } = event {
-                    if let Some(store) = core.store.as_ref() {
-                        crate::compaction::attach_collapse_transcript(event, store);
-                    }
-                }
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
                 if !emitting_prefix_rows.get()
@@ -997,7 +991,7 @@ impl TurnRunner {
                     direct_payloads.push(payload);
                 }
                 // Direct frames go out while their sequence still owns the
-                // store lock; another row cannot overtake a collapse snapshot.
+                // store lock, so another row cannot overtake them.
                 // Flush the parked update first; pure updates stay parked.
                 if !direct_payloads.is_empty() {
                     turn_coalescer.send_direct(&direct_payloads, &events);
