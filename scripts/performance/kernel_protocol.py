@@ -14,8 +14,6 @@ CELL_REPEATS = 50
 SHELL_REPEATS = 5
 MIXED_CELLS = 35
 OUTPUT_BYTES = 32 * 1024
-FRAME_ROWS = 10_000
-FRAME_COLUMNS = 8
 
 BASH_EMPTY = "_r = await bash(':')\nassert _r.exit_code == 0 and _r.output == ''"
 GIT_STATUS = "_r = await bash('git status --porcelain')\nassert _r.exit_code == 0 and _r.output == ''"

@@ -13,6 +13,7 @@ fn result(scenario: Scenario, median_ms: f64) -> BenchResult {
         profile: "small".to_string(),
         runs: 10,
         samples_ms: vec![median_ms],
+        samples_rss_bytes: None,
         median_ms,
         p95_ms: median_ms,
         needle: String::new(),

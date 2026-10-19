@@ -35,6 +35,13 @@ pub enum Scenario {
     SessionSwitch,
     /// The `@` keystroke -> the first completion menu row.
     AtCompletion,
+    /// Fresh daemon+TUI: ten characters typed into the prompt -> the full
+    /// echo paints (the editor's acknowledgment), then backspace clears it.
+    EditorReady,
+    /// A held TUI open on switch-a's resumed session while the measured
+    /// TUI opens the huge session on the same daemon: exec -> the huge
+    /// session's tail marker, under the concurrent session's daemon load.
+    ConcurrentSession,
 }
 
 /// Every bench knob for one scenario over one corpus.
@@ -82,6 +89,16 @@ pub struct BenchResult {
     pub profile: String,
     pub runs: usize,
     pub samples_ms: Vec<f64>,
+    /// Per-run owned process-tree RSS samples (bytes): the measured TUI,
+    /// any concurrently held TUI, the daemon, its workers, and their
+    /// kernels — one immediate `/proc` read per run, taken right after
+    /// the run's observable action and before any child teardown. The
+    /// cold-start/cold-ready and warm-start/warm-ready pairs share one
+    /// launch and therefore one sample per run. Null when the platform
+    /// cannot sample (no Linux `/proc`): explicit unavailability, never a
+    /// fake zero.
+    #[serde(default)]
+    pub samples_rss_bytes: Option<Vec<u64>>,
     pub median_ms: f64,
     pub p95_ms: f64,
     pub needle: String,
@@ -134,6 +151,10 @@ pub fn run_suite(_options: &RunOptions) -> anyhow::Result<Vec<BenchResult>> {
 
 #[cfg(unix)]
 mod pty;
+/// The Linux owned-tree RSS sample (`/proc` ppid walk rooted at the
+/// harness-owned TUI pids and any directly pre-started daemon).
+#[cfg(target_os = "linux")]
+mod rss;
 /// The unix-only harness (pty, daemon lifecycle, scenario runners).
 #[cfg(unix)]
 mod runner;

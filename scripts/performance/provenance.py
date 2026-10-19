@@ -1,4 +1,4 @@
-"""Content identities shared by the local harness and hosted artifact exporter."""
+"""Content identities for the confined comparison harness."""
 import hashlib
 import json
 from pathlib import Path

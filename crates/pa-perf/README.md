@@ -125,6 +125,8 @@ the liveness deadline only fails broken runs):
 | `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker |
 | `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker |
 | `at-completion` | cold | the `@` keystroke -> the first completion menu row |
+| `editor-ready` | cold | ten typed characters -> full editor echo; clear verified untimed |
+| `concurrent-session` | cold | exec -> huge history marker while another TUI holds switch-a |
 
 Mechanics (the repo's pty-e2e discipline): the TUI child runs in its own
 session with NO controlling tty (`setsid` pre-exec; vendored crossterm
@@ -134,6 +136,13 @@ env is rebuilt from scratch (no ambient credentials leak in). Between runs
 the harness restores the corpus to the manifest's file set (the product's
 new session files, sidecars, logs, and leases are deleted) so every run
 measures identical state. A discarded warm-up run precedes the samples.
+
+Each result also records immediate Linux process-tree RSS after its action and
+before teardown, rooted only at the owned TUI(s) and pre-started daemon. Cold
+daemons are TUI children; workers and kernels follow their descendant trees.
+This is RSS, not PSS or settled memory. Non-Linux results use null, not zero.
+The shared cold/warm paint-and-ready launch pairs share an RSS sample. New
+scenarios have no fabricated baselines; the report shows them as uncalibrated.
 
 Teardown signals only the harness's own child pids; the daemon stops by the
 shutdown protocol and the run FAILS if it keeps accepting — never a

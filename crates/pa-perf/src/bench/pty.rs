@@ -237,6 +237,41 @@ impl PtyChild {
         }
     }
 
+    /// Wait until the decoded screen no longer contains `needle`, bounded
+    /// by `deadline` (the editor-clear observable: typed input leaves the
+    /// screen). The caller must have observed the needle first — an
+    /// initially-absent needle returns immediately.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the child exits with the needle still on screen, or the
+    /// deadline passes (with the decoded screen attached).
+    pub(crate) fn wait_screen_lacks(
+        &mut self,
+        needle: &str,
+        what: &str,
+        deadline: Instant,
+    ) -> anyhow::Result<Instant> {
+        loop {
+            if !self.screen_text().contains(needle) {
+                return Ok(Instant::now());
+            }
+            if let Some(status) = self.exited {
+                anyhow::bail!(
+                    "child exited with {status} before {what}; pty tail:\n{}",
+                    String::from_utf8_lossy(&self.output[self.output.len().saturating_sub(4000)..])
+                );
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timeout waiting for {what} (screen still holds {needle:?}); screen:\n{}",
+                    self.screen_text(),
+                );
+            }
+            self.pump(Some(deadline))?;
+        }
+    }
+
     /// The decoded screen's text (rows joined; trailing blanks trimmed).
     fn screen_text(&mut self) -> String {
         self.screen.screen().contents().trim_end().to_string()
@@ -382,6 +417,34 @@ mod tests {
                 Instant::now() + Duration::from_secs(5),
             )
             .expect("final screen survives child exit");
+    }
+
+    #[test]
+    fn the_clear_observable_waits_for_the_paint_to_leave_the_screen() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "stty -icanon -echo; printf 'zzzzzzzzzz'; head -c 1 >/dev/null; printf '\\033[2J\\033[Hcleared'".into(),
+            ],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the clearing mock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        child
+            .wait_screen_contains("zzzzzzzzzz", "the painted payload", deadline)
+            .expect("the payload paints first");
+        child.write(b"c").expect("release the mock's clear");
+        child
+            .wait_screen_lacks("zzzzzzzzzz", "the cleared screen", deadline)
+            .expect("the clear removes the payload");
+        child
+            .wait_screen_contains("cleared", "the post-clear paint", deadline)
+            .expect("the screen after the clear paints");
     }
 
     #[test]

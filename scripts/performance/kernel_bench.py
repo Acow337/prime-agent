@@ -12,11 +12,9 @@ import subprocess
 import tempfile
 import time
 
-from kernel_protocol import BASH_EMPTY, BASH_OUTPUT, GIT_STATUS, OUTPUT_BYTES, Kernel
+from kernel_protocol import (BASH_EMPTY, BASH_OUTPUT, CELL_REPEATS, GIT_STATUS,
+                             OUTPUT_BYTES, SHELL_REPEATS, Kernel)
 from provenance import harness_sha256
-
-METRICS = ("kernel_start_ms", "cell_ms", "bash_ms", "git_status_ms", "shell_output_ms",
-           "mixed_ms", "interrupt_ms", "file_io_ms", "snapshot_ms", "restore_ms")
 
 
 def measure(runtime: Path, evidence: Path) -> dict:
@@ -36,8 +34,8 @@ def measure(runtime: Path, evidence: Path) -> dict:
             kernel.batch("pass", 5)
             kernel.batch(BASH_EMPTY, 1)
             for name, code, repeats, output in (
-                ("cell_ms", "pass", 50, None), ("bash_ms", BASH_EMPTY, 5, None),
-                ("git_status_ms", GIT_STATUS, 5, None), ("shell_output_ms", BASH_OUTPUT, 5, OUTPUT_BYTES),
+                ("cell_ms", "pass", CELL_REPEATS, None), ("bash_ms", BASH_EMPTY, SHELL_REPEATS, None),
+                ("git_status_ms", GIT_STATUS, SHELL_REPEATS, None), ("shell_output_ms", BASH_OUTPUT, SHELL_REPEATS, OUTPUT_BYTES),
                 ("file_io_ms", f"from pathlib import Path\n_io = b'x' * 32768\n_io_path = Path({str(root / 'io.bin')!r})\n_io_path.write_bytes(_io)\nassert _io_path.read_bytes() == _io", 10, None),
             ):
                 metrics[name] = kernel.batch(code, repeats, output_bytes=output) * 1000
@@ -78,8 +76,7 @@ def main():
         parser.error('requires full lowercase commit SHAs')
     args.out.mkdir(parents=True, exist_ok=False)
     report = {"schema": 1, "base_sha": args.base_sha, "head_sha": args.head_sha, "trials": args.trials,
-              "harness_sha256": harness_sha256(),
-              "dependency_lock_sha256": hashlib.sha256(Path(__file__).with_name("requirements.lock").read_bytes()).hexdigest(), "sides": {}}
+              "harness_sha256": harness_sha256(), "sides": {}}
     for side in ("base", "head"):
         runtime = getattr(args, f"{side}_runtime").absolute()
         report["sides"][side] = {"runtime_command_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
