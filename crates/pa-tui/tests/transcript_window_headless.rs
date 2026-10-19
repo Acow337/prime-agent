@@ -245,10 +245,16 @@ fn marker_rows(frame: &str) -> Vec<(usize, usize)> {
 
 const ROWS_PER_MESSAGE: isize = 3;
 
-/// The transcript row at the frame's top, from its marker lines (which must agree).
+/// The transcript row at the frame's top, from its marker lines above any gap row
+/// (which must agree). The first message has no leading spacer, so it is skipped.
 fn transcript_row(frame: &str) -> isize {
+    let gap = frame
+        .lines()
+        .position(|line| line.contains(GAP_ROW))
+        .unwrap_or(usize::MAX);
     let rows: Vec<isize> = marker_rows(frame)
         .into_iter()
+        .filter(|(row, index)| *row < gap && *index > 0)
         .map(|(row, index)| index as isize * ROWS_PER_MESSAGE - row as isize)
         .collect();
     assert!(
@@ -256,6 +262,17 @@ fn transcript_row(frame: &str) -> isize {
         "every message renders as {ROWS_PER_MESSAGE} rows:\n{frame}"
     );
     rows[0]
+}
+
+/// The content's move between consecutive frames, in rows (positive: it moved down).
+/// A chunk landing above or evicted below must never move it, so every move is one
+/// scroll step.
+fn moves(frames: &[String]) -> Vec<(usize, isize)> {
+    frames
+        .windows(2)
+        .enumerate()
+        .map(|(index, pair)| (index, transcript_row(&pair[0]) - transcript_row(&pair[1])))
+        .collect()
 }
 
 fn top_marker(frame: &str) -> Option<usize> {
@@ -296,18 +313,17 @@ fn scrolling_up_through_older_pages_keeps_the_viewport_anchored() {
         pages.iter().filter(|page| page["from"] == "end").count() >= (MESSAGES - TAIL) / CHUNK,
         "the climb loaded the history in older pages: {pages:?}"
     );
-    // Every message renders as `ROWS_PER_MESSAGE` rows, so a frame's position in the
-    // transcript is exact. Every frame-to-frame move is one wheel step or one page: a
-    // chunk landing above, or one evicted below, never moves the content.
     let mut page_rows = None;
-    for (index, pair) in frames[..reached_top].windows(2).enumerate().skip(1) {
-        let moved = transcript_row(&pair[0]) - transcript_row(&pair[1]);
+    for (index, moved) in moves(&frames[1..reached_top]) {
         if moved != 3 {
             let page = *page_rows.get_or_insert(moved);
             assert_eq!(
-                moved, page,
-                "frame {index}: the content moved by neither a wheel step nor a page:\n{}\n---\n{}",
-                pair[0], pair[1]
+                moved,
+                page,
+                "frame {}: the content moved by neither a wheel step nor a page:\n{}\n---\n{}",
+                index + 1,
+                frames[index + 1],
+                frames[index + 2]
             );
         }
     }
@@ -358,7 +374,9 @@ fn the_resident_run_stays_bounded_and_refills_on_return() {
 
     // Unheld, the descent refetches the evicted rows: every message renders on the way
     // back down, in order, without a skip.
+    // The climb ends with the top key, so the descent starts from a top-anchored window.
     let mut steps = paced(&[key(crossterm::event::KeyCode::PageUp)], 150);
+    steps.push(HeadlessStep::ScrollTop);
     steps.extend(
         paced(&[key(crossterm::event::KeyCode::PageDown)], 150)
             .into_iter()
@@ -369,6 +387,25 @@ fn the_resident_run_stays_bounded_and_refills_on_return() {
         .iter()
         .position(|frame| top_marker(frame) == Some(0))
         .expect("the climb reached the first message");
+    let bottom = frames
+        .iter()
+        .rposition(|frame| !frame.contains(&format!("msg-{:05}", MESSAGES - 1)))
+        .expect("the descent passed above the tail");
+    let descent = moves(&frames[top..bottom]);
+    let page = descent
+        .first()
+        .map(|(_, moved)| *moved)
+        .expect("the descent paged");
+    for (index, moved) in descent {
+        assert_eq!(
+            moved,
+            page,
+            "frame {}: a page down moved the content by {moved}, not one page ({page}):\n{}\n---\n{}",
+            top + index,
+            frames[top + index],
+            frames[top + index + 1]
+        );
+    }
     let last = frames.last().expect("frames rendered");
     assert!(
         !last.contains(GAP_ROW) && last.contains(&format!("msg-{:05}", MESSAGES - 1)),
