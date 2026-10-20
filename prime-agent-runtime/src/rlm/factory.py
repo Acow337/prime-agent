@@ -3100,8 +3100,18 @@ class FactoryExecutor:
             # later read would be skipped (a child with no further
             # activity would then time out despite it), while events
             # older than this read are pre-subscribe by construction and
-            # never replayed into the match.
-            page = await watch_read(since_seq=0, limit=1)
+            # never replayed into the match. A FULL page's cursor is the
+            # last event examined, not the tail, so page until a partial
+            # page hands the ring's real resume point (a one-event read
+            # against a non-empty ring would arm on the FIRST event and
+            # replay the leftovers into the match).
+            arm_limit = 50
+            cursor = 0
+            while True:
+                page = await watch_read(since_seq=cursor, limit=arm_limit)
+                if len(page.get("events") or []) < arm_limit:
+                    break
+                cursor = int(page.get("next_seq") or cursor)
             handle = await watch_agent(target)
         except Exception as exc:
             await self._settle_wait_error(
@@ -3128,6 +3138,11 @@ class FactoryExecutor:
         failure machinery has nothing to retry — the settle propagates
         through transitions like any error settle."""
         await self._cancel_wait_subscription(run, state, entry)
+        if entry.status != "waiting":
+            # stop() claimed the entry during the awaited cancel: its
+            # cancellation (and its node_cancelled event) stands, and no
+            # error settle may overwrite it.
+            return
         entry.status = "error"
         entry.error = reason
         entry.is_settle = True
@@ -3188,6 +3203,11 @@ class FactoryExecutor:
             wait = state.spec.get("wait") or {}
             timeout_s = (wait.get("timeout_ms") or 0) / 1000
             remaining = (entry.wait_started_at or now) + timeout_s - now
+            if entry.status != "waiting":
+                # stop() (or a policy pass) landed during an earlier
+                # entry's awaited read and cancelled this entry after the
+                # snapshot was taken: its cancellation stands.
+                continue
             if remaining <= 0:
                 await self._settle_wait_error(
                     run,
@@ -3202,6 +3222,10 @@ class FactoryExecutor:
                 # A transient host miss skips this poll round; the timeout
                 # still bounds the wait.
                 park = min(park, remaining)
+                continue
+            if entry.status != "waiting":
+                # stop() cancelled the entry during the awaited read: a
+                # stale pre-stop event must not fire or settle it.
                 continue
             entry.wait_cursor = int(page.get("next_seq") or entry.wait_cursor)
             match = next(

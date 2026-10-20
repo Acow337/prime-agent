@@ -755,3 +755,143 @@ async fn agent_watch_a_hanging_child_does_not_withhold_a_healthy_sibling() {
         .expect("the dead child's watch row");
     assert_eq!(dead.status, "active");
 }
+
+/// A re-register (the `rlm.rename` re-baseline) refreshes the stored
+/// child name: list rows and wake notices must carry the renamed child,
+/// not the name the subscription was first armed under. **Mutation
+/// check:** skip the `child_name` copy in the re-baseline branch and the
+/// row answers the stale pre-rename name.
+#[test]
+fn agent_watch_rebaseline_refreshes_the_renamed_child_name() {
+    let mut registry = AgentWatchRegistry::default();
+    registry
+        .register("sub-1", "old-name", Some((3, "idle")), 1_000)
+        .expect("register under the pre-rename name");
+    let row = registry
+        .register("sub-1", "renamed-worker", Some((5, "idle")), 2_000)
+        .expect("re-register after the rename");
+    assert_eq!(row.child_id, "sub-1");
+    assert_eq!(row.child_name, "renamed-worker");
+    let rows = registry.rows();
+    assert_eq!(rows[0].child_name, "renamed-worker");
+}
+
+/// A compacted child's message count can shrink below the armed
+/// baseline: the shrink is a re-baseline (quiet unless the status
+/// changed too, then zero-width), never a backwards `start > end` growth
+/// range. **Mutation check:** delete the shrink re-arm and the first
+/// snapshot here answers the backwards `100..20` event.
+#[test]
+fn agent_watch_a_shrunk_count_rebases_without_a_backwards_range() {
+    let mut registry = AgentWatchRegistry::default();
+    registry
+        .register("sub-1", "worker", Some((100, "idle")), 1_000)
+        .expect("register");
+    let epoch = registry.subscription_epoch("watch-agent-sub-1");
+    // The shrink alone: quiet, re-armed at the fresh low count.
+    assert!(
+        registry
+            .apply_snapshot("watch-agent-sub-1", epoch, &Ok((20, "idle")), 1_100)
+            .is_none(),
+        "a shrink with no status change is quiet"
+    );
+    // Growth resumes from the re-armed baseline, never `20 < start`.
+    let event = registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((25, "idle")), 1_200)
+        .expect("growth after the shrink emits");
+    assert_eq!(event.content.start, 20);
+    assert_eq!(event.content.end, 25);
+    // A shrink WITH a status change reports the transition zero-width.
+    let event = registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((10, "running")), 1_300)
+        .expect("the transition still reports");
+    assert_eq!(event.content.start, 10);
+    assert_eq!(event.content.end, 10);
+    assert_eq!(
+        event
+            .content
+            .status
+            .as_ref()
+            .map(|change| (change.from, change.to)),
+        Some(("idle", "running"))
+    );
+}
+
+/// A sibling whose session NAME equals the watched child's id must not
+/// shadow it at registration: the documented selector order is child id
+/// first, then name, not first-match. **Mutation check:** first-match
+/// resolution (`find_record`) registers the earlier shadow instead.
+#[tokio::test]
+async fn agent_watch_register_prefers_the_id_over_an_earlier_name_shadow() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = Arc::new(FakeWatchState::default());
+    let sessions = watch_sessions(tx, state).await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "shadow-id".to_string(),
+            active_session_id: "live-shadow".to_string(),
+            session_id: Some("live-shadow-file".to_string()),
+            session_name: "beta".to_string(),
+        })
+        .await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "beta".to_string(),
+            active_session_id: "live-beta".to_string(),
+            session_id: Some("live-beta-file".to_string()),
+            session_name: "beta-worker".to_string(),
+        })
+        .await;
+    let registered = sessions
+        .watch_agent("beta".to_string())
+        .await
+        .expect("register the id-matched child");
+    assert_eq!(registered.child_id, "beta");
+    assert_eq!(registered.child_name, "beta-worker");
+}
+
+/// The poller resolves its poll targets by child id only: a name shadow
+/// snapshot in place of the watched child (quiet, never growing) would
+/// withhold the watched child's growth row. **Mutation check:** resolve
+/// the poll through the first-match selector and the shadow's silent
+/// snapshot withholds the row past the assertion bound.
+#[tokio::test]
+async fn agent_watch_poll_snapshots_the_watched_child_not_a_name_shadow() {
+    let (sessions, mut follow_up_rx, state) = quick_watch_sessions().await;
+    state.set_serve_limit(1);
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "shadow-id".to_string(),
+            active_session_id: "live-shadow".to_string(),
+            session_id: Some("live-shadow-file".to_string()),
+            session_name: "beta".to_string(),
+        })
+        .await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "beta".to_string(),
+            active_session_id: "live-beta".to_string(),
+            session_id: Some("live-beta-file".to_string()),
+            session_name: "beta-worker".to_string(),
+        })
+        .await;
+    sessions
+        .watch_agent("beta".to_string())
+        .await
+        .expect("register the watched child");
+    // The parked tick stages the watched child's growth behind the
+    // release; the name shadow never grows.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    state.count("live-beta", 5);
+    state.release();
+    let row = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the watched child's growth row arrives")
+        .expect("the follow_up channel stays open");
+    let events = row["customMessage"]["details"]["events"]
+        .as_array()
+        .unwrap();
+    assert_eq!(events.len(), 1, "only the watched child grew: {row:?}");
+    assert_eq!(events[0]["childId"], "beta");
+    assert_eq!(events[0]["toIndex"], 5);
+}

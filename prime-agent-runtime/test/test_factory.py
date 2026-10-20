@@ -2798,7 +2798,7 @@ class FakeHost:
     scripted per child id first (``child_outcomes``), then per node id
     (``outcomes``); a "running" outcome never settles. ``rate_limit_first``
     / ``rate_limit_forever`` make spawn admissions for a node fail with a
-    429-style RuntimeError. ``gate("rlm.collect"|"rlm.delete_subagent"|"rlm.run"|"factory.progress"|"rlm.watch.agent", n)``
+    429-style RuntimeError. ``gate("rlm.collect"|"rlm.delete_subagent"|"rlm.run"|"factory.progress"|"rlm.watch.agent"|"rlm.watch.read"|"rlm.watch.agent_cancel", n)``
     suspends the n-th call of that type on an asyncio.Event so tests can
     reproduce races between the control loop and stop()/resume().
     ``advance_per_run`` advances the injected clock on every admission (a
@@ -2891,6 +2891,8 @@ class FakeHost:
             "rlm.run",
             "factory.progress",
             "rlm.watch.agent",
+            "rlm.watch.read",
+            "rlm.watch.agent_cancel",
         ):
             index = self._call_indices.get(request_type, 0) + 1
             self._call_indices[request_type] = index
@@ -3001,10 +3003,17 @@ class FakeHost:
         if request_type == "rlm.watch.agent_cancel":
             return {"cancelled": True}
         if request_type == "rlm.watch.read":
+            # The host's real page contract: a FULL page's cursor is the
+            # last event examined (unread events may remain beyond it), a
+            # partial page's cursor is the ring's tail.
             since = int(payload.get("since_seq") or 0)
             limit = int(payload.get("limit") or 100)
             events = [event for event in self.watch_events if event["seq"] > since][:limit]
-            next_seq = max((event["seq"] for event in self.watch_events), default=0)
+            next_seq = (
+                events[-1]["seq"]
+                if len(events) >= limit
+                else max((event["seq"] for event in self.watch_events), default=0)
+            )
             return {"events": events, "next_seq": next_seq, "dropped": 0}
         raise AssertionError(f"unexpected host request type {request_type!r}")
 
@@ -6999,6 +7008,149 @@ class FactoryExecutorTest(_ExecutorTestCase):
             ["watch-agent-watched"],
             "the fresh subscription is released when its entry is gone",
         )
+
+    @async_test
+    async def test_wait_arms_the_cursor_at_the_ring_tail(self) -> None:
+        # A FULL read page's cursor is the last event examined, never the
+        # ring's tail: arming from a one-event read against a non-empty
+        # ring would park the wait on the FIRST event's seq and replay
+        # every leftover ring event into the match (a stale pre-subscribe
+        # fire). The arm pages until a partial page hands the true tail.
+        # (Mutating the arm back to the single limit-1 read fails this
+        # pin: the replay fires the wait immediately.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        # Pre-subscribe ring activity on the shared deterministic
+        # subscription id: all behind the armed tail cursor.
+        for seq in (1, 2, 3):
+            self.host.watch_events.append(
+                {
+                    "id": f"watch-old-{seq}",
+                    "seq": seq,
+                    "subscription_id": "watch-agent-watched",
+                    "kind": "watch.agent",
+                    "content": {"target": "watched", "start": 0, "end": seq, "status": None},
+                    "at_ms": seq,
+                }
+            )
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        # A few wait passes run: the stale ring never fires the wait...
+        await self.wait_until(lambda: len(self.host.calls_of("rlm.watch.read")) >= 3)
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(self.node_status(status, "w1")["entries"][0]["status"], "waiting")
+        self.assertEqual(self.all_events_of(result, "wait_fired"), [])
+        # ...and the service reads resume from the armed tail, not the
+        # first event's seq.
+        self.assertEqual(self.host.calls_of("rlm.watch.read")[1]["since_seq"], 3)
+        # Fresh post-subscribe activity still fires the wait.
+        self.host.watch_events.append(
+            {
+                "id": "watch-new",
+                "seq": 4,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 3, "end": 5, "status": None},
+                "at_ms": 4,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        fired = self.all_events_of(result, "wait_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["end"], 5)
+
+    @async_test
+    async def test_stop_during_the_wait_read_keeps_the_cancellation(self) -> None:
+        # A stop landing while a wait pass is parked on its read must not
+        # let the stale pass fire or settle the already-cancelled entry:
+        # the entry's cancellation (and its node_cancelled event) stands.
+        # (Mutating the post-read status re-check back out fails this pin:
+        # the stale event marks the entry done after the stop.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "barrier",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        read_gate = self.host.gate("rlm.watch.read", 2)  # call 1 arms, call 2 polls
+        read_entered = self.host.gate_entered("rlm.watch.read", 2)
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        self.host.watch_events.append(
+            {
+                "id": "watch-abc",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 0, "end": 1, "status": None},
+                "at_ms": 1,
+            }
+        )
+        await read_entered.wait()
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        read_gate.set()  # the read completes after the stop landed
+        await asyncio.sleep(0.05)
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "stopped")
+        entry = self.node_status(status, "barrier")["entries"][0]
+        self.assertEqual(entry["status"], "cancelled")
+        self.assertEqual(self.all_events_of(result, "wait_fired"), [])
+
+    @async_test
+    async def test_stop_during_the_timeout_cancel_keeps_the_cancellation(self) -> None:
+        # A stop landing while the timeout's error settle is parked on its
+        # subscription cancel must not let the settle overwrite the entry's
+        # cancellation with the error state: the node_cancelled event
+        # stands and no wait_timeout fires. (Mutating the post-cancel
+        # status re-check back out fails this pin.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "barrier",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        cancel_gate = self.host.gate("rlm.watch.agent_cancel", 1)
+        cancel_entered = self.host.gate_entered("rlm.watch.agent_cancel", 1)
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        # The timeout fires and its settle parks on the cancel.
+        await cancel_entered.wait()
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        cancel_gate.set()  # the cancel completes after the stop landed
+        await asyncio.sleep(0.05)
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "stopped")
+        entry = self.node_status(status, "barrier")["entries"][0]
+        self.assertEqual(entry["status"], "cancelled")
+        self.assertEqual(self.all_events_of(result, "wait_timeout"), [])
 
     @async_test
     async def test_two_waits_on_one_child_share_the_subscription(self) -> None:

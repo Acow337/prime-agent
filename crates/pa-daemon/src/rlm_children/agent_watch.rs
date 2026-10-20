@@ -243,6 +243,7 @@ impl AgentWatchRegistry {
                 .expect("the active row was just checked");
             subscription.baseline = arming_baseline;
             subscription.last_status = arming_status;
+            subscription.child_name = child_name.to_string();
             subscription.created_at_ms = at_ms;
             subscription.unreachable_polls = 0;
             subscription.epoch = epoch;
@@ -356,6 +357,15 @@ impl AgentWatchRegistry {
             subscription.baseline = Some(count);
             subscription.last_status = status;
             return None;
+        };
+        // A shrunk count (a compacted child) is a re-baseline, never a
+        // backwards `start > end` growth range: the shrink reports only
+        // when the status changed too (zero-width).
+        let baseline = if count < baseline {
+            subscription.baseline = Some(count);
+            count
+        } else {
+            baseline
         };
         if count == baseline && status == subscription.last_status {
             return None; // no growth, no repeat status event: quiet
@@ -502,7 +512,7 @@ impl SupervisorChildSessionsInner {
     /// baseline off one child snapshot, and register. An unmatched
     /// target is a hard error, never an empty watch.
     pub(super) async fn watch_agent_register(&self, target: &str) -> Result<RlmAgentWatch> {
-        let Some(record) = self.find_record(target).await else {
+        let Some(record) = self.find_record_ordered(target).await else {
             bail!("No direct child matches \"{target}\"");
         };
         let (child_id, child_name, active_session_id) = {
@@ -598,7 +608,7 @@ async fn agent_watch_poll_loop(inner: Arc<SupervisorChildSessionsInner>, generat
         for chunk in targets.chunks(AGENT_WATCH_SNAPSHOT_CONCURRENCY) {
             let results = futures::future::join_all(chunk.iter().map(
                 |(subscription_id, epoch, child_id)| async {
-                    let Some(record) = inner.find_record(child_id).await else {
+                    let Some(record) = inner.find_record_by_child_id(child_id).await else {
                         return WatchObservation::Vanished(subscription_id.clone(), *epoch);
                     };
                     let active_session_id = record.lock().await.active_session_id.clone();
