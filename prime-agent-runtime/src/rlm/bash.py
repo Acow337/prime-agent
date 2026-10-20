@@ -121,16 +121,47 @@ _MAX_SCAN_HINTS = 3
 _scan_hints_written = 0
 
 
+def _is_home_scale_root(token: str) -> bool:
+    """A ~-rooted path or a $HOME expansion; exact names keep other env vars
+    ($HOMEDIR, ${HOMEBREW_PREFIX}) out. Mirrors the Rust bash_guard."""
+    return (
+        token.startswith("~")
+        or token in ("$HOME", "${HOME}")
+        or token.startswith(("$HOME/", "${HOME}/"))
+    )
+
+
+def _is_depth_bound(tokens: list[str]) -> bool:
+    """A --max-depth/-maxdepth/-d bound with a valid numeric argument; a bare
+    token (the filename maxdepth.txt) never counts. Mirrors the Rust guard."""
+    for i, t in enumerate(tokens):
+        if (
+            t in ("--max-depth", "-maxdepth", "-d")
+            and i + 1 < len(tokens)
+            and tokens[i + 1].isdigit()
+        ):
+            return True
+        for prefix in ("--max-depth=", "-maxdepth="):
+            if t.startswith(prefix) and t[len(prefix) :].isdigit():
+                return True
+        if t.startswith("-d") and len(t) > 2 and t[2:].isdigit():
+            return True
+    return False
+
+
 def _is_unbounded_home_scan(command: str) -> bool:
     """True for the unbounded-scan shape; mirrors the Rust bash_guard rule.
 
     Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
-    root, with no `timeout` prefix and no --max-depth/-maxdepth bound. Quoted
-    data is masked first so it cannot masquerade as a scan.
+    root, with no `timeout` prefix and no --max-depth/-maxdepth bound.
+    Single-quoted spans and unquoted comments are masked first so they cannot
+    masquerade as a scan; double-quoted content stays visible because double
+    quotes still expand $HOME (the same rule as the Rust guard).
     """
+    command = re.sub(r"'[^']*'", " ", command)
+    command = re.sub(r"(?:^|(?<=\s))#.*$", " ", command, flags=re.MULTILINE)
     for segment in re.split(r"&&|\|\||;|\||\n", command):
-        segment = re.sub(r"'[^']*'|\"[^\"]*\"", " ", segment)
-        tokens = segment.split()
+        tokens = [t.strip('"') for t in segment.split()]
         if not tokens or tokens[0] == "timeout":
             continue
         if tokens[0] in ("grep", "egrep", "fgrep"):
@@ -142,9 +173,9 @@ def _is_unbounded_home_scan(command: str) -> bool:
                 continue
         elif tokens[0] not in ("rg", "find"):
             continue
-        if not any(t.startswith(("~", "$HOME", "${HOME")) for t in tokens[1:]):
+        if not any(_is_home_scale_root(t) for t in tokens[1:]):
             continue
-        if any("max-depth" in t.lower() or "maxdepth" in t.lower() for t in tokens[1:]):
+        if _is_depth_bound(tokens[1:]):
             continue
         return True
     return False

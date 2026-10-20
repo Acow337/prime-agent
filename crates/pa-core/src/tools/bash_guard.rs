@@ -524,22 +524,61 @@ pub(crate) fn format_dirty_tree_refusal(
 /// scans; unset or non-positive means off (the scan still runs, only warned).
 pub(crate) const SCAN_TIMEOUT_ENV: &str = "PRIME_AGENT_SCAN_TIMEOUT";
 
-/// A home-scale scan root: `~`-rooted paths and `$HOME` walk the user's whole
-/// home tree, so a recursive scan there costs minutes, not milliseconds.
+/// A home-scale scan root: `~`-rooted paths and `$HOME` expansions walk the
+/// user's whole home tree, so a recursive scan there costs minutes, not
+/// milliseconds. Exact-name tests keep other env vars (`$HOMEDIR`,
+/// `${HOMEBREW_PREFIX}`) out.
 fn is_home_scale_root(token: &str) -> bool {
-    token.starts_with('~') || token.starts_with("$HOME") || token.starts_with("${HOME")
+    token.starts_with('~')
+        || token == "$HOME"
+        || token.starts_with("$HOME/")
+        || token == "${HOME}"
+        || token.starts_with("${HOME}/")
 }
 
-/// True when a depth bound appears: rg's `--max-depth`/`-d N`, find's `-maxdepth`.
+/// True when a depth bound appears with a valid numeric argument: rg's
+/// `--max-depth[=]N`/`-d N`/`-dN`, find's `-maxdepth N`. A bare token (for
+/// example the filename `maxdepth.txt`) never counts.
 fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
-    let lower = token.to_ascii_lowercase();
-    lower.contains("max-depth")
-        || lower.contains("maxdepth")
-        || (lower == "-d"
-            && next.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
-        || (lower.starts_with("-d")
-            && lower.len() > 2
-            && lower[2..].chars().all(|c| c.is_ascii_digit()))
+    let is_number = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    ((token == "--max-depth" || token == "-maxdepth" || token == "-d")
+        && next.is_some_and(is_number))
+        || token.strip_prefix("--max-depth=").is_some_and(is_number)
+        || token.strip_prefix("-maxdepth=").is_some_and(is_number)
+        || token.strip_prefix("-d").is_some_and(is_number)
+}
+
+/// Mask single-quoted spans and unquoted comments, but keep double-quoted
+/// content visible: double quotes still expand `$HOME`, so `find
+/// "$HOME/Documents"` is a home-scale scan, not quoted data.
+fn mask_scan_literals(command: &str) -> String {
+    let mut chars: Vec<char> = command.chars().collect();
+    let len = chars.len();
+    let mut i = 0usize;
+    while i < len {
+        let ch = chars[i];
+        if ch == '\'' {
+            let mut j = i + 1;
+            while j < len && chars[j] != '\'' {
+                chars[j] = ' ';
+                j += 1;
+            }
+            if j < len {
+                chars[j] = ' ';
+            }
+            i = j + 1;
+            continue;
+        }
+        if ch == '#' && (i == 0 || chars[i - 1].is_whitespace()) {
+            while i < len && chars[i] != '\n' {
+                chars[i] = ' ';
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    chars.into_iter().collect()
 }
 
 /// True when `command` runs a recursive scan (grep -r, rg, find) over a
@@ -551,10 +590,12 @@ fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
 /// scan stalls the whole turn; callers warn (never block), because searches
 /// are legitimate.
 pub(crate) fn is_unbounded_home_scan(command: &str, tool_timeout: Option<f64>) -> bool {
-    if tool_timeout.is_some() {
+    // A non-positive tool timeout is no deadline for the executor
+    // (bash_local filters `t > 0.0`), so it does not bound the scan.
+    if tool_timeout.is_some_and(|t| t > 0.0) {
         return false;
     }
-    let masked: String = mask_quoted_spans(command).into_iter().collect();
+    let masked = mask_scan_literals(command);
     for segment in split_on_separators(&masked) {
         let tokens = split_ws(segment.trim());
         let Some((first, rest)) = tokens.split_first() else {
@@ -582,7 +623,7 @@ pub(crate) fn is_unbounded_home_scan(command: &str, tool_timeout: Option<f64>) -
             "rg" | "find" => rest,
             _ => continue,
         };
-        if !rest.iter().any(|t| is_home_scale_root(t)) {
+        if !rest.iter().any(|t| is_home_scale_root(t.trim_matches('"'))) {
             continue; // project-local scans are bounded by the tree size
         }
         let bounded = rest
@@ -602,7 +643,10 @@ pub(crate) fn scan_timeout_from_env(
 ) -> Option<f64> {
     env.get(SCAN_TIMEOUT_ENV)
         .and_then(|value| value.parse::<f64>().ok())
-        .filter(|secs| *secs > 0.0)
+        .filter(|secs| {
+            // `Duration::from_secs_f64` panics on values it cannot represent.
+            *secs > 0.0 && std::time::Duration::try_from_secs_f64(*secs).is_ok()
+        })
 }
 
 /// The scan-cost warning: names the fix, never blocks the search.
@@ -688,6 +732,59 @@ mod tests {
         assert!(is_unbounded_home_scan("rg pattern ~/Documents", None));
     }
 
+    /// Regression coverage for the bot-review shapes (PR review round 1):
+    /// double-quoted $HOME is a home root, filename look-alikes are not depth
+    /// bounds, other env vars are not home roots, a non-positive tool timeout
+    /// is no deadline, and unrepresentable scan timeouts are rejected.
+    #[test]
+    fn bot_review_scan_shapes() {
+        // Double quotes still expand $HOME: the quoted incident form warns.
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle \"$HOME/Documents\"",
+            None
+        ));
+        assert!(is_unbounded_home_scan("find \"$HOME\" -name '*.pdf'", None));
+        // A filename containing maxdepth is not a depth bound.
+        assert!(is_unbounded_home_scan(
+            "find ~/Documents -name maxdepth.txt",
+            None
+        ));
+        // Exact home roots only: other env vars are not home-scale.
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle $HOME/Documents",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle ${HOME}/Downloads",
+            None
+        ));
+        assert!(!is_unbounded_home_scan("grep -rl needle $HOMEDIR", None));
+        assert!(!is_unbounded_home_scan(
+            "grep -rl needle ${HOMEBREW_PREFIX}/docs",
+            None
+        ));
+        // A non-positive tool timeout is no deadline for the executor.
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle ~/Documents",
+            Some(0.0)
+        ));
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle ~/Documents",
+            Some(-5.0)
+        ));
+        // A quoted segment with a pipe inside is not a scan pipeline.
+        assert!(!is_unbounded_home_scan(
+            "echo 'example | grep -r needle ~/Documents'",
+            None
+        ));
+        // =-joined and numeric-argument depth bounds stay quiet.
+        assert!(!is_unbounded_home_scan(
+            "rg --max-depth=3 needle ~/Downloads",
+            None
+        ));
+        assert!(!is_unbounded_home_scan("rg -d2 needle ~/Downloads", None));
+    }
+
     #[test]
     fn scan_timeout_env_parses_only_positive_seconds() {
         let env = |v: &str| {
@@ -700,6 +797,9 @@ mod tests {
         assert_eq!(env("0"), None);
         assert_eq!(env("-5"), None);
         assert_eq!(env("abc"), None);
+        // A duration `Duration::from_secs_f64` cannot represent must not
+        // reach the executor (it would panic instead of timing out).
+        assert_eq!(env("1e30"), None);
         assert_eq!(
             scan_timeout_from_env(&std::collections::HashMap::new()),
             None

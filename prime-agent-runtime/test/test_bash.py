@@ -1514,6 +1514,17 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertFalse(is_scan("rg pattern ."))
         # Quoted data cannot masquerade as a scan.
         self.assertFalse(is_scan("echo 'grep -r pattern ~/Documents'"))
+        # The kernel matcher mirrors the Rust rule exactly (bot review).
+        self.assertFalse(is_scan("echo 'example | grep -r needle ~/Documents'"))
+        self.assertFalse(is_scan("rg -d 2 pattern ~/Downloads"))
+        self.assertFalse(is_scan("rg --max-depth=3 pattern ~/Downloads"))
+        self.assertFalse(is_scan("find ~/Documents -maxdepth 2 -name '*.pdf'"))
+        self.assertFalse(is_scan("grep -rl needle src # ~/Documents"))
+        self.assertFalse(is_scan("grep -rl needle $HOMEDIR"))
+        self.assertFalse(is_scan("grep -rl needle ${HOMEBREW_PREFIX}/docs"))
+        self.assertTrue(is_scan('grep -rl needle "$HOME/Documents"'))
+        self.assertTrue(is_scan("grep -rl needle $HOME/Documents"))
+        self.assertTrue(is_scan("find ~/Documents -name maxdepth.txt"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (
