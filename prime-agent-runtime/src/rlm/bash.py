@@ -154,14 +154,32 @@ def _is_unbounded_home_scan(command: str) -> bool:
 
     Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
     root, with no `timeout` prefix and no --max-depth/-maxdepth bound.
-    Single-quoted spans and unquoted comments are masked first so they cannot
-    masquerade as a scan; double-quoted content stays visible because double
-    quotes still expand $HOME (the same rule as the Rust guard).
+    Single-quoted spans, double-quoted literal data, and unquoted comments
+    are masked first so they cannot masquerade as a scan; only the parts bash
+    actually executes or expands inside double quotes ($HOME, $(...)) stay
+    visible (the same rule as the Rust guard).
     """
     command = re.sub(r"'[^']*'", " ", command)
+
+    def _mask_double_quoted_span(m: "re.Match[str]") -> str:
+        # Double quotes expand $HOME/${HOME} and run $(...) and backticks; the
+        # rest of the span is literal data. Keep only the live parts, so a
+        # quoted pipe or quoted scan text cannot shape the scanner (the same
+        # rule as the Rust guard).
+        span = m.group(0)
+        pieces = []
+        last = 0
+        for live in re.finditer(r"\$HOME(?!\w)|\$\{HOME\}|\$\([^)]*\)|`[^`]*`", span):
+            pieces.append(" " * (live.start() - last))
+            pieces.append(live.group(0))
+            last = live.end()
+        pieces.append(" " * (len(span) - last))
+        return "".join(pieces)
+
+    command = re.sub(r'"[^"]*"', _mask_double_quoted_span, command)
     command = re.sub(r"(?:^|(?<=\s))#.*$", " ", command, flags=re.MULTILINE)
     for segment in re.split(r"&&|\|\||;|\||\n", command):
-        tokens = [t.strip('"') for t in segment.split()]
+        tokens = segment.split()
         if not tokens or tokens[0] == "timeout":
             continue
         if tokens[0] in ("grep", "egrep", "fgrep"):

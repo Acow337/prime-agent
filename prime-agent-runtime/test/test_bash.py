@@ -1525,6 +1525,14 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan('grep -rl needle "$HOME/Documents"'))
         self.assertTrue(is_scan("grep -rl needle $HOME/Documents"))
         self.assertTrue(is_scan("find ~/Documents -name maxdepth.txt"))
+        # Double-quoted literal data is data; only expansions stay live
+        # (bot review round 2).
+        self.assertTrue(is_scan('grep -rl needle "foo|bar" ~/Documents'))
+        self.assertFalse(is_scan('echo "grep -rl needle ~/Documents"'))
+        self.assertFalse(is_scan('grep -rl needle "~/Documents"'))
+        self.assertTrue(is_scan('grep -rl needle "$HOME"'))
+        self.assertFalse(is_scan('grep -rl needle "$HOMEDIR"'))
+        self.assertTrue(is_scan('grep -rl needle "#" ~/Documents'))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

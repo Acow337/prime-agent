@@ -207,15 +207,27 @@ pub(crate) enum DiscardProbeResolution {
 /// Shell separators treated by segment splitting.
 const SEPARATORS: [&str; 5] = ["&&", "||", ";", "|", "\n"];
 
-/// Split keeping separators (TS: `split(/(&&|\|\||;|\||\n)/)`).
+/// Split keeping separators (TS: `split(/(&&|\|\||;|\||\n)/)`). Runs on
+/// every bash command before execution, so it must stay linear: the old
+/// per-position `chars[i..]` collection made it quadratic, and a
+/// 100,000-character heredoc stalled the agent for seconds before the
+/// command even ran.
 fn split_with_separators(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
     let mut parts = Vec::new();
     let mut current = String::new();
-    let chars: Vec<char> = text.chars().collect();
     let mut i = 0usize;
-    while i < chars.len() {
-        let rest: String = chars[i..].iter().collect();
-        if let Some(sep) = SEPARATORS.iter().find(|s| rest.starts_with(**s)) {
+    while i < len {
+        let sep = match chars[i] {
+            '&' if i + 1 < len && chars[i + 1] == '&' => Some("&&"),
+            '|' if i + 1 < len && chars[i + 1] == '|' => Some("||"),
+            '|' => Some("|"),
+            ';' => Some(";"),
+            '\n' => Some("\n"),
+            _ => None,
+        };
+        if let Some(sep) = sep {
             if !current.is_empty() {
                 parts.push(std::mem::take(&mut current));
             }
@@ -548,9 +560,11 @@ fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
         || token.strip_prefix("-d").is_some_and(is_number)
 }
 
-/// Mask single-quoted spans and unquoted comments, but keep double-quoted
-/// content visible: double quotes still expand `$HOME`, so `find
-/// "$HOME/Documents"` is a home-scale scan, not quoted data.
+/// Mask single-quoted spans, double-quoted literal data, and unquoted
+/// comments. Double quotes still expand `$HOME`/`${HOME}` and run command
+/// substitution, so inside a double-quoted span only those stay visible:
+/// `find "$HOME/Documents"` is a home-scale scan, but `"grep -rl needle
+/// ~/Documents"` (quoted literal data, including a quoted `|` or `~`) is not.
 fn mask_scan_literals(command: &str) -> String {
     let mut chars: Vec<char> = command.chars().collect();
     let len = chars.len();
@@ -569,6 +583,48 @@ fn mask_scan_literals(command: &str) -> String {
             i = j + 1;
             continue;
         }
+        if ch == '"' {
+            chars[i] = ' ';
+            i += 1;
+            while i < len && chars[i] != '"' {
+                if chars[i] == '\\' && i + 1 < len {
+                    chars[i] = ' ';
+                    chars[i + 1] = ' ';
+                    i += 2;
+                } else if chars[i] == '$' && i + 1 < len && chars[i + 1] == '(' {
+                    let mut depth = 0i32;
+                    let mut j = i;
+                    while j < len {
+                        if chars[j] == '(' {
+                            depth += 1;
+                        } else if chars[j] == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    i = if j < len { j + 1 } else { len };
+                } else if chars[i] == '`' {
+                    i += 1;
+                    while i < len && chars[i] != '`' {
+                        i += 1;
+                    }
+                    i += 1;
+                } else if chars[i] == '$' && starts_with_home_expansion(&chars, i) {
+                    i += home_expansion_len(&chars, i);
+                } else {
+                    chars[i] = ' ';
+                    i += 1;
+                }
+            }
+            if i < len {
+                chars[i] = ' '; // closing quote
+            }
+            i += 1;
+            continue;
+        }
         if ch == '#' && (i == 0 || chars[i - 1].is_whitespace()) {
             while i < len && chars[i] != '\n' {
                 chars[i] = ' ';
@@ -579,6 +635,28 @@ fn mask_scan_literals(command: &str) -> String {
         i += 1;
     }
     chars.into_iter().collect()
+}
+
+/// True when `chars[at..]` starts with the `$HOME` or `${HOME}` expansion.
+/// A following variable-name character (`$HOMEDIR`) is a different variable.
+fn starts_with_home_expansion(chars: &[char], at: usize) -> bool {
+    let is_name_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    if chars.get(at + 1) == Some(&'{') {
+        let rest: String = chars[at..chars.len().min(at + 7)].iter().collect();
+        rest.starts_with("${HOME}")
+    } else {
+        let rest: String = chars[at..chars.len().min(at + 5)].iter().collect();
+        rest == "$HOME" && chars.get(at + 5).is_none_or(|c| !is_name_char(*c))
+    }
+}
+
+/// The length of the `$HOME` (5) or `${HOME}` (7) expansion at `at`.
+fn home_expansion_len(chars: &[char], at: usize) -> usize {
+    if chars.get(at + 1) == Some(&'{') {
+        7
+    } else {
+        5
+    }
 }
 
 /// True when `command` runs a recursive scan (grep -r, rg, find) over a
@@ -623,7 +701,7 @@ pub(crate) fn is_unbounded_home_scan(command: &str, tool_timeout: Option<f64>) -
             "rg" | "find" => rest,
             _ => continue,
         };
-        if !rest.iter().any(|t| is_home_scale_root(t.trim_matches('"'))) {
+        if !rest.iter().any(|t| is_home_scale_root(t)) {
             continue; // project-local scans are bounded by the tree size
         }
         let bounded = rest
@@ -783,6 +861,70 @@ mod tests {
             None
         ));
         assert!(!is_unbounded_home_scan("rg -d2 needle ~/Downloads", None));
+    }
+
+    /// Regression coverage for the second bot-review round: double-quoted
+    /// literal data (pipes, tilde look-alikes, scan text) is data, only the
+    /// expansions bash actually performs inside double quotes stay live, and
+    /// separator splitting stays linear on heredoc-sized commands.
+    #[test]
+    fn quoted_literal_data_stays_data_but_expansions_warn() {
+        // A quoted pipe does not split the scanner away from its home root.
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle \"foo|bar\" ~/Documents",
+            None
+        ));
+        // Quoted scan text is data, not a command.
+        assert!(!is_unbounded_home_scan(
+            "echo \"grep -rl needle ~/Documents\"",
+            None
+        ));
+        // Tilde inside double quotes is literal: not a home-scale root.
+        assert!(!is_unbounded_home_scan(
+            "grep -rl needle \"~/Documents\"",
+            None
+        ));
+        // `$HOME` inside double quotes still expands: the scan warns.
+        assert!(is_unbounded_home_scan("grep -rl needle \"$HOME\"", None));
+        assert!(is_unbounded_home_scan("find \"$HOME\" -name '*.pdf'", None));
+        // `$HOMEDIR` is a different variable, not a home root.
+        assert!(!is_unbounded_home_scan(
+            "grep -rl needle \"$HOMEDIR\"",
+            None
+        ));
+        // A `#` inside double quotes is quoted data, not a comment.
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle \"#\" ~/Documents",
+            None
+        ));
+    }
+
+    /// A heredoc-sized command splits linearly: the guard runs before every
+    /// bash command, so a quadratic splitter stalled the agent on large
+    /// inputs. The bound is generous (the quadratic splitter needed minutes).
+    #[test]
+    fn separator_splitting_is_linear_on_heredoc_sized_commands() {
+        let heredoc = "x".repeat(100_000);
+        let command = format!("cat <<EOF\n{heredoc}\nEOF\ngrep -rl needle ~/Documents");
+        let start = std::time::Instant::now();
+        let parts = split_with_separators(&command);
+        let elapsed = start.elapsed();
+        assert_eq!(
+            parts,
+            vec![
+                "cat <<EOF".to_string(),
+                "\n".to_string(),
+                heredoc,
+                "\n".to_string(),
+                "EOF".to_string(),
+                "\n".to_string(),
+                "grep -rl needle ~/Documents".to_string(),
+            ]
+        );
+        assert!(
+            elapsed.as_secs() < 10,
+            "split took {elapsed:?} on a 100k-char command"
+        );
     }
 
     #[test]
