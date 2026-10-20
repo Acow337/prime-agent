@@ -1441,14 +1441,14 @@ fn an_inactive_node_shows_its_stored_factory_specs() {
         json!({ "id": "gone", "path": "/x/gone.jsonl", "messageCount": 2, "factorySpecs": 2 }),
         json!({ "id": "live", "path": "/x/live.jsonl", "messageCount": 2, "factorySpecs": 5 }),
     ];
-    let records = reconcile_unified_sessions(&roster, &saved);
+    let records = reconcile_unified_sessions(&roster, &saved, None);
     let rows = build_rows(
         &records,
         None,
         &HashSet::default(),
         &HashSet::default(),
         &compute_rollups(&records),
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     let factory_lines: Vec<(&str, &str)> = rows
