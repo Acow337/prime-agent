@@ -146,6 +146,17 @@ impl PtyChild {
         let mut held = held;
         let mut scanned = mark;
         loop {
+            if let Some(held) = held.as_deref_mut() {
+                held.pump(Some(Instant::now()))?;
+                if let Some(status) = held.child.try_wait()? {
+                    anyhow::bail!(
+                        "the held client exited with {status} before {what}; held pty tail:\n{}",
+                        String::from_utf8_lossy(
+                            &held.output[held.output.len().saturating_sub(4000)..]
+                        )
+                    );
+                }
+            }
             let from = scanned
                 .saturating_sub(needle.len().saturating_sub(1))
                 .max(mark);
@@ -169,18 +180,18 @@ impl PtyChild {
                 );
             }
             if let Some(held) = held.as_deref_mut() {
-                // An idle peer must not add time to the measured wait.
-                held.pump(Some(Instant::now()))?;
-                if let Some(status) = held.exited {
-                    anyhow::bail!(
-                        "the held client exited with {status} before {what}; held pty tail:\n{}",
-                        String::from_utf8_lossy(
-                            &held.output[held.output.len().saturating_sub(4000)..]
-                        )
-                    );
-                }
+                let timeout = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(IDLE_POLL);
+                let mut poller = [
+                    PollFd::new(self.master.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(held.master.as_fd(), PollFlags::POLLIN),
+                ];
+                poll(&mut poller, timeout.as_millis() as u16)?;
+                self.pump(Some(Instant::now()))?;
+            } else {
+                self.pump(Some(deadline))?;
             }
-            self.pump(Some(deadline))?;
         }
     }
 
@@ -544,7 +555,7 @@ mod tests {
             std::path::Path::new("/bin/sh"),
             &[
                 "-c".into(),
-                "head -c 262144 /dev/zero; touch done; head -c 1 >/dev/null".into(),
+                "head -c 8388608 /dev/zero; touch done; head -c 1 >/dev/null".into(),
             ],
             &[],
             directory.path(),
@@ -610,6 +621,45 @@ mod tests {
         assert!(message.contains("the held client exited"), "{message}");
         assert!(message.contains("held diagnostic"), "{message}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_dead_held_peer_rejects_an_already_buffered_needle() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut held = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &["-c".into(), "printf 'final held bytes'; exit 3".into()],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the held peer");
+        held.child.wait().expect("held peer has exited");
+        let mut measured = PtyChild::spawn(
+            std::path::Path::new("/bin/cat"),
+            &[],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the measured peer");
+        measured
+            .receive(b"painted needle")
+            .expect("buffer the paint");
+        let error = measured
+            .wait_from_pumping(
+                0,
+                b"painted needle",
+                "the painted needle",
+                Instant::now() + Duration::from_secs(5),
+                Some(&mut held),
+            )
+            .expect_err("buffered paint cannot validate a dead held peer");
+        let message = error.to_string();
+        assert!(message.contains("the held client exited"), "{message}");
+        assert!(message.contains("final held bytes"), "{message}");
     }
 
     #[test]
