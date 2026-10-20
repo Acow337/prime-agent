@@ -22,11 +22,22 @@ use super::agent_watch::{
 
 /// The fake child state the scripted supervisor reports: the
 /// `messageCount` per active session id (a test advances it) and the
-/// `isStreaming` flag.
+/// `isStreaming` flag. `blocked` ids model a dead link (`get_state`
+/// never answers); past `serve_limit` served requests, a child's
+/// `get_state` waits for [`Self::release`] so a test can park the poller
+/// mid-tick and land two children's growth in ONE batch
+/// deterministically.
 #[derive(Default)]
 struct FakeWatchState {
     counts: std::sync::Mutex<HashMap<String, u64>>,
     streaming: std::sync::Mutex<HashMap<String, bool>>,
+    served: std::sync::Mutex<HashMap<String, u32>>,
+    /// The first N `get_state` calls per child answer immediately; later
+    /// ones wait for [`Self::release`] (0 = ungated).
+    serve_limit: std::sync::Mutex<u32>,
+    blocked: std::sync::Mutex<std::collections::HashSet<String>>,
+    released: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
 }
 
 impl FakeWatchState {
@@ -35,6 +46,36 @@ impl FakeWatchState {
             .lock()
             .unwrap()
             .insert(active_session_id.to_string(), count);
+    }
+
+    /// Turn on the `get_state` gate (`serve_limit` doubles as the
+    /// enabled flag: 0 means ungated).
+    fn set_serve_limit(&self, serve_limit: u32) {
+        let mut limit = self.serve_limit.lock().unwrap();
+        *limit = serve_limit;
+    }
+
+    /// Model a dead link: `get_state` for this child never answers.
+    fn block(&self, active_session_id: &str) {
+        self.blocked
+            .lock()
+            .unwrap()
+            .insert(active_session_id.to_string());
+    }
+
+    /// Let every parked `get_state` answer (all later growth observes in
+    /// one batch).
+    fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+
+    fn serve(&self, active_session_id: &str) -> u32 {
+        let mut served = self.served.lock().unwrap();
+        let entry = served.entry(active_session_id.to_string()).or_insert(0);
+        *entry += 1;
+        *entry
     }
 }
 
@@ -94,6 +135,22 @@ async fn spawn_watch_supervisor(
                                 .as_str()
                                 .unwrap_or_default()
                                 .to_string();
+                            if state.blocked.lock().unwrap().contains(&active) {
+                                // A dead link: the connection never
+                                // answers (the poller's snapshot
+                                // timeout is the only bound).
+                                std::future::pending::<()>().await;
+                            }
+                            let serve_limit = *state.serve_limit.lock().unwrap();
+                            if serve_limit > 0
+                                && state.serve(&active) > serve_limit
+                                && !state.released.load(std::sync::atomic::Ordering::SeqCst)
+                            {
+                                let notified = state.release.notified();
+                                if !state.released.load(std::sync::atomic::Ordering::SeqCst) {
+                                    notified.await;
+                                }
+                            }
                             let count = state
                                 .counts
                                 .lock()
@@ -217,16 +274,17 @@ async fn push_child(sessions: &SupervisorChildSessions, child_id: &str, active: 
 fn agent_watch_registry_emits_ranges_and_status_only() {
     let mut registry = AgentWatchRegistry::default();
     registry
-        .register("sub-1", "researcher", Some(3), 1_000)
+        .register("sub-1", "researcher", Some((3, "idle")), 1_000)
         .expect("register the watched child");
+    let epoch = registry.subscription_epoch("watch-agent-sub-1");
     // The baseline tick: no growth, no status change — nothing.
     assert!(registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((3, "idle")), 1_500)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((3, "idle")), 1_500)
         .is_none());
     // Growth 3->7 with idle->running: one event with the range and the
     // transition.
     let event = registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((7, "running")), 2_000)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((7, "running")), 2_000)
         .expect("growth emits one event");
     assert_eq!(event.kind, "watch.agent");
     assert_eq!(event.content.target, "sub-1");
@@ -244,16 +302,16 @@ fn agent_watch_registry_emits_ranges_and_status_only() {
     assert_eq!(event.seq, 1);
     // A repeat tick with no growth and no change: quiet.
     assert!(registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((7, "running")), 2_500)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((7, "running")), 2_500)
         .is_none());
     // A status transition alone (no growth) still reports.
     let event = registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((7, "idle")), 3_000)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((7, "idle")), 3_000)
         .expect("a status transition emits");
     assert_eq!(event.content.start, 7);
     assert_eq!(event.content.end, 7);
     assert!(registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((7, "idle")), 3_500)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((7, "idle")), 3_500)
         .is_none());
     // Content is unreachable by construction: the snapshot is a count
     // and a label, never transcript text.
@@ -269,11 +327,11 @@ fn agent_watch_enforces_active_and_total_limits() {
     for index in 0..AGENT_WATCH_MAX_ACTIVE {
         let child = format!("sub-{index}");
         registry
-            .register(&child, "worker", Some(0), 1_000 + index as u64)
+            .register(&child, "worker", Some((0, "idle")), 1_000 + index as u64)
             .unwrap_or_else(|_| panic!("register {index} must fit the active cap"));
     }
     let error = registry
-        .register("sub-overflow", "worker", Some(0), 2_000)
+        .register("sub-overflow", "worker", Some((0, "idle")), 2_000)
         .expect_err("the 65th active register must refuse");
     assert_eq!(error, AgentWatchRegisterError::ActiveLimit);
     assert_eq!(
@@ -290,13 +348,13 @@ fn agent_watch_enforces_active_and_total_limits() {
     while registered < AGENT_WATCH_MAX_TOTAL {
         let child = format!("sub-r{registered}");
         registry
-            .register(&child, "worker", Some(0), 3_000)
+            .register(&child, "worker", Some((0, "idle")), 3_000)
             .unwrap_or_else(|_| panic!("the total cap must not fire at {registered}"));
         assert!(registry.cancel(&format!("watch-agent-{child}")));
         registered += 1;
     }
     let error = registry
-        .register("sub-total-overflow", "worker", Some(0), 4_000)
+        .register("sub-total-overflow", "worker", Some((0, "idle")), 4_000)
         .expect_err("the 1025th registration must refuse");
     assert_eq!(error, AgentWatchRegisterError::TotalLimit);
     assert_eq!(error.message(), "Agent watch total limit reached (1024)");
@@ -323,13 +381,14 @@ async fn agent_watch_register_rejects_unknown_child() {
 fn agent_watch_cancel_is_idempotent_and_keeps_published_events() {
     let mut registry = AgentWatchRegistry::default();
     registry
-        .register("sub-1", "researcher", Some(3), 1_000)
+        .register("sub-1", "researcher", Some((3, "idle")), 1_000)
         .expect("register");
+    let epoch = registry.subscription_epoch("watch-agent-sub-1");
     assert!(registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((3, "idle")), 1_100)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((3, "idle")), 1_100)
         .is_none());
     let event = registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((7, "running")), 1_200)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((7, "running")), 1_200)
         .expect("growth");
     registry.push_event(event);
     let before = registry.read(0, 100);
@@ -351,8 +410,161 @@ fn agent_watch_cancel_is_idempotent_and_keeps_published_events() {
     );
     // A cancelled subscription stops emitting.
     assert!(registry
-        .apply_snapshot("watch-agent-sub-1", &Ok((9, "running")), 1_300)
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((9, "running")), 1_300)
         .is_none());
+}
+
+/// A register against an already-busy child baselines the observed
+/// activity label too: the first poll of a running child is quiet, not
+/// a fabricated `idle -> running` event (a factory wait on a live child
+/// would otherwise fire with no new messages). **Mutation check:**
+/// hardcoding the baseline label back to `idle` fails this test.
+#[test]
+fn agent_watch_register_baselines_the_activity_label() {
+    let mut registry = AgentWatchRegistry::default();
+    registry
+        .register("sub-1", "worker", Some((3, "running")), 1_000)
+        .expect("register a running child");
+    let epoch = registry.subscription_epoch("watch-agent-sub-1");
+    // The same running snapshot: no transition, no growth — quiet.
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((3, "running")), 1_100)
+        .is_none());
+    // Growth still reports; the transition from running to idle is a
+    // real change, emitted with the range.
+    let event = registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((5, "idle")), 1_200)
+        .expect("growth emits");
+    assert_eq!(event.content.start, 3);
+    assert_eq!(event.content.end, 5);
+    assert_eq!(
+        event
+            .content
+            .status
+            .as_ref()
+            .map(|change| (change.from, change.to)),
+        Some(("running", "idle"))
+    );
+}
+
+/// A full page never advances the cursor past unread events: the cursor
+/// is the last event examined, and a later page returns the rest. A
+/// partial page resumes at the ring's tail. **Mutation check:** always
+/// answering the ring tail fails this test (the second page is empty).
+#[test]
+fn agent_watch_read_pages_a_full_page_without_skipping() {
+    let mut registry = AgentWatchRegistry::default();
+    registry
+        .register("sub-1", "worker", Some((0, "idle")), 1_000)
+        .expect("register");
+    let epoch = registry.subscription_epoch("watch-agent-sub-1");
+    for count in 1..=60 {
+        if let Some(event) =
+            registry.apply_snapshot("watch-agent-sub-1", epoch, &Ok((count, "idle")), count)
+        {
+            registry.push_event(event);
+        }
+    }
+    let first = registry.read(0, 50);
+    assert_eq!(first.events.len(), 50);
+    assert_eq!(first.next_seq, 50, "the cursor is the last event read");
+    let second = registry.read(first.next_seq, 50);
+    assert_eq!(
+        second.events.len(),
+        10,
+        "the remaining ten events are readable, not skipped"
+    );
+    assert_eq!(second.events[0].seq, 51);
+    assert_eq!(second.next_seq, 60);
+    // A partial page: every event past the cursor is in hand, so the
+    // resume point is the ring's tail.
+    let drain = registry.read(0, 500);
+    assert_eq!(drain.events.len(), 60);
+    assert_eq!(drain.next_seq, 60);
+}
+
+/// A re-register of a live subscription is the TS cancel-then-register
+/// re-baseline: it stays inside the active cap without burning the
+/// monotonic total, and it re-arms the baseline.
+/// **Mutation check:** charging the caps before the overwrite fails
+/// this test (the 64-cap refusal, and the burned total).
+#[test]
+fn agent_watch_rebaseline_at_the_active_cap_burns_nothing() {
+    let mut registry = AgentWatchRegistry::default();
+    for index in 0..AGENT_WATCH_MAX_ACTIVE {
+        registry
+            .register(&format!("sub-{index}"), "worker", Some((0, "idle")), 1_000)
+            .unwrap_or_else(|_| panic!("register {index} must fit the active cap"));
+    }
+    for _ in 0..100 {
+        // At the cap, re-registering an already-watched child is a
+        // re-baseline, not a refused or a burnt registration.
+        let row = registry
+            .register("sub-0", "worker", Some((9, "idle")), 2_000)
+            .expect("a re-baseline at the cap");
+        assert_eq!(row.id, "watch-agent-sub-0");
+        assert_eq!(row.messages, 9);
+    }
+    // The total did not burn: the fresh-child cap still has its full
+    // 1024 - 64 budget (free the active slots first).
+    for index in 0..AGENT_WATCH_MAX_ACTIVE {
+        assert!(registry.cancel(&format!("watch-agent-sub-{index}")));
+    }
+    let mut fresh = 0;
+    while fresh < AGENT_WATCH_MAX_TOTAL - AGENT_WATCH_MAX_ACTIVE as u64 {
+        registry
+            .register(
+                &format!("sub-fresh-{fresh}"),
+                "worker",
+                Some((0, "idle")),
+                3_000,
+            )
+            .unwrap_or_else(|_| panic!("the total cap must not fire at {fresh}"));
+        registry.cancel(&format!("watch-agent-sub-fresh-{fresh}"));
+        fresh += 1;
+    }
+    registry
+        .register("sub-over-total", "worker", Some((0, "idle")), 4_000)
+        .expect_err("the monotonic total cap still refuses a new child");
+}
+
+/// A poll observation taken before a re-baseline is discarded. The
+/// harmful shape is a child restart: the re-register re-arms the
+/// baseline at the fresh session's low count while a pre-restart poll
+/// observation still carries the old high count — applying it would
+/// emit a premature growth event AND move the replacement baseline
+/// backward, so the next tick replays a backwards range. **Mutation
+/// check:** removing the epoch check fails this test (the stale
+/// observation emits `3..7`).
+#[test]
+fn agent_watch_stale_observations_after_a_rebaseline_are_discarded() {
+    let mut registry = AgentWatchRegistry::default();
+    registry
+        .register("sub-1", "worker", Some((7, "idle")), 1_000)
+        .expect("register");
+    let stale_epoch = registry.subscription_epoch("watch-agent-sub-1");
+    // The child restarts (its message count resets); a re-register
+    // re-baselines at the fresh low count before the poll's
+    // pre-restart observation lands.
+    registry
+        .register("sub-1", "worker", Some((3, "idle")), 1_100)
+        .expect("re-baseline");
+    let fresh_epoch = registry.subscription_epoch("watch-agent-sub-1");
+    assert_ne!(stale_epoch, fresh_epoch);
+    let stale_observation = Ok((7_u64, "idle"));
+    assert!(
+        registry
+            .apply_snapshot("watch-agent-sub-1", stale_epoch, &stale_observation, 1_200)
+            .is_none(),
+        "an observation from before the re-baseline is discarded"
+    );
+    // The fresh registration still observes normally: 3 -> 5, never a
+    // replayed backwards `7..5`.
+    let event = registry
+        .apply_snapshot("watch-agent-sub-1", fresh_epoch, &Ok((5, "idle")), 1_300)
+        .expect("the new epoch observes");
+    assert_eq!(event.content.start, 3);
+    assert_eq!(event.content.end, 5);
 }
 
 /// Restart survival, pinned at the seam that owns it: the registry and
@@ -418,6 +630,12 @@ async fn agent_watch_owner_teardown_cancels_every_subscription() {
 #[tokio::test]
 async fn agent_watch_one_wake_row_per_batch() {
     let (sessions, mut follow_up_rx, state) = quick_watch_sessions().await;
+    // The first get_state per child (the register baselines) answers
+    // immediately; every later one parks until `release`, so the
+    // poller's first tick blocks BEFORE reading any growth and both
+    // children's updates land in one batch deterministically (a plain
+    // sleep could straddle a tick boundary).
+    state.set_serve_limit(1);
     push_child(&sessions, "sub-1", "live-1").await;
     push_child(&sessions, "sub-2", "live-2").await;
     sessions
@@ -428,12 +646,12 @@ async fn agent_watch_one_wake_row_per_batch() {
         .watch_agent("sub-2".to_string())
         .await
         .expect("register two");
-    // Let the poller run quiet ticks first (baseline ticks and any
-    // link warm-up), so the growth lands inside one tick deterministically.
+    // The parked tick has both children's growth staged behind the
+    // release; one flip delivers both in the same batch.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // Both children grow in the same tick.
     state.count("live-1", 5);
     state.count("live-2", 4);
+    state.release();
     let row = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
         .await
         .expect("the batch must deliver one wake row")
@@ -486,4 +704,54 @@ async fn agent_watch_one_wake_row_per_batch() {
         .await
         .expect("read past the batch");
     assert!(still.events.is_empty());
+}
+
+/// A dead child link must not withhold a healthy sibling's event: the
+/// tick snapshots concurrently, and one child's unresponsive link is
+/// bounded by the snapshot timeout, not by the 30s `STATE_TIMEOUT_MS`
+/// (serial, the healthy sibling's event would sit behind the dead
+/// link). **Mutation check:** reverting the tick to serial awaits
+/// fails this test (the row arrives only after the dead link's full
+/// timeout, well past the assertion bound).
+#[tokio::test]
+async fn agent_watch_a_hanging_child_does_not_withhold_a_healthy_sibling() {
+    let (sessions, mut follow_up_rx, state) = quick_watch_sessions().await;
+    sessions
+        .inner
+        .agent_watch
+        .lock()
+        .await
+        .set_snapshot_timeout_ms(300);
+    push_child(&sessions, "sub-dead", "live-dead").await;
+    push_child(&sessions, "sub-1", "live-1").await;
+    sessions
+        .watch_agent("sub-dead".to_string())
+        .await
+        .expect("register the dead-link child");
+    sessions
+        .watch_agent("sub-1".to_string())
+        .await
+        .expect("register the healthy child");
+    // The healthy child grows while the dead child's get_state never
+    // answers; its snapshot future resolves on the 300ms bound.
+    state.block("live-dead");
+    state.count("live-1", 5);
+    let row = tokio::time::timeout(Duration::from_secs(5), follow_up_rx.recv())
+        .await
+        .expect("the healthy child's event is not withheld by the dead link")
+        .expect("the follow_up channel stays open");
+    let events = row["customMessage"]["details"]["events"]
+        .as_array()
+        .unwrap();
+    assert_eq!(events.len(), 1, "only the healthy child grew: {row:?}");
+    assert_eq!(events[0]["childId"], "sub-1");
+    assert_eq!(events[0]["toIndex"], 5);
+    // The dead child's own subscription is untouched by this batch: its
+    // row still lists active (its dead-poll streak only accumulates).
+    let rows = sessions.watch_agent_list().await.expect("list");
+    let dead = rows
+        .iter()
+        .find(|row| row.child_id == "sub-dead")
+        .expect("the dead child's watch row");
+    assert_eq!(dead.status, "active");
 }

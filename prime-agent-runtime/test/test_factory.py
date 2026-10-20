@@ -2798,7 +2798,7 @@ class FakeHost:
     scripted per child id first (``child_outcomes``), then per node id
     (``outcomes``); a "running" outcome never settles. ``rate_limit_first``
     / ``rate_limit_forever`` make spawn admissions for a node fail with a
-    429-style RuntimeError. ``gate("rlm.collect"|"rlm.delete_subagent"|"rlm.run"|"factory.progress", n)``
+    429-style RuntimeError. ``gate("rlm.collect"|"rlm.delete_subagent"|"rlm.run"|"factory.progress"|"rlm.watch.agent", n)``
     suspends the n-th call of that type on an asyncio.Event so tests can
     reproduce races between the control loop and stop()/resume().
     ``advance_per_run`` advances the injected clock on every admission (a
@@ -2885,7 +2885,13 @@ class FakeHost:
     async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         gate = None
-        if request_type in ("rlm.collect", "rlm.delete_subagent", "rlm.run", "factory.progress"):
+        if request_type in (
+            "rlm.collect",
+            "rlm.delete_subagent",
+            "rlm.run",
+            "factory.progress",
+            "rlm.watch.agent",
+        ):
             index = self._call_indices.get(request_type, 0) + 1
             self._call_indices[request_type] = index
             gate = self.gates.pop((request_type, index), None)
@@ -6933,6 +6939,149 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual([c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")], ["watch-agent-watched"])
         status = await rlm_module.rlm.factory.status(result["run_id"])
         self.assertEqual(self.node_status(status, "barrier")["entries"][0]["status"], "cancelled")
+
+    @async_test
+    async def test_wait_arms_the_cursor_before_subscribing(self) -> None:
+        # The cursor read must precede the subscribe: events published
+        # between the subscribe and a later read would otherwise be
+        # skipped, and a child with no further activity would time out
+        # despite it. (Mutating the order back fails this pin.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        order = [(index, kind) for index, (kind, _payload) in enumerate(self.host.calls) if kind.startswith("rlm.watch.")]
+        kinds = [kind for _index, kind in order]
+        self.assertIn("rlm.watch.read", kinds)
+        read_index = kinds.index("rlm.watch.read")
+        self.assertEqual(kinds[read_index + 1], "rlm.watch.agent", "the cursor arms before the subscribe")
+        await rlm_module.rlm.factory.stop(result["run_id"])
+
+    @async_test
+    async def test_stop_during_subscribe_cancels_the_fresh_subscription(self) -> None:
+        # A stop racing the subscribe must not leak the fresh
+        # subscription: the id is stored the moment it exists, and the
+        # post-await status check releases it.
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "barrier",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        gate = self.host.gate("rlm.watch.agent", 1)
+        entered = self.host.gate_entered("rlm.watch.agent", 1)
+        result = await self.start()
+        await entered.wait()
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        gate.set()  # the subscribe completes after the stop landed
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent_cancel"))
+        self.assertEqual(
+            [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-watched"],
+            "the fresh subscription is released when its entry is gone",
+        )
+
+    @async_test
+    async def test_two_waits_on_one_child_share_the_subscription(self) -> None:
+        # The subscription id is deterministic per child, so two waits
+        # on one child share it: the first wait's timeout must not cancel
+        # the feed the second wait still parks on. (Mutating the cancel
+        # back to unconditional fails this pin: the cancel fires at the
+        # first timeout.)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "wshort",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 200},
+                    },
+                    {
+                        "id": "wlong",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        await self.wait_until(lambda: len(self.host.calls_of("rlm.watch.agent")) >= 2)
+        # Both waits share the child; the short one times out first and
+        # must NOT issue the host cancel.
+        await self.wait_until(lambda: self.all_events_of(result, "wait_timeout"))
+        self.assertEqual(
+            self.host.calls_of("rlm.watch.agent_cancel"),
+            [],
+            "a timeout must not cancel a subscription a sibling wait still holds",
+        )
+        # The surviving wait still fires on later activity, and only its
+        # fire consumes the subscription.
+        self.host.watch_events.append(
+            {
+                "id": "watch-late",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 1, "end": 2, "status": None},
+                "at_ms": 2,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(
+            len(self.all_events_of(result, "wait_fired")),
+            1,
+            "the surviving wait still sees the child's activity",
+        )
+        self.assertEqual(
+            [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-watched"],
+            "the last wait out consumes the shared subscription",
+        )
+
+    def test_explicit_null_subagent_with_wait_is_rejected(self) -> None:
+        # An explicit "subagent": null passes the wait-only arm but fails
+        # at run time in _resolve_subagents (a null reference); the
+        # write-time check must reject it instead.
+        machine = {
+            "states": [
+                {
+                    "id": "barrier",
+                    "entry": True,
+                    "subagent": None,
+                    "wait": {"kind": "agent", "target": "watched", "timeout_ms": 5_000},
+                },
+                state("act"),
+            ],
+            "transitions": [{"from": "barrier", "to": "act"}],
+        }
+        self.assertEqual(
+            validate_factory_machine(machine),
+            ["state barrier requires a subagent: a harness subagent id/title string "
+             "or an inline object with a prompt"],
+        )
 
 
 # ---------------------------------------------------------------------------

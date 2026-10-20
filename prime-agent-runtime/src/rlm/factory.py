@@ -325,9 +325,12 @@ def _validate_state_fields(
     subagent = state.get("subagent")
     if _is_nonempty_str(subagent):
         pass  # Harness subagent entry id or title; resolved at run time.
-    elif subagent is None and state.get("wait") is not None:
-        pass  # A wait-only state: a pure barrier with no subagent of its
-        # own; the wait block's own validation covers the block.
+    elif "subagent" not in state and state.get("wait") is not None:
+        pass  # A wait-only state: a pure barrier with no subagent of
+        # its own (the field omitted entirely — an explicit
+        # "subagent": null would reach _resolve_subagents as a null
+        # reference and fail at run time); the wait block's own
+        # validation covers the block.
     elif isinstance(subagent, dict):
         # Runtime resolution strips these fields (_resolve_subagents /
         # _validate_spawn_settings), so whitespace-only values are rejected
@@ -1538,6 +1541,11 @@ class FactoryRun:
     # an operator reads WHAT failed from status() instead of archaeology.
     last_error: str | None = None
     states: dict[str, _StateRun] = field(default_factory=dict)
+    # The active agent-watch subscription id per wait target: the id is
+    # deterministic per child, so several waits on one child share it.
+    # The map lets a wait that never armed (subscribe failure, stop race)
+    # still release the feed a sibling armed before it.
+    watch_subscription_ids: dict[str, str] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
     transitions_from: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     pending_evaluations: list[tuple[str, int, int]] = field(default_factory=list)
@@ -3087,17 +3095,29 @@ class FactoryExecutor:
         from . import watch_agent, watch_read
 
         try:
-            handle = await watch_agent(target)
-            # Arm the cursor from the ring's current tail: the wait reacts
-            # to activity AFTER the subscribe, never to replayed events
-            # (a same-child re-register reuses the subscription id).
+            # Arm the cursor from the ring's current tail BEFORE the
+            # subscribe: events published between the subscribe and a
+            # later read would be skipped (a child with no further
+            # activity would then time out despite it), while events
+            # older than this read are pre-subscribe by construction and
+            # never replayed into the match.
             page = await watch_read(since_seq=0, limit=1)
+            handle = await watch_agent(target)
         except Exception as exc:
             await self._settle_wait_error(
                 run, state, entry, f"wait subscribe on {target!r} failed: {exc}"
             )
             return
+        # Store the id the moment the subscription exists: a stop that
+        # raced the subscribe (or a later failure) can then release it.
         entry.wait_subscription_id = handle.get("id")
+        if entry.wait_subscription_id:
+            run.watch_subscription_ids[target] = entry.wait_subscription_id
+        if entry.status != "waiting":
+            # The run stopped while the subscribe was in flight: the
+            # fresh subscription must not outlive the entry.
+            await self._cancel_wait_subscription(run, state, entry)
+            return
         entry.wait_cursor = int(page.get("next_seq") or 0)
 
     async def _settle_wait_error(
@@ -3107,24 +3127,39 @@ class FactoryExecutor:
         timeout): the entry's instances are already done, so the normal
         failure machinery has nothing to retry — the settle propagates
         through transitions like any error settle."""
-        await self._cancel_wait_subscription(entry)
+        await self._cancel_wait_subscription(run, state, entry)
         entry.status = "error"
         entry.error = reason
         entry.is_settle = True
         self._event(run, "wait_timeout", node=state.state_id, entry=entry.index, detail=reason)
         self._queue_settle(run, state, entry)
 
-    async def _cancel_wait_subscription(self, entry: _StateEntry) -> None:
+    async def _cancel_wait_subscription(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
         """Best-effort cancel of the entry's subscription (a run that
         dies does not leak one; the registry dies with the session
-        anyway)."""
+        anyway). The subscription id is deterministic per child, so waits
+        on the same target share one feed: only the last waiting entry on
+        the target issues the host cancel, or a surviving wait would lose
+        its feed. Sibling waits are matched by TARGET, not by stored id —
+        a sibling whose arm is still in flight holds no id yet — and a
+        never-armed entry still releases the feed through the run's
+        target -> id map."""
+        target = (state.spec.get("wait") or {}).get("target") or ""
         subscription_id = entry.wait_subscription_id
         entry.wait_subscription_id = None
         if not subscription_id:
+            subscription_id = run.watch_subscription_ids.get(target) or ""
+        if not subscription_id:
             return
+        if any(
+            other is not entry and (s.spec.get("wait") or {}).get("target") == target
+            for s, other in self._waiting_entries(run)
+        ):
+            return  # a sibling wait still parks on the same target
         from . import watch_agent_cancel
 
         try:
+            run.watch_subscription_ids.pop(target, None)
             await watch_agent_cancel(subscription_id)
         except Exception:
             pass  # the session teardown cancels the registry regardless
@@ -3191,9 +3226,10 @@ class FactoryExecutor:
                     **({"status": status} if status else {}),
                 )
                 entry.status = "done"
-                # The wait consumed its subscription: no leak across
+                # The wait consumed its subscription unless a sibling
+                # wait still parks on the same child: no leak across
                 # repeated entries of the same watch.
-                await self._cancel_wait_subscription(entry)
+                await self._cancel_wait_subscription(run, state, entry)
                 self._queue_settle(run, state, entry)
                 continue
             park = min(park, remaining)
@@ -3622,7 +3658,7 @@ class FactoryExecutor:
                         if entry.status == "waiting":
                             # A stopped wait releases its subscription: a
                             # dead run must not leak one.
-                            await self._cancel_wait_subscription(entry)
+                            await self._cancel_wait_subscription(run, state, entry)
                         entry.status = "cancelled"
                         self._event(run, "node_cancelled", node=state_id, entry=entry.index, detail=reason)
                         for instance in entry.instances:
