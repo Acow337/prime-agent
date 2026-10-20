@@ -1582,6 +1582,8 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("cat <<EOF\n$(grep -rl needle ~/Documents)"))
         self.assertTrue(is_scan("grep -rl 'needle' ~/Documents src/"))
         self.assertTrue(is_scan('grep -rl "needle" ~/Documents src/'))
+        self.assertFalse(is_scan("cat <<\\EOF\ngrep -rl needle ~/Documents\nEOF"))
+        self.assertFalse(is_scan("cat <<\\EOF\n$(grep -rl needle ~/Documents)\nEOF"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

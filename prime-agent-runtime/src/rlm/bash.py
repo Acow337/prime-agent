@@ -238,8 +238,11 @@ def _mask_scan_literals(command: str) -> str:
             while j < n and chars[j] in " \t":
                 j += 1
             word_chars: list[str] = []
+            backslashed = False
             # The delimiter word stops at shell operators outside quoted
             # text, so `<<EOF; cmd` leaves `; cmd` live on the start line.
+            # A backslash quotes the next character (`<<\EOF` is the quoted
+            # delimiter `EOF`).
             while j < n:
                 c = chars[j]
                 if c in ("'", '"'):
@@ -251,6 +254,10 @@ def _mask_scan_literals(command: str) -> str:
                     if j < n:
                         word_chars.append(chars[j])
                         j += 1
+                elif c == "\\" and j + 1 < n:
+                    backslashed = True
+                    word_chars.append(chars[j + 1])
+                    j += 2
                 elif c.isspace() or c in ";&|()<>":
                     break
                 else:
@@ -258,8 +265,9 @@ def _mask_scan_literals(command: str) -> str:
                     j += 1
             word = "".join(word_chars)
             # Shell quote removal across the whole delimiter word: `E'OF'` is
-            # `EOF`, and any quoting anywhere in the word disables expansion.
-            quoted = "'" in word or '"' in word
+            # `EOF`, and any quoting or escaping anywhere in the word
+            # disables expansion.
+            quoted = "'" in word or '"' in word or backslashed
             delim = word.replace("'", "").replace('"', "")
             if delim:
                 body = j
@@ -454,6 +462,11 @@ def _substitution_bodies(masked: str) -> list[str]:
             if j < len(masked):
                 bodies.append(masked[i + 2 : j])
                 i = j
+            else:
+                # An unmatched `$(` has no closing paren ahead: the suffix is
+                # its unclosed body, so stop scanning there instead of
+                # rescanning it for every later `$(` (quadratic).
+                break
         elif masked[i] == "`":
             j = masked.find("`", i + 1)
             if j != -1:

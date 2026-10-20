@@ -651,10 +651,13 @@ fn mask_scan_literals(command: &str) -> String {
                 j += 1;
             }
             let mut word = String::new();
+            let mut backslashed = false;
             while j < len {
                 // The delimiter word stops at shell operators outside quoted
                 // text, so `<<EOF; cmd` leaves `; cmd` live on the start
-                // line (`<<'EOF;'` keeps the quoted semicolon).
+                // line (`<<'EOF;'` keeps the quoted semicolon). A backslash
+                // quotes the next character (`<<\EOF` is the quoted
+                // delimiter `EOF`).
                 let c = chars[j];
                 if c == '\'' || c == '"' {
                     word.push(c);
@@ -667,6 +670,10 @@ fn mask_scan_literals(command: &str) -> String {
                         word.push(chars[j]);
                         j += 1;
                     }
+                } else if c == '\\' && j + 1 < len {
+                    backslashed = true;
+                    word.push(chars[j + 1]);
+                    j += 2;
                 } else if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>')
                 {
                     break;
@@ -676,9 +683,9 @@ fn mask_scan_literals(command: &str) -> String {
                 }
             }
             // Shell quote removal across the whole delimiter word:
-            // `E'OF'` is `EOF`, and any quoting anywhere in the word
-            // disables expansion in the body.
-            let quoted = word.contains('\'') || word.contains('"');
+            // `E'OF'` is `EOF`, and any quoting or escaping anywhere in the
+            // word disables expansion in the body.
+            let quoted = word.contains('\'') || word.contains('"') || backslashed;
             let delim: String = word.chars().filter(|c| *c != '\'' && *c != '"').collect();
             let is_delimiter = !delim.is_empty();
             if is_delimiter {
@@ -918,6 +925,12 @@ fn substitution_bodies(masked: &str) -> Vec<String> {
                     }
                 }
                 j += 1;
+            }
+            // An unmatched `$(` has no closing paren anywhere ahead: the
+            // remaining suffix is its unclosed body, so stop scanning there
+            // instead of rescanning it for every later `$(` (quadratic).
+            if j >= len {
+                break;
             }
         } else if chars[i] == '`' {
             if let Some(j) = chars[i + 1..].iter().position(|&c| c == '`') {
@@ -1206,6 +1219,15 @@ mod tests {
             elapsed.as_secs() < 10,
             "split took {elapsed:?} on a 100k-char command"
         );
+        // An unmatched substitution must not rescan its suffix either.
+        let malformed = "$(".repeat(50_000);
+        let start = std::time::Instant::now();
+        assert!(substitution_bodies(&malformed).is_empty());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 10,
+            "substitution scan took {elapsed:?} on a 100k-char command"
+        );
     }
 
     /// Regression coverage for the third bot-review round: heredoc bodies are
@@ -1408,6 +1430,16 @@ mod tests {
         ));
         assert!(is_unbounded_home_scan(
             "grep -rl \"needle\" ~/Documents src/",
+            None
+        ));
+        // `<<\EOF` is the quoted delimiter `EOF`: expansion is disabled and
+        // the real terminator line matches.
+        assert!(!is_unbounded_home_scan(
+            "cat <<\\EOF\ngrep -rl needle ~/Documents\nEOF",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "cat <<\\EOF\n$(grep -rl needle ~/Documents)\nEOF",
             None
         ));
     }
