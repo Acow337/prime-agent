@@ -147,9 +147,11 @@ fn view_options(socket: &Path, session_dir: &Path) -> AgentsViewOptions {
     }
 }
 
+/// The sessions' indented `$` lines: the unindented `Persistent shells` rows also start with `$`.
 fn shell_lines(frame: &str) -> Vec<&str> {
     frame
         .lines()
+        .filter(|line| line.starts_with(' '))
         .map(str::trim)
         .filter(|line| line.starts_with("$ "))
         .collect()
