@@ -206,25 +206,25 @@ impl ProviderAuth {
         self
     }
 
-    /// A successful Prime login/logout updates already-built worker targets
-    /// before the flow reports completion. The saved credential remains valid
-    /// even when the daemon cannot accept the notification.
-    async fn notify_prime_auth_changed(
+    /// A successful login/logout for any provider updates already-built worker
+    /// targets before the flow reports completion; the daemon refresh matches
+    /// by provider id. The saved credential remains valid even when the
+    /// daemon cannot accept the notification.
+    async fn notify_daemon_auth_changed(
         socket: Option<PathBuf>,
         provider: &str,
         outcome: ProviderAuthOutcome,
     ) -> ProviderAuthOutcome {
-        if provider != PRIME_INFERENCE_PROVIDER_ID
-            || !matches!(outcome, ProviderAuthOutcome::Status(_))
-        {
+        if !matches!(outcome, ProviderAuthOutcome::Status(_)) {
             return outcome;
         }
         let Some(socket) = socket else { return outcome };
+        let provider_id = provider.to_string();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = crate::daemon_client::DaemonClient::connect(&socket)?;
             let response = client.request(pa_types::daemon::DaemonCommand::AuthChanged {
                 id: None,
-                provider_id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
+                provider_id,
                 rest: serde_json::Map::new(),
             })?;
             anyhow::ensure!(
@@ -313,7 +313,7 @@ impl ProviderAuthCommands for ProviderAuth {
             })
             .await
             .expect("the login task ran");
-            Self::notify_prime_auth_changed(daemon_socket, &provider_id, outcome).await
+            Self::notify_daemon_auth_changed(daemon_socket, &provider_id, outcome).await
         })
     }
 
@@ -337,7 +337,7 @@ impl ProviderAuthCommands for ProviderAuth {
             })
             .await
             .expect("the login task ran");
-            Self::notify_prime_auth_changed(daemon_socket, &provider_id, outcome).await
+            Self::notify_daemon_auth_changed(daemon_socket, &provider_id, outcome).await
         })
     }
 
@@ -369,7 +369,7 @@ impl ProviderAuthCommands for ProviderAuth {
                 tokio::task::spawn_blocking(move || logout_blocking(&provider_row, &agent_dir))
                     .await
                     .expect("the logout task ran");
-            Self::notify_prime_auth_changed(daemon_socket, &provider_id, outcome).await
+            Self::notify_daemon_auth_changed(daemon_socket, &provider_id, outcome).await
         })
     }
 }

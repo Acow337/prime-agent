@@ -256,6 +256,10 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: Option<&Path
         })
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        // The anthropic-oauth test stores its credential in auth.json: the
+        // ambient env candidates must never stand in, before or after logout.
+        .env_remove("ANTHROPIC_OAUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
         // The probe-cell test boots a live kernel on its worker.
         .envs(kernel_python.map(|python| {
             (
@@ -907,8 +911,14 @@ fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
     );
 }
 
-/// Creates a resident RLM child of `root_id`, both on `prime-inference`.
-fn create_auth_child(client: &mut Client, dir: &std::path::Path, root_id: &str) -> String {
+/// Creates a resident RLM child of `root_id`, both on `provider`/`model`.
+fn create_auth_child(
+    client: &mut Client,
+    dir: &std::path::Path,
+    root_id: &str,
+    provider: &str,
+    model: &str,
+) -> String {
     let agent_dir = dir.join("agent");
     let child_dir = agent_dir.join("child-artifacts");
     std::fs::create_dir_all(&child_dir).expect("child dir");
@@ -927,8 +937,8 @@ fn create_auth_child(client: &mut Client, dir: &std::path::Path, root_id: &str) 
                 "sessionDir": child_dir.to_string_lossy(),
                 "parentSessionPath": parent_file.to_string_lossy(),
                 "rlmDepth": 1,
-                "provider": "prime-inference",
-                "model": "mock-1"
+                "provider": provider,
+                "model": model
             },
             "runtimeMetadata": {
                 "kind": "subagent",
@@ -949,6 +959,175 @@ fn create_auth_child(client: &mut Client, dir: &std::path::Path, root_id: &str) 
         .or_else(|| child["data"]["sessionId"].as_str())
         .expect("child id")
         .to_string()
+}
+
+/// Stored Anthropic OAuth rotation and logout reach both running workers.
+/// The mock observes their next requests, not just cached engine state.
+// Long by design: one stored-OAuth rotation asserted across three
+// login/logout states for both live workers.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn saved_anthropic_oauth_rotates_root_and_child_request_headers() {
+    let mock = FailingMock::start(0, ReplyMode::Text("served"));
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "anthropic": {
+                    "api": "openai-completions",
+                    "baseUrl": mock.url(),
+                    // The key a fresh resolution falls back to on logout.
+                    "apiKey": "sk-anthropic-fallback",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+    let socket = dir.path().join("anthropic-oauth.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, /*kernel_python*/ None);
+    let mut client = Client::connect(&socket);
+    client.send_command(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "provider": "anthropic",
+                "model": "mock-1",
+            },
+        }),
+    );
+    let created = client.request("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let root_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    client.send_command(
+        "a1",
+        &json!({ "type": "attach", "activeSessionId": root_id }),
+    );
+    assert_eq!(client.request("a1")["success"], true, "attach failed");
+
+    // A non-expired token avoids contacting Anthropic's OAuth endpoint.
+    let expires = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("timestamp fits i64")
+        + 3_600_000;
+    let write_oauth = |access: &str, refresh: &str| {
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            json!({
+                "anthropic": {
+                    "type": "oauth",
+                    "access": access,
+                    "refresh": refresh,
+                    "expires": expires,
+                }
+            })
+            .to_string(),
+        )
+        .expect("save anthropic oauth credential");
+    };
+    write_oauth("sk-ant-oat-old-login", "sk-ant-oat-old-refresh");
+    client.send_command(
+        "auth-initial",
+        &json!({"type":"auth_changed", "providerId":"anthropic"}),
+    );
+    assert_eq!(client.request("auth-initial")["success"], true);
+    client.send_command(
+        "p-root-1",
+        &json!({"type":"prompt_and_wait", "activeSessionId": root_id, "message": "root first"}),
+    );
+    assert_eq!(client.request("p-root-1")["success"], true);
+    let child_id = create_auth_child(&mut client, dir.path(), &root_id, "anthropic", "mock-1");
+    client.send_command(
+        "p-child-1",
+        &json!({"type":"prompt_and_wait", "activeSessionId": child_id, "message": "child first"}),
+    );
+    assert_eq!(client.request("p-child-1")["success"], true);
+    let bearer = |skip: usize| -> Vec<String> {
+        mock.auth_headers()
+            .iter()
+            .skip(skip)
+            .map(|(authorization, _)| authorization.clone())
+            .collect()
+    };
+    assert_eq!(
+        bearer(0),
+        vec!["Bearer sk-ant-oat-old-login".to_string(); 2],
+        "the root and the child serve the stored access token"
+    );
+
+    // A fresh login rotates the stored token; the notification applies
+    // it to the already-built root and child without restarting either.
+    write_oauth("sk-ant-oat-new-login", "sk-ant-oat-new-refresh");
+    client.send_command(
+        "auth-changed",
+        &json!({"type":"auth_changed", "providerId":"anthropic"}),
+    );
+    let refreshed = client.request("auth-changed");
+    assert_eq!(
+        refreshed["success"], true,
+        "oauth rotation fanout failed: {refreshed}"
+    );
+    for (id, session) in [("p-root-2", &root_id), ("p-child-2", &child_id)] {
+        client.send_command(
+            id,
+            &json!({"type":"prompt_and_wait", "activeSessionId": session, "message": "after login"}),
+        );
+        assert_eq!(client.request(id)["success"], true);
+    }
+    assert_eq!(
+        bearer(2),
+        vec!["Bearer sk-ant-oat-new-login".to_string(); 2],
+        "the rotated token serves both workers' next requests"
+    );
+
+    // A logout drops the removed token: both workers fall back to the
+    // models.json key, never the old or new OAuth access token.
+    std::fs::write(agent_dir.join("auth.json"), "{}").expect("log out");
+    client.send_command(
+        "auth-logout",
+        &json!({"type":"auth_changed", "providerId":"anthropic"}),
+    );
+    let logged_out = client.request("auth-logout");
+    assert_eq!(
+        logged_out["success"], true,
+        "logout fanout failed: {logged_out}"
+    );
+    for (id, session) in [("p-root-3", &root_id), ("p-child-3", &child_id)] {
+        client.send_command(
+            id,
+            &json!({"type":"prompt_and_wait", "activeSessionId": session, "message": "after logout"}),
+        );
+        assert_eq!(client.request(id)["success"], true);
+    }
+    assert_eq!(
+        bearer(4),
+        vec!["Bearer sk-anthropic-fallback".to_string(); 2],
+        "the removed OAuth token no longer serves requests"
+    );
 }
 
 /// A completed `auth_changed` fanout updates both an already-built root and
@@ -987,7 +1166,13 @@ fn saved_login_fans_out_to_running_root_and_child() {
         &json!({"type":"prompt_and_wait", "activeSessionId":root_id,"message":"root first"}),
     );
     assert_eq!(client.request("p-root-1")["success"], true);
-    let child_id = create_auth_child(&mut client, dir.path(), &root_id);
+    let child_id = create_auth_child(
+        &mut client,
+        dir.path(),
+        &root_id,
+        "prime-inference",
+        "mock-1",
+    );
     client.send_command(
         "p-child-1",
         &json!({"type":"prompt_and_wait", "activeSessionId":child_id,"message":"child first"}),

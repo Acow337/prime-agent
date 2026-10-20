@@ -7,33 +7,29 @@ use super::AgentSessionEngine;
 use pa_core::session_engine::provider_adapter::ProviderTarget;
 
 impl AgentSessionEngine {
-    /// The one rebind rule for every cached target (the live slot, an
-    /// armed image route, and the route's saved session target): the
-    /// target serves exactly the pair a fresh resolution yields for its
-    /// OWN model — the stored credential, the environment/runtime
-    /// override, the configured `models.json` key, or none. Only the key
-    /// and headers change, together, so a credential without a team
-    /// header clears the previous `X-Prime-Team-ID`.
-    ///
-    /// The rule is applied even when the credential has left the store:
-    /// a logout must stop serving the removed key, and every running
-    /// session then serves what a newly spawned worker would. Callers
-    /// gate the walk on a readable store, so a failed read never touches
-    /// a target.
-    fn rebind_request_auth(&self, target: &mut ProviderTarget) {
-        let (api_key, headers) = self.resolve_request_key_and_headers(&target.model);
+    /// Rebind a cached target only after its own store read succeeds.
+    fn rebind_request_auth(&self, target: &mut ProviderTarget) -> Result<(), String> {
+        let (api_key, headers, healthy) =
+            self.resolve_request_key_and_headers_and_store_health(&target.model);
+        if !healthy {
+            return Err("could not read credential store".to_string());
+        }
         target.api_key = api_key;
         target.headers = headers;
+        Ok(())
     }
 
-    /// `/reload`'s session half, also run for a saved-auth change
-    /// notification: re-read the live inputs another process may have
-    /// changed — the MCP manager's settings and auth state, then the
-    /// request auth of every cached target under
-    /// [`Self::rebind_request_auth`]'s rule (the model and service tier
-    /// never change). A failed auth-store read fails the call before any
-    /// target is touched.
+    /// Refresh only targets belonging to the provider whose credentials changed.
+    pub(crate) fn apply_auth_changed(&self, provider_id: &str) -> Result<(), String> {
+        self.reload_request_auth(Some(provider_id))
+    }
+
+    /// Re-read MCP settings/auth and all cached request credentials.
     pub(crate) fn reload_live_inputs(&self) -> Result<(), String> {
+        self.reload_request_auth(None)
+    }
+
+    fn reload_request_auth(&self, provider_id: Option<&str>) -> Result<(), String> {
         // The whole refresh is serialized against every other
         // resolve-and-install (the session's reload lock): overlapping
         // writers resolve the store at their own read times, so the last
@@ -42,9 +38,9 @@ impl AgentSessionEngine {
             .reload_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The auth store re-read gates the rebinds below: the settings
-        // re-read still applies on a failed reload.
-        {
+        // Only /reload refreshes MCP settings/auth; a provider notification
+        // must not touch unrelated credentials. Each target checks its own read.
+        if provider_id.is_none() {
             let mut manager = self
                 .mcp
                 .lock()
@@ -59,16 +55,22 @@ impl AgentSessionEngine {
         // or lands before the slot refresh — never over it), and the
         // route's saved session target is the fallback a later
         // `clear_image_route` restores when resolution fails, so its auth
-        // re-binds from the same store read.
+        // is refreshed too.
         if let Some(route) = self
             .image_route
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
         {
-            self.rebind_request_auth(&mut route.target);
-            if let Some(saved) = route.session_target.as_mut() {
-                self.rebind_request_auth(saved);
+            if provider_id.is_none_or(|id| route.target.model.provider == id) {
+                self.rebind_request_auth(&mut route.target)?;
+            }
+            if let Some(saved) = route
+                .session_target
+                .as_mut()
+                .filter(|saved| provider_id.is_none_or(|id| saved.model.provider == id))
+            {
+                self.rebind_request_auth(saved)?;
             }
         }
         // The live slot resolves outside its write lock (the resolution
@@ -81,8 +83,14 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|target| target.model.clone());
-        if let Some(model) = live_model {
-            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
+        if let Some(model) =
+            live_model.filter(|model| provider_id.is_none_or(|id| model.provider == id))
+        {
+            let (api_key, headers, healthy) =
+                self.resolve_request_key_and_headers_and_store_health(&model);
+            if !healthy {
+                return Err("could not read credential store".to_string());
+            }
             let mut slot = self
                 .provider_target
                 .write()
@@ -91,8 +99,8 @@ impl AgentSessionEngine {
                 if target.model == model {
                     target.api_key = api_key;
                     target.headers = headers;
-                } else {
-                    self.rebind_request_auth(target);
+                } else if provider_id.is_none_or(|id| target.model.provider == id) {
+                    self.rebind_request_auth(target)?;
                 }
             }
         }
