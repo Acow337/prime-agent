@@ -53,7 +53,8 @@ class InventoryTests(unittest.TestCase):
         return {'prefix': str(root), 'executable': str(executable),
                 'modules': {'rlm': str((root / 'lib/python3.12/site-packages/rlm/__init__.py').resolve()),
                             'agent_message': str((skills / 'agent-message/src/agent_message/__init__.py').resolve())},
-                'packages': [('prime-agent-runtime', '0.1.0')]}
+                'packages': [('prime-agent-runtime', '0.1.0')],
+                'distribution_roots': [('prime-agent-runtime', str(root / 'lib/python3.12/site-packages'))]}
 
     def test_probes_rlm_and_derived_skills_and_inventories_both_sources(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -152,7 +153,7 @@ class InventoryTests(unittest.TestCase):
             (site / 'escape.py').symlink_to(executable)
             data = {'prefix': str(root), 'executable': str(executable),
                     'modules': {'rlm': str((root / 'lib/python3.12/site-packages/rlm/__init__.py').resolve())},
-                    'packages': []}
+                    'packages': [], 'distribution_roots': []}
             with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
                 with self.assertRaises(ValueError):
                     inventory(executable)
@@ -167,7 +168,18 @@ class InventoryTests(unittest.TestCase):
             (site / 'pandas').symlink_to(shared / 'pandas', target_is_directory=True)
             data = {'prefix': str(root), 'executable': str(executable),
                     'modules': {'rlm': str((root / 'lib/python3.12/site-packages/rlm/__init__.py').resolve())},
-                    'packages': []}
+                    'packages': [], 'distribution_roots': []}
+            with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
+                with self.assertRaises(ValueError):
+                    inventory(executable)
+
+    def test_rejects_distributions_outside_the_venv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, executable = fake_venv(directory)
+            data = {'prefix': str(root), 'executable': str(executable),
+                    'modules': {'rlm': str((root / 'lib/python3.12/site-packages/rlm/__init__.py').resolve())},
+                    'packages': [('pandas', '2.0.0')],
+                    'distribution_roots': [('pandas', str(Path(directory) / 'system/site-packages'))]}
             with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
                 with self.assertRaises(ValueError):
                     inventory(executable)

@@ -63,7 +63,8 @@ paths = {}
 for name in %r:
     paths[name] = str(Path(importlib.import_module(name).__file__).resolve())
 print(json.dumps({'python': sys.version, 'prefix': sys.prefix, 'executable': sys.executable,
- 'modules': paths, 'packages': sorted((d.metadata['Name'], d.version) for d in importlib.metadata.distributions())}))
+ 'modules': paths, 'packages': sorted((d.metadata['Name'], d.version) for d in importlib.metadata.distributions()),
+ 'distribution_roots': [(d.metadata['Name'], str(Path(d.locate_file('')).resolve())) for d in importlib.metadata.distributions()]}))
 '''
     code = code % (['rlm', *(name for name, _ in skills)],)
     result = subprocess.run([str(python), '-c', code], capture_output=True, text=True,
@@ -83,6 +84,13 @@ print(json.dumps({'python': sys.version, 'prefix': sys.prefix, 'executable': sys
     for name, module_path in data['modules'].items():
         if not any(Path(module_path).is_relative_to(base) for base in allowed):
             raise ValueError(f'probed module outside the venv and release package: {name}')
+    # A venv with include-system-site-packages (or any distribution whose
+    # metadata lives outside the venv) imports packages the inventory never
+    # hashes: every installed distribution's root must lie inside the venv;
+    # editable installs root at their metadata in the venv's site-packages.
+    if any(not Path(directory).resolve().is_relative_to(root)
+           for _, directory in data['distribution_roots']):
+        raise ValueError('installed distribution outside the venv')
     entries = list(root.rglob('*'))
     # rglob does not descend into symlinked directories and is_file() filters
     # them out, so package entries are checked for escapes first.
