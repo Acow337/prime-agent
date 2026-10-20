@@ -131,20 +131,23 @@ def _is_home_scale_root(token: str) -> bool:
     )
 
 
-def _is_depth_bound(tokens: list[str]) -> bool:
-    """A --max-depth/-maxdepth/-d bound with a valid numeric argument; a bare
-    token (the filename maxdepth.txt) never counts. Mirrors the Rust guard."""
+def _is_rg_depth_bound(tokens: list[str]) -> bool:
+    """rg's --max-depth[=]N / -d N / -dN with a numeric argument; a bare
+    token (the filename maxdepth.txt) never counts."""
     for i, t in enumerate(tokens):
-        if (
-            t in ("--max-depth", "-maxdepth", "-d")
-            and i + 1 < len(tokens)
-            and tokens[i + 1].isdigit()
-        ):
+        if t in ("--max-depth", "-d") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
             return True
-        for prefix in ("--max-depth=", "-maxdepth="):
-            if t.startswith(prefix) and t[len(prefix) :].isdigit():
-                return True
+        if t.startswith("--max-depth=") and t[len("--max-depth=") :].isdigit():
+            return True
         if t.startswith("-d") and len(t) > 2 and t[2:].isdigit():
+            return True
+    return False
+
+
+def _is_find_depth_bound(tokens: list[str]) -> bool:
+    """find's `-maxdepth N` with a numeric argument."""
+    for i, t in enumerate(tokens):
+        if t == "-maxdepth" and i + 1 < len(tokens) and tokens[i + 1].isdigit():
             return True
     return False
 
@@ -153,6 +156,10 @@ def _is_depth_bound(tokens: list[str]) -> bool:
 # argument here, and the scanner's positional pattern-skip must skip the
 # placeholder, not a scan root that follows it.
 MASK_PLACEHOLDER = "\x01"
+
+# Substitution nesting deeper than this is not scanned: a malformed
+# deeply-nested command must stay cheap on both stack and time.
+_SUBSTITUTION_DEPTH_CAP = 8
 
 
 def _starts_with_home_expansion(chars: list[str], at: int) -> bool:
@@ -308,12 +315,19 @@ def _mask_scan_literals(command: str) -> str:
                     else:
                         k = body
                         sub_depth = 0
+                        sub_quote = None
                         while k < region_end:
                             c = chars[k]
                             if sub_depth > 0:
                                 # Inside a live command substitution; the
-                                # paren depth carries across body lines.
-                                if c == "(":
+                                # paren depth carries across body lines, and
+                                # quoted parens do not count toward it.
+                                if sub_quote is not None:
+                                    if c == sub_quote:
+                                        sub_quote = None
+                                elif c in ("'", '"'):
+                                    sub_quote = c
+                                elif c == "(":
                                     sub_depth += 1
                                 elif c == ")":
                                     sub_depth -= 1
@@ -377,11 +391,19 @@ def _mask_scan_literals(command: str) -> str:
                     i += 2
                 elif chars[i] == "$" and i + 1 < n and chars[i + 1] == "(":
                     depth = 0
+                    quote = None
                     j = i
                     while j < n:
-                        if chars[j] == "(":
+                        qc = chars[j]
+                        if quote is not None:
+                            # Quoted parens do not count toward the depth.
+                            if qc == quote:
+                                quote = None
+                        elif qc in ("'", '"'):
+                            quote = qc
+                        elif qc == "(":
                             depth += 1
-                        elif chars[j] == ")":
+                        elif qc == ")":
                             depth -= 1
                             if depth == 0:
                                 break
@@ -423,20 +445,35 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
                 continue
         elif tokens[0] not in ("rg", "find"):
             continue
+        # Depth bounds are tool-specific: rg takes --max-depth/-d, find
+        # takes -maxdepth; the grep family has no depth option (a `-d2`
+        # after `-e` is the pattern, not a bound).
+        rest = tokens[1:]
+        if tokens[0] == "rg":
+            if _is_rg_depth_bound(rest):
+                continue
+        elif tokens[0] == "find":
+            if _is_find_depth_bound(rest):
+                continue
         # grep-family and rg take their pattern as the first non-option
-        # argument: when another non-option argument follows, the first is
-        # pattern text, not a scan root — a quoted pattern containing $HOME
-        # (`grep -rl "$HOME/needle" src/`) must not count as a home root.
-        root_tokens = tokens[1:]
-        if tokens[0] in ("grep", "egrep", "fgrep", "rg"):
+        # argument — pattern text, not a scan root; a quoted pattern
+        # containing $HOME must not count as a home root (a masked pattern
+        # leaves a placeholder in its position). When the pattern came from
+        # a pattern option (-e/--regexp/-f/--file), every non-option
+        # argument is a root and none is skipped.
+        pattern_from_option = any(
+            t in ("-e", "--regexp", "-f", "--file")
+            or t.startswith(("--regexp=", "--file="))
+            for t in rest
+        )
+        root_tokens = rest
+        if tokens[0] in ("grep", "egrep", "fgrep", "rg") and not pattern_from_option:
             non_option = [k for k, t in enumerate(root_tokens) if not t.startswith("-")]
-            if len(non_option) > 1:
+            if non_option:
                 root_tokens = (
                     root_tokens[: non_option[0]] + root_tokens[non_option[0] + 1 :]
                 )
         if not any(_is_home_scale_root(t) for t in root_tokens):
-            continue
-        if _is_depth_bound(tokens[1:]):
             continue
         return True
     return False
@@ -450,11 +487,20 @@ def _substitution_bodies(masked: str) -> list[str]:
     while i < len(masked):
         if masked[i] == "$" and i + 1 < len(masked) and masked[i + 1] == "(":
             depth = 0
+            quote = None
             j = i + 1
             while j < len(masked):
-                if masked[j] == "(":
+                c = masked[j]
+                if quote is not None:
+                    # Quoted parens do not count toward the depth; the
+                    # substitution still closes at its real `)`.
+                    if c == quote:
+                        quote = None
+                elif c in ("'", '"'):
+                    quote = c
+                elif c == "(":
                     depth += 1
-                elif masked[j] == ")":
+                elif c == ")":
                     depth -= 1
                     if depth == 0:
                         break
@@ -486,10 +532,19 @@ def _is_unbounded_home_scan(command: str) -> bool:
     subshell, so they are scanned as commands too (the same rules as the
     Rust guard).
     """
-    masked = _mask_scan_literals(command)
-    if _segments_contain_unbounded_scan(masked):
-        return True
-    return any(_is_unbounded_home_scan(b) for b in _substitution_bodies(masked))
+    # Iterative worklist with a depth cap: recursion would hit Python's
+    # limit (or the agent's stack) on deeply nested malformed input before
+    # the executor ever starts, and an uncapped walk would spend quadratic
+    # time on it.
+    worklist = [(command, 0)]
+    while worklist:
+        text, depth = worklist.pop()
+        masked = _mask_scan_literals(text)
+        if _segments_contain_unbounded_scan(masked):
+            return True
+        if depth + 1 < _SUBSTITUTION_DEPTH_CAP:
+            worklist.extend((b, depth + 1) for b in _substitution_bodies(masked))
+    return False
 
 
 def _note_scan_cost(command: str) -> None:

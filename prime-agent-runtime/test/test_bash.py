@@ -1584,6 +1584,13 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan('grep -rl "needle" ~/Documents src/'))
         self.assertFalse(is_scan("cat <<\\EOF\ngrep -rl needle ~/Documents\nEOF"))
         self.assertFalse(is_scan("cat <<\\EOF\n$(grep -rl needle ~/Documents)\nEOF"))
+        # Per-tool bounds, pattern options, quote-aware matching, capped
+        # nesting (round 9).
+        self.assertTrue(is_scan("grep -rl -e -d2 ~/Documents"))
+        self.assertTrue(is_scan("grep -rl --regexp=needle ~/Documents src/"))
+        self.assertFalse(is_scan('grep -rl "$HOME"'))
+        self.assertTrue(is_scan("echo \"$(echo '(')\" $(grep -rl needle ~/Documents)"))
+        self.assertFalse(is_scan("$((" * 25000 + "))" * 25000))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

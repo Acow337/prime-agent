@@ -548,16 +548,19 @@ fn is_home_scale_root(token: &str) -> bool {
         || token.starts_with("${HOME}/")
 }
 
-/// True when a depth bound appears with a valid numeric argument: rg's
-/// `--max-depth[=]N`/`-d N`/`-dN`, find's `-maxdepth N`. A bare token (for
-/// example the filename `maxdepth.txt`) never counts.
-fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
+/// rg's depth bounds: `--max-depth[=]N`/`-d N`/`-dN` with a numeric
+/// argument. A bare token (the filename `maxdepth.txt`) never counts.
+fn is_rg_depth_bound(token: &str, next: Option<&str>) -> bool {
     let is_number = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    ((token == "--max-depth" || token == "-maxdepth" || token == "-d")
-        && next.is_some_and(is_number))
+    ((token == "--max-depth" || token == "-d") && next.is_some_and(is_number))
         || token.strip_prefix("--max-depth=").is_some_and(is_number)
-        || token.strip_prefix("-maxdepth=").is_some_and(is_number)
         || token.strip_prefix("-d").is_some_and(is_number)
+}
+
+/// find's depth bound: `-maxdepth N` with a numeric argument.
+fn is_find_depth_bound(token: &str, next: Option<&str>) -> bool {
+    let is_number = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    token == "-maxdepth" && next.is_some_and(is_number)
 }
 
 /// Masked quoted arguments leave this placeholder token behind: bash saw an
@@ -734,12 +737,20 @@ fn mask_scan_literals(command: &str) -> String {
                     } else {
                         let mut k = body;
                         let mut sub_depth = 0i32;
+                        let mut sub_quote: Option<char> = None;
                         while k < region_end {
                             let c = chars[k];
                             if sub_depth > 0 {
                                 // Inside a live command substitution; the
-                                // paren depth carries across body lines.
-                                if c == '(' {
+                                // paren depth carries across body lines, and
+                                // quoted parens do not count toward it.
+                                if let Some(qc) = sub_quote {
+                                    if c == qc {
+                                        sub_quote = None;
+                                    }
+                                } else if c == '\'' || c == '"' {
+                                    sub_quote = Some(c);
+                                } else if c == '(' {
                                     sub_depth += 1;
                                 } else if c == ')' {
                                     sub_depth -= 1;
@@ -814,14 +825,28 @@ fn mask_scan_literals(command: &str) -> String {
                     i += 2;
                 } else if chars[i] == '$' && i + 1 < len && chars[i + 1] == '(' {
                     let mut depth = 0i32;
+                    let mut dq_quote: Option<char> = None;
                     let mut j = i;
                     while j < len {
-                        if chars[j] == '(' {
-                            depth += 1;
-                        } else if chars[j] == ')' {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
+                        let qc = chars[j];
+                        match dq_quote {
+                            // Quoted parens do not count toward the depth.
+                            Some(q) => {
+                                if qc == q {
+                                    dq_quote = None;
+                                }
+                            }
+                            None => {
+                                if qc == '\'' || qc == '"' {
+                                    dq_quote = Some(qc);
+                                } else if qc == '(' {
+                                    depth += 1;
+                                } else if qc == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
                             }
                         }
                         j += 1;
@@ -886,21 +911,35 @@ pub(crate) fn is_unbounded_home_scan(command: &str, tool_timeout: Option<f64>) -
     scan_command_text(command)
 }
 
+/// Substitution nesting deeper than this is not scanned: a malformed
+/// deeply-nested command must stay cheap on both stack and time, and no
+/// real agent command nests scans this deep.
+const SUBSTITUTION_DEPTH_CAP: usize = 8;
+
 /// Scan-detect on the masked command plus every command-substitution body:
 /// `echo "$(grep -rl needle ~/Documents)"` runs the scan in a subshell, so a
 /// substitution body is a command too (and so are its own substitutions).
+/// Iterative worklist with a depth cap: recursion would overflow the agent's
+/// stack on deeply nested malformed input before the executor ever starts,
+/// and an uncapped walk would spend quadratic time on it.
 fn scan_command_text(command: &str) -> bool {
-    let masked = mask_scan_literals(command);
-    if segments_contain_unbounded_scan(&masked) {
-        return true;
+    let mut worklist: Vec<(String, usize)> = vec![(command.to_string(), 0)];
+    while let Some((text, depth)) = worklist.pop() {
+        let masked = mask_scan_literals(&text);
+        if segments_contain_unbounded_scan(&masked) {
+            return true;
+        }
+        if depth + 1 < SUBSTITUTION_DEPTH_CAP {
+            for body in substitution_bodies(&masked) {
+                worklist.push((body, depth + 1));
+            }
+        }
     }
-    substitution_bodies(&masked)
-        .into_iter()
-        .any(|body| scan_command_text(&body))
+    false
 }
 
-/// Bodies of `$(...)` spans (paren-depth matched) and backticks in a masked
-/// command: these execute, so their text is command text.
+/// Bodies of `$(...)` spans (paren-depth matched, quote-aware) and backticks
+/// in a masked command: these execute, so their text is command text.
 fn substitution_bodies(masked: &str) -> Vec<String> {
     let chars: Vec<char> = masked.chars().collect();
     let len = chars.len();
@@ -909,19 +948,34 @@ fn substitution_bodies(masked: &str) -> Vec<String> {
     while i < len {
         if chars[i] == '$' && chars.get(i + 1) == Some(&'(') {
             let mut depth = 0i32;
+            let mut quote: Option<char> = None;
             let mut j = i + 1;
             while j < len {
-                if chars[j] == '(' {
-                    depth += 1;
-                } else if chars[j] == ')' {
-                    depth -= 1;
-                    if depth == 0 {
-                        let body: String = chars[i + 2..j].iter().collect();
-                        if !body.trim().is_empty() {
-                            bodies.push(body);
+                let c = chars[j];
+                match quote {
+                    // Quoted parens (`$(echo '(')`) do not count toward the
+                    // depth; the substitution still closes at its real `)`.
+                    Some(q) => {
+                        if c == q {
+                            quote = None;
                         }
-                        i = j;
-                        break;
+                    }
+                    None => {
+                        if c == '\'' || c == '"' {
+                            quote = Some(c);
+                        } else if c == '(' {
+                            depth += 1;
+                        } else if c == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                let body: String = chars[i + 2..j].iter().collect();
+                                if !body.trim().is_empty() {
+                                    bodies.push(body);
+                                }
+                                i = j;
+                                break;
+                            }
+                        }
                     }
                 }
                 j += 1;
@@ -975,30 +1029,48 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
             "rg" | "find" => rest,
             _ => continue,
         };
+        // Depth bounds are tool-specific: rg takes --max-depth/-d, find
+        // takes -maxdepth; the grep family has no depth option at all (a
+        // `-d2` after `-e` is the pattern, not a bound).
+        let bounded = match *first {
+            "rg" => rest
+                .iter()
+                .enumerate()
+                .any(|(i, t)| is_rg_depth_bound(t, rest.get(i + 1).copied())),
+            "find" => rest
+                .iter()
+                .enumerate()
+                .any(|(i, t)| is_find_depth_bound(t, rest.get(i + 1).copied())),
+            _ => false,
+        };
+        if bounded {
+            continue;
+        }
         // grep-family and rg take their pattern as the first non-option
-        // argument: when another non-option argument follows, the first is
-        // pattern text, not a scan root — a quoted pattern containing $HOME
-        // (`grep -rl "$HOME/needle" src/`) must not count as a home root.
-        // (A quoted pattern is masked away, so when no second non-option
-        // argument exists the first one is a root and stays tested.)
+        // argument — it is pattern text, not a scan root, and a quoted
+        // pattern containing $HOME (`grep -rl "$HOME/needle" src/`) must
+        // not count as a home root (a masked pattern leaves a placeholder
+        // in its position). When the pattern came from a pattern option
+        // (`-e`, `--regexp`, `-f`, `--file`), every non-option argument is
+        // a root and none is skipped.
+        let pattern_from_option = rest.iter().any(|t| {
+            *t == "-e"
+                || *t == "--regexp"
+                || *t == "-f"
+                || *t == "--file"
+                || t.starts_with("--regexp=")
+                || t.starts_with("--file=")
+        });
         let mut root_tokens: Vec<&str> = rest.to_vec();
-        if matches!(*first, "grep" | "egrep" | "fgrep" | "rg") {
+        if matches!(*first, "grep" | "egrep" | "fgrep" | "rg") && !pattern_from_option {
             if let Some(pos) = root_tokens.iter().position(|t| !t.starts_with('-')) {
-                if root_tokens[pos + 1..].iter().any(|t| !t.starts_with('-')) {
-                    root_tokens.remove(pos);
-                }
+                root_tokens.remove(pos);
             }
         }
         if !root_tokens.iter().any(|t| is_home_scale_root(t)) {
             continue; // project-local scans are bounded by the tree size
         }
-        let bounded = rest
-            .iter()
-            .enumerate()
-            .any(|(i, t)| is_depth_bound_token(t, rest.get(i + 1).copied()));
-        if !bounded {
-            return true;
-        }
+        return true;
     }
     false
 }
@@ -1442,6 +1514,37 @@ mod tests {
             "cat <<\\EOF\n$(grep -rl needle ~/Documents)\nEOF",
             None
         ));
+    }
+
+    /// Regression coverage for the ninth bot-review round: per-tool depth
+    /// bounds, pattern options, quote-aware substitution matching, and an
+    /// iterative depth-capped substitution walk.
+    #[test]
+    fn tool_bounds_pattern_options_and_capped_nesting_scan_correctly() {
+        // The grep family has no depth option: `-d2` after `-e` is a pattern.
+        assert!(is_unbounded_home_scan("grep -rl -e -d2 ~/Documents", None));
+        // A pattern supplied by --regexp= leaves every positional a root.
+        assert!(is_unbounded_home_scan(
+            "grep -rl --regexp=needle ~/Documents src/",
+            None
+        ));
+        // A lone pattern is not a scan (grep reads stdin, nothing recurses).
+        assert!(!is_unbounded_home_scan("grep -rl \"$HOME\"", None));
+        // Quoted parens inside a substitution do not confuse the matcher:
+        // a later sibling substitution is still extracted.
+        assert!(is_unbounded_home_scan(
+            "echo \"$(echo '(')\" $(grep -rl needle ~/Documents)",
+            None
+        ));
+        // Deeply nested malformed input stays cheap and off the stack.
+        let deep = format!("{}{}", "$(".repeat(50_000), ")".repeat(50_000));
+        let start = std::time::Instant::now();
+        assert!(!is_unbounded_home_scan(&deep, None));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 10,
+            "nested scan took {elapsed:?} on a 100k-char command"
+        );
     }
 
     #[test]
