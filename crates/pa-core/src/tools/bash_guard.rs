@@ -541,6 +541,9 @@ pub(crate) const SCAN_TIMEOUT_ENV: &str = "PRIME_AGENT_SCAN_TIMEOUT";
 /// milliseconds. Exact-name tests keep other env vars (`$HOMEDIR`,
 /// `${HOMEBREW_PREFIX}`) out.
 fn is_home_scale_root(token: &str) -> bool {
+    // A grouping closer glued to the token (`(rg pattern $HOME)`) is
+    // stripped first.
+    let token = token.trim_end_matches([')', '}']);
     token.starts_with('~')
         || token == "$HOME"
         || token.starts_with("$HOME/")
@@ -1101,17 +1104,20 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
     for segment in split_on_separators(masked) {
         let mut tokens = split_ws(segment.trim());
         // Leading grouping operators: `(find ...)` and `{ ...; }` run the
-        // same command, so the shape must survive grouping.
-        while let Some(first) = tokens.first().copied() {
-            match first.strip_prefix('(').or_else(|| first.strip_prefix('{')) {
-                Some("") => {
-                    tokens.remove(0);
-                }
-                Some(rest) => tokens[0] = rest,
-                None => break,
+        // same command, so the shape must survive grouping. Walk by index
+        // and strip all prefixes at once: popping the head is quadratic in
+        // the number of prefixes.
+        let mut command_start = 0;
+        while let Some(first) = tokens.get(command_start).copied() {
+            let stripped = first.trim_start_matches(['(', '{']);
+            if stripped.is_empty() {
+                command_start += 1;
+            } else {
+                tokens[command_start] = stripped;
+                break;
             }
         }
-        let Some((first, rest)) = tokens.split_first() else {
+        let Some((first, rest)) = tokens[command_start..].split_first() else {
             continue;
         };
         if *first == "timeout" {
@@ -1381,6 +1387,22 @@ mod tests {
         assert!(is_unbounded_home_scan("{ rg pattern ~/Documents; }", None));
         assert!(!is_unbounded_home_scan("(grep -rl needle .)", None));
         assert!(!is_unbounded_home_scan(r"{ find . -name '*.log'; }", None));
+        // A grouping closer glued to an exact $HOME root does not hide it
+        // (bot round on the fix head), and many grouped prefixes stay
+        // linear in the preflight (Macroscope round on the fix head).
+        assert!(is_unbounded_home_scan("(rg pattern $HOME)", None));
+        assert!(is_unbounded_home_scan("((rg pattern $HOME))", None));
+        assert!(is_unbounded_home_scan("(grep -rl needle $HOME)", None));
+        assert!(is_unbounded_home_scan("(find $HOME)", None));
+        assert!(!is_unbounded_home_scan(&"(".repeat(100_000), None));
+        assert!(!is_unbounded_home_scan(
+            &format!("{}true", "( ".repeat(100_000)),
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            &format!("({}find ~/Documents", "(".repeat(100_000)),
+            None
+        ));
     }
 
     #[test]

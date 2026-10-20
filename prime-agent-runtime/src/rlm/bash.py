@@ -123,7 +123,9 @@ _scan_hints_written = 0
 
 def _is_home_scale_root(token: str) -> bool:
     """A ~-rooted path or a $HOME expansion; exact names keep other env vars
-    ($HOMEDIR, ${HOMEBREW_PREFIX}) out. Mirrors the Rust bash_guard."""
+    ($HOMEDIR, ${HOMEBREW_PREFIX}) out. A grouping closer glued to the token
+    (`(rg pattern $HOME)`) is stripped first. Mirrors the Rust bash_guard."""
+    token = token.rstrip(")}")
     return (
         token.startswith("~")
         or token in ("$HOME", "${HOME}")
@@ -502,12 +504,17 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
     for segment in re.split(r"&&|\|\||;|\||\n", masked):
         tokens = segment.split()
         # Leading grouping operators: `(find ...)` and `{ ...; }` run the
-        # same command, so the shape must survive grouping.
-        while tokens and tokens[0][:1] in ("(", "{"):
-            if len(tokens[0]) > 1:
-                tokens[0] = tokens[0][1:]
-            else:
-                tokens.pop(0)
+        # same command, so the shape must survive grouping. Walk by index
+        # and strip all prefixes at once: popping the head or copying one
+        # character per round is quadratic in the number of prefixes.
+        command_start = 0
+        while command_start < len(tokens):
+            stripped = tokens[command_start].lstrip("({")
+            if stripped:
+                tokens[command_start] = stripped
+                break
+            command_start += 1
+        tokens = tokens[command_start:]
         if not tokens or tokens[0] == "timeout":
             continue
         if tokens[0] in ("grep", "egrep", "fgrep"):

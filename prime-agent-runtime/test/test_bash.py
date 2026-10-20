@@ -1651,6 +1651,16 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("{ rg pattern ~/Documents; }"))
         self.assertFalse(is_scan("(grep -rl needle .)"))
         self.assertFalse(is_scan("{ find . -name '*.log'; }"))
+        # A grouping closer glued to an exact $HOME root does not hide it
+        # (bot round on the fix head), and many grouped prefixes stay
+        # linear in the preflight (Macroscope round on the fix head).
+        self.assertTrue(is_scan("(rg pattern $HOME)"))
+        self.assertTrue(is_scan("((rg pattern $HOME))"))
+        self.assertTrue(is_scan("(grep -rl needle $HOME)"))
+        self.assertTrue(is_scan("(find $HOME)"))
+        self.assertFalse(is_scan("(" * 100000))
+        self.assertFalse(is_scan("( " * 100000 + "true"))
+        self.assertTrue(is_scan("( " * 100000 + "find ~/Documents"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (
