@@ -278,6 +278,13 @@ impl IpythonKernelProvisioner {
         self.lock_state().manager.clone()
     }
 
+    /// The Python skills pre-imported at kernel bootstrap.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn python_skills(&self) -> &[KernelPythonSkill] {
+        &self.inner.options.python_skills
+    }
+
     /// Result of reviving a prior session's namespace on the last kernel start.
     #[must_use]
     pub fn last_restore(&self) -> Option<RestoreResult> {
@@ -1415,6 +1422,27 @@ mod tests {
         } else {
             assert_eq!(injected, Some("key-from-cmd"));
         }
+    }
+
+    #[tokio::test]
+    async fn an_unsaved_session_blanks_the_kernel_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        assert_eq!(
+            engine
+                .provisioner
+                .inner
+                .options
+                .env
+                .get("RLM_SESSION_ID")
+                .map(String::as_str),
+            Some(""),
+            "an inherited RLM_SESSION_ID must not reach an unsaved session's kernel"
+        );
     }
 
     #[tokio::test]
