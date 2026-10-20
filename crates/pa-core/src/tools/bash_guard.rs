@@ -562,10 +562,14 @@ fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
 
 /// Mask single-quoted spans, double-quoted literal data, unquoted comments,
 /// and heredoc bodies. Double quotes still expand `$HOME`/`${HOME}` and run
-/// command substitution, so inside a double-quoted span only those stay
-/// visible, plus all-digit spans (a quoted `--max-depth "3"` argument is a
-/// bound, not data). Heredoc bodies are input text, never executed, so the
-/// whole body through the delimiter line is masked.
+/// command substitution, so a double-quoted span that starts with a home
+/// expansion stays fully live (`find "$HOME/Documents"` is a home-scale
+/// scan) while embedded expansions and other literal data are masked
+/// (`grep -rl "docs$HOME" src/` has no home root). All-digit quoted spans
+/// stay visible (a quoted `--max-depth "3"` argument is a bound, not
+/// data). Heredoc bodies are input text, never executed, so the whole body
+/// through the delimiter line is masked — except that an unquoted delimiter
+/// still expands, so `$(...)` and backticks in its body stay live.
 fn mask_scan_literals(command: &str) -> String {
     let mut chars: Vec<char> = command.chars().collect();
     let len = chars.len();
@@ -590,24 +594,25 @@ fn mask_scan_literals(command: &str) -> String {
                 chars[j] = ' ';
                 j += 1;
             }
+            chars[i] = ' ';
             if j < len {
                 chars[j] = ' ';
             }
             i = j + 1;
             continue;
         }
-        if ch == '<'
-            && chars.get(i + 1) == Some(&'<')
-            && chars.get(i + 2) != Some(&'<')
-            && (i == 0 || chars[i - 1].is_whitespace())
-        {
-            // Heredoc `<<[-]DELIM`: the body until the delimiter line is
-            // input text, never executed, so mask it. The rest of the
-            // heredoc-start line stays live command text.
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') {
+            // Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
+            // `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
+            // line is input text, never executed, so mask it. A digit-first
+            // delimiter is an arithmetic shift (`$((1<<2))`), not a heredoc.
             let mut j = i + 2;
             let mut tabbed = false;
             if chars.get(j) == Some(&'-') {
                 tabbed = true;
+                j += 1;
+            }
+            while j < len && (chars[j] == ' ' || chars[j] == '\t') {
                 j += 1;
             }
             let mut word = String::new();
@@ -615,8 +620,11 @@ fn mask_scan_literals(command: &str) -> String {
                 word.push(chars[j]);
                 j += 1;
             }
-            let delim = word.trim_matches(|c| c == '\'' || c == '"');
-            if !delim.is_empty() {
+            let quoted = word.starts_with('\'') || word.starts_with('"');
+            let delim = word.trim_matches(|c| c == '\'' || c == '"').to_string();
+            let is_delimiter = !delim.is_empty()
+                && (delim.as_bytes()[0].is_ascii_alphabetic() || delim.as_bytes()[0] == b'_');
+            if is_delimiter {
                 let mut body = j;
                 while body < len && chars[body] != '\n' {
                     body += 1;
@@ -635,8 +643,36 @@ fn mask_scan_literals(command: &str) -> String {
                             }
                         }
                         let terminator = chars[start..eol].iter().collect::<String>() == delim;
-                        for c in &mut chars[body..eol] {
-                            *c = ' ';
+                        // An unquoted delimiter still expands command
+                        // substitutions in the body: keep them live, mask
+                        // the literal text around them.
+                        let mut k = body;
+                        while k < eol {
+                            if !quoted && chars[k] == '$' && chars.get(k + 1) == Some(&'(') {
+                                let mut depth = 0i32;
+                                let mut p = k;
+                                while p < eol {
+                                    if chars[p] == '(' {
+                                        depth += 1;
+                                    } else if chars[p] == ')' {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            break;
+                                        }
+                                    }
+                                    p += 1;
+                                }
+                                k = if p < eol { p + 1 } else { eol };
+                            } else if !quoted && chars[k] == '`' {
+                                let mut p = k + 1;
+                                while p < eol && chars[p] != '`' {
+                                    p += 1;
+                                }
+                                k = if p < eol { p + 1 } else { eol };
+                            } else {
+                                chars[k] = ' ';
+                            }
+                            k += 1;
                         }
                         body = eol + 1;
                         if terminator || eol >= len {
@@ -658,6 +694,22 @@ fn mask_scan_literals(command: &str) -> String {
             if j > i + 1 && chars.get(j) == Some(&'"') {
                 chars[i] = ' ';
                 chars[j] = ' ';
+                i = j + 1;
+                continue;
+            }
+            // A span that starts with a home expansion is a path argument:
+            // keep the whole span live so the expansion is never split into
+            // its own token (`grep -rl "$HOME/needle" src/` keeps the
+            // pattern whole for the positional pattern-skip in the scanner).
+            if starts_with_home_expansion(&chars, i + 1) {
+                let mut j = i + 1;
+                while j < len && chars[j] != '"' {
+                    j += 1;
+                }
+                chars[i] = ' ';
+                if j < len {
+                    chars[j] = ' ';
+                }
                 i = j + 1;
                 continue;
             }
@@ -689,8 +741,6 @@ fn mask_scan_literals(command: &str) -> String {
                         i += 1;
                     }
                     i += 1;
-                } else if chars[i] == '$' && starts_with_home_expansion(&chars, i) {
-                    i += home_expansion_len(&chars, i);
                 } else {
                     chars[i] = ' ';
                     i += 1;
@@ -724,15 +774,6 @@ fn starts_with_home_expansion(chars: &[char], at: usize) -> bool {
     } else {
         let rest: String = chars[at..chars.len().min(at + 5)].iter().collect();
         rest == "$HOME" && chars.get(at + 5).is_none_or(|c| !is_name_char(*c))
-    }
-}
-
-/// The length of the `$HOME` (5) or `${HOME}` (7) expansion at `at`.
-fn home_expansion_len(chars: &[char], at: usize) -> usize {
-    if chars.get(at + 1) == Some(&'{') {
-        7
-    } else {
-        5
     }
 }
 
@@ -836,7 +877,21 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
             "rg" | "find" => rest,
             _ => continue,
         };
-        if !rest.iter().any(|t| is_home_scale_root(t)) {
+        // grep-family and rg take their pattern as the first non-option
+        // argument: when another non-option argument follows, the first is
+        // pattern text, not a scan root — a quoted pattern containing $HOME
+        // (`grep -rl "$HOME/needle" src/`) must not count as a home root.
+        // (A quoted pattern is masked away, so when no second non-option
+        // argument exists the first one is a root and stays tested.)
+        let mut root_tokens: Vec<&str> = rest.to_vec();
+        if matches!(*first, "grep" | "egrep" | "fgrep" | "rg") {
+            if let Some(pos) = root_tokens.iter().position(|t| !t.starts_with('-')) {
+                if root_tokens[pos + 1..].iter().any(|t| !t.starts_with('-')) {
+                    root_tokens.remove(pos);
+                }
+            }
+        }
+        if !root_tokens.iter().any(|t| is_home_scale_root(t)) {
             continue; // project-local scans are bounded by the tree size
         }
         let bounded = rest
@@ -1107,6 +1162,76 @@ mod tests {
         ));
         // Arithmetic shifts are not heredocs.
         assert!(!is_unbounded_home_scan("echo $((1<<2))", None));
+    }
+
+    /// Regression coverage for the fourth bot-review round: quoted patterns
+    /// are pattern text, heredoc delimiters come in many spellings, unquoted
+    /// heredoc bodies still run substitutions, quoted patterns inside
+    /// substitutions survive re-masking, and quoted look-alikes do not start
+    /// heredocs.
+    #[test]
+    fn quoted_patterns_and_heredoc_spellings_scan_correctly() {
+        // A quoted pattern containing $HOME is pattern text, not a root.
+        assert!(!is_unbounded_home_scan(
+            "grep -rl \"$HOME/needle\" src/",
+            None
+        ));
+        assert!(!is_unbounded_home_scan("grep -rl \"docs$HOME\" src/", None));
+        // The quoted incident form still warns (pattern skipped, root kept).
+        assert!(is_unbounded_home_scan("grep -rl needle \"$HOME\"", None));
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle \"$HOME/Documents\"",
+            None
+        ));
+        // Heredoc delimiters in all their spellings mask the body.
+        for start in [
+            "cat << EOF",
+            "cat<<EOF",
+            "cat 2<<EOF",
+            "cat << 'EOF'",
+            "cat <<\"EOF\"",
+        ] {
+            let command = format!("{start}\ngrep -rl needle ~/Documents\nEOF");
+            assert!(
+                !is_unbounded_home_scan(&command, None),
+                "heredoc body leaked for {start:?}"
+            );
+        }
+        // An unquoted heredoc body still runs command substitution.
+        assert!(is_unbounded_home_scan(
+            "cat <<EOF\n$(grep -rl needle ~/Documents)\nEOF",
+            None
+        ));
+        // A quoted heredoc body never runs anything.
+        assert!(!is_unbounded_home_scan(
+            "cat <<'EOF'\n$(grep -rl needle ~/Documents)\nEOF",
+            None
+        ));
+        // A quoted pattern inside a substitution survives re-masking.
+        assert!(is_unbounded_home_scan(
+            "files=$(grep -rl 'needle' ~/Documents)",
+            None
+        ));
+        // Nested substitutions inside double quotes are extracted.
+        assert!(is_unbounded_home_scan(
+            "echo \"$(echo $(grep -rl needle ~/Documents))\"",
+            None
+        ));
+        // An escaped $HOME inside double quotes is literal, not a root.
+        assert!(!is_unbounded_home_scan("grep -rl \"\\$HOME\" src/", None));
+        // Quoted look-alikes and comments do not start heredocs.
+        assert!(is_unbounded_home_scan(
+            "echo \"use <<EOF in scripts\"; grep -rl needle ~/Documents",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "echo 'cat <<EOF'; grep -rl needle ~/Documents",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "# cat <<EOF\ngrep -rl needle ~/Documents",
+            None
+        ));
     }
 
     #[test]

@@ -1545,6 +1545,22 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertFalse(is_scan('rg --max-depth "3" needle ~/Documents'))
         self.assertFalse(is_scan("find ~/Documents -maxdepth '2'"))
         self.assertFalse(is_scan("echo $((1<<2))"))
+        # Quoted patterns are pattern text; heredoc delimiters in all their
+        # spellings; unquoted heredoc bodies still substitute (round 4).
+        self.assertFalse(is_scan('grep -rl "$HOME/needle" src/'))
+        self.assertFalse(is_scan('grep -rl "docs$HOME" src/'))
+        self.assertTrue(is_scan('grep -rl needle "$HOME"'))
+        self.assertTrue(is_scan('grep -rl needle "$HOME/Documents"'))
+        for start in ("cat << EOF", "cat<<EOF", "cat 2<<EOF", "cat << 'EOF'", 'cat <<"EOF"'):
+            self.assertFalse(is_scan(f"{start}\ngrep -rl needle ~/Documents\nEOF"), start)
+        self.assertTrue(is_scan("cat <<EOF\n$(grep -rl needle ~/Documents)\nEOF"))
+        self.assertFalse(is_scan("cat <<'EOF'\n$(grep -rl needle ~/Documents)\nEOF"))
+        self.assertTrue(is_scan("files=$(grep -rl 'needle' ~/Documents)"))
+        self.assertTrue(is_scan('echo "$(echo $(grep -rl needle ~/Documents))"'))
+        self.assertFalse(is_scan('grep -rl "\\$HOME" src/'))
+        self.assertTrue(is_scan('echo "use <<EOF in scripts"; grep -rl needle ~/Documents'))
+        self.assertTrue(is_scan("echo 'cat <<EOF'; grep -rl needle ~/Documents"))
+        self.assertTrue(is_scan("# cat <<EOF\ngrep -rl needle ~/Documents"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

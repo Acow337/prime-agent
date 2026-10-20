@@ -149,70 +149,191 @@ def _is_depth_bound(tokens: list[str]) -> bool:
     return False
 
 
-def _mask_heredoc_bodies(command: str) -> str:
-    """Heredoc bodies are input text, never executed: blank the body lines
-    (through the delimiter line) before scan detection, mirroring the Rust
-    guard. The heredoc-start line itself stays live command text."""
-    lines = command.split("\n")
-    out: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        m = re.search(r"<<-?([\"']?)([^\s\"';&|)]+)\1", line)
-        if m and (
-            m.start() == 0 or line[m.start() - 1].isspace()
-        ) and not m.group(2).startswith("<"):
-            out.append(line)
-            delim = m.group(2)
-            tabbed = m.group(0).startswith("<<-")
-            i += 1
-            while i < len(lines):
-                body = lines[i]
-                stripped = body.lstrip("\t") if tabbed else body
-                out.append("")  # body lines are data
-                done = stripped == delim
-                i += 1
-                if done:
-                    break
-            continue
-        out.append(line)
-        i += 1
-    return "\n".join(out)
+def _starts_with_home_expansion(chars: list[str], at: int) -> bool:
+    """True when chars[at:] starts with $HOME or ${HOME}; a following
+    variable-name character ($HOMEDIR) is a different variable. Mirrors the
+    Rust bash_guard helper."""
+    if at + 1 < len(chars) and chars[at + 1] == "{":
+        return "".join(chars[at : at + 7]) == "${HOME}"
+    if "".join(chars[at : at + 5]) != "$HOME":
+        return False
+    nxt = chars[at + 5] if at + 5 < len(chars) else None
+    return nxt is None or not (nxt.isascii() and (nxt.isalnum() or nxt == "_"))
 
 
 def _mask_scan_literals(command: str) -> str:
-    """Mask quoted literal data, heredoc bodies, and comments so they cannot
-    masquerade as a scan. Only the parts bash actually executes or expands
-    stay visible: all-digit quoted arguments (a depth bound like
-    `--max-depth "3"`), `$HOME`/`${HOME}`, `$(...)`, and backticks (the same
-    rules as the Rust guard)."""
-    command = _mask_heredoc_bodies(command)
-    command = re.sub(
-        r"'([^']*)'",
-        lambda m: m.group(1) if m.group(1).isdigit() else " ",
-        command,
-    )
-
-    def _mask_double_quoted_span(m: "re.Match[str]") -> str:
-        # Double quotes expand $HOME/${HOME} and run $(...) and backticks; the
-        # rest of the span is literal data. Keep only the live parts, so a
-        # quoted pipe or quoted scan text cannot shape the scanner (the same
-        # rule as the Rust guard).
-        span = m.group(0)
-        if span[1:-1].isdigit():
-            return span[1:-1]
-        pieces = []
-        last = 0
-        for live in re.finditer(r"\$HOME(?!\w)|\$\{HOME\}|\$\([^)]*\)|`[^`]*`", span):
-            pieces.append(" " * (live.start() - last))
-            pieces.append(live.group(0))
-            last = live.end()
-        pieces.append(" " * (len(span) - last))
-        return "".join(pieces)
-
-    command = re.sub(r'"[^"]*"', _mask_double_quoted_span, command)
-    command = re.sub(r"(?:^|(?<=\s))#.*$", " ", command, flags=re.MULTILINE)
-    return command
+    """Mirror of the Rust bash_guard masker: one linear scan masking
+    single-quoted spans, double-quoted literal data, comments, and heredoc
+    bodies so they cannot masquerade as a scan. A double-quoted span that
+    starts with a $HOME/${HOME} expansion stays fully live (the path argument
+    of a scan); all-digit quoted spans stay visible (a quoted depth bound like
+    `--max-depth "3"` is an argument, not data); $(...) and backticks stay live
+    (they execute). Heredoc bodies are input text, never executed, so the
+    whole body through the delimiter line is masked — except that an unquoted
+    delimiter still expands, so $(...) and backticks in its body stay live.
+    """
+    chars = list(command)
+    n = len(chars)
+    i = 0
+    while i < n:
+        ch = chars[i]
+        if ch == "'":
+            # An all-digit quoted span is an argument (`-maxdepth '2'`), not
+            # data: keep the digits visible for bound detection.
+            j = i + 1
+            while j < n and chars[j].isascii() and chars[j].isdigit():
+                j += 1
+            if j > i + 1 and j < n and chars[j] == "'":
+                chars[i] = " "
+                chars[j] = " "
+                i = j + 1
+                continue
+            j = i + 1
+            while j < n and chars[j] != "'":
+                chars[j] = " "
+                j += 1
+            chars[i] = " "
+            if j < n:
+                chars[j] = " "
+            i = j + 1
+            continue
+        if (
+            ch == "<"
+            and i + 1 < n
+            and chars[i + 1] == "<"
+            and not (i + 2 < n and chars[i + 2] == "<")
+        ):
+            # Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
+            # `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
+            # line is input text, never executed, so mask it. A digit-first
+            # delimiter is an arithmetic shift (`$((1<<2))`), not a heredoc.
+            j = i + 2
+            tabbed = False
+            if j < n and chars[j] == "-":
+                tabbed = True
+                j += 1
+            while j < n and chars[j] in " \t":
+                j += 1
+            word_start = j
+            while j < n and not chars[j].isspace():
+                j += 1
+            word = "".join(chars[word_start:j])
+            quoted = word.startswith(("'", '"'))
+            delim = word.strip("'\"")
+            if delim and (delim[0].isascii() and (delim[0].isalpha() or delim[0] == "_")):
+                body = j
+                while body < n and chars[body] != "\n":
+                    body += 1
+                if body < n:
+                    body += 1  # first char of the body
+                    while True:
+                        eol = body
+                        while eol < n and chars[eol] != "\n":
+                            eol += 1
+                        start = body
+                        if tabbed:
+                            while start < eol and chars[start] == "\t":
+                                start += 1
+                        terminator = "".join(chars[start:eol]) == delim
+                        # An unquoted delimiter still expands command
+                        # substitutions in the body: keep them live, mask
+                        # the literal text around them.
+                        k = body
+                        while k < eol:
+                            if (
+                                not quoted
+                                and chars[k] == "$"
+                                and k + 1 < n
+                                and chars[k + 1] == "("
+                            ):
+                                depth = 0
+                                p = k
+                                while p < eol:
+                                    if chars[p] == "(":
+                                        depth += 1
+                                    elif chars[p] == ")":
+                                        depth -= 1
+                                        if depth == 0:
+                                            break
+                                    p += 1
+                                k = (p + 1) if p < eol else eol
+                            elif not quoted and chars[k] == "`":
+                                p = k + 1
+                                while p < eol and chars[p] != "`":
+                                    p += 1
+                                k = (p + 1) if p < eol else eol
+                            else:
+                                chars[k] = " "
+                            k += 1
+                        body = eol + 1
+                        if terminator or eol >= n:
+                            break
+            i += 2
+            continue
+        if ch == '"':
+            # An all-digit quoted span is an argument (`--max-depth "3"`),
+            # not data: keep the digits visible for bound detection.
+            j = i + 1
+            while j < n and chars[j].isascii() and chars[j].isdigit():
+                j += 1
+            if j > i + 1 and j < n and chars[j] == '"':
+                chars[i] = " "
+                chars[j] = " "
+                i = j + 1
+                continue
+            # A span that starts with a home expansion is a path argument:
+            # keep the whole span live so the expansion is never split into
+            # its own token (the positional pattern-skip in the segment
+            # scanner keeps quoted patterns from counting as roots).
+            if _starts_with_home_expansion(chars, i + 1):
+                j = i + 1
+                while j < n and chars[j] != '"':
+                    j += 1
+                chars[i] = " "
+                if j < n:
+                    chars[j] = " "
+                i = j + 1
+                continue
+            chars[i] = " "
+            i += 1
+            while i < n and chars[i] != '"':
+                if chars[i] == "\\" and i + 1 < n:
+                    # Escapes inside double quotes are literal data, including
+                    # an escaped \$HOME.
+                    chars[i] = " "
+                    chars[i + 1] = " "
+                    i += 2
+                elif chars[i] == "$" and i + 1 < n and chars[i + 1] == "(":
+                    depth = 0
+                    j = i
+                    while j < n:
+                        if chars[j] == "(":
+                            depth += 1
+                        elif chars[j] == ")":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        j += 1
+                    i = (j + 1) if j < n else n
+                elif chars[i] == "`":
+                    i += 1
+                    while i < n and chars[i] != "`":
+                        i += 1
+                    i += 1
+                else:
+                    chars[i] = " "
+                    i += 1
+            if i < n:
+                chars[i] = " "  # closing quote
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or chars[i - 1].isspace()):
+            while i < n and chars[i] != "\n":
+                chars[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(chars)
 
 
 def _segments_contain_unbounded_scan(masked: str) -> bool:
@@ -230,7 +351,18 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
                 continue
         elif tokens[0] not in ("rg", "find"):
             continue
-        if not any(_is_home_scale_root(t) for t in tokens[1:]):
+        # grep-family and rg take their pattern as the first non-option
+        # argument: when another non-option argument follows, the first is
+        # pattern text, not a scan root — a quoted pattern containing $HOME
+        # (`grep -rl "$HOME/needle" src/`) must not count as a home root.
+        root_tokens = tokens[1:]
+        if tokens[0] in ("grep", "egrep", "fgrep", "rg"):
+            non_option = [k for k, t in enumerate(root_tokens) if not t.startswith("-")]
+            if len(non_option) > 1:
+                root_tokens = (
+                    root_tokens[: non_option[0]] + root_tokens[non_option[0] + 1 :]
+                )
+        if not any(_is_home_scale_root(t) for t in root_tokens):
             continue
         if _is_depth_bound(tokens[1:]):
             continue
