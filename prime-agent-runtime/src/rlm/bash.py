@@ -412,8 +412,11 @@ def _mask_scan_literals(command: str) -> str:
                         backtick = True
                         k += 1
                     else:
-                        if c in (";", "&", "|", "\n"):
-                            chars[k] = " "
+                        # Quoted separators and spaces are data: replace them
+                        # with the non-whitespace placeholder so the span
+                        # stays ONE token.
+                        if c.isspace():
+                            chars[k] = MASK_PLACEHOLDER
                         k += 1
                 chars[i] = " "
                 if close < n:

@@ -1613,6 +1613,9 @@ class ScanCostGuardTest(unittest.TestCase):
         # Substitution bodies are masked in the parent (round 13).
         self.assertFalse(is_scan("echo \"$(printf '%s' 'x; find ~/Documents')\"; sleep 120"))
         self.assertTrue(is_scan("echo \"$(grep -rl 'needle' ~/Documents)\""))
+        # A quoted multi-home pattern stays one token (round 14).
+        self.assertFalse(is_scan('grep -rl "$HOME/a|$HOME/b" src/'))
+        self.assertTrue(is_scan('grep -rl needle "$HOME/docs with spaces"'))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

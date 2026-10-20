@@ -850,8 +850,12 @@ fn mask_scan_literals(command: &str) -> String {
                         backtick = true;
                         k += 1;
                     } else {
-                        if matches!(c, ';' | '&' | '|' | '\n') {
-                            chars[k] = ' ';
+                        // Quoted separators and spaces are data: replace them
+                        // with the non-whitespace placeholder so the span
+                        // stays ONE token (`"$HOME/a|$HOME/b"` never splits
+                        // into a root-looking fragment).
+                        if c.is_whitespace() {
+                            chars[k] = MASK_PLACEHOLDER;
                         }
                         k += 1;
                     }
@@ -1733,6 +1737,21 @@ mod tests {
         // The body itself is still scanned with its own masking.
         assert!(is_unbounded_home_scan(
             "echo \"$(grep -rl 'needle' ~/Documents)\"",
+            None
+        ));
+    }
+
+    /// Regression coverage for the fourteenth bot-review round: a quoted
+    /// multi-home pattern stays one token; a quoted root with spaces still
+    /// warns.
+    #[test]
+    fn home_spans_stay_single_tokens() {
+        assert!(!is_unbounded_home_scan(
+            "grep -rl \"$HOME/a|$HOME/b\" src/",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle \"$HOME/docs with spaces\"",
             None
         ));
     }
