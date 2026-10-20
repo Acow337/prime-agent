@@ -1533,6 +1533,18 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan('grep -rl needle "$HOME"'))
         self.assertFalse(is_scan('grep -rl needle "$HOMEDIR"'))
         self.assertTrue(is_scan('grep -rl needle "#" ~/Documents'))
+        # Heredoc bodies are input text; substitution bodies run in a subshell
+        # (bot review round 3).
+        self.assertFalse(
+            is_scan("cat >example.sh <<'EOF'\ngrep -rl needle ~/Documents\nEOF")
+        )
+        self.assertFalse(is_scan("cat <<EOF\ngrep -rl needle ~/Documents\nEOF\necho done"))
+        self.assertTrue(is_scan('echo "$(grep -rl needle ~/Documents)"'))
+        self.assertTrue(is_scan("files=$(grep -rl needle ~/Documents); echo $files"))
+        self.assertTrue(is_scan('echo "before $(grep -rl needle ~/Documents) after"'))
+        self.assertFalse(is_scan('rg --max-depth "3" needle ~/Documents'))
+        self.assertFalse(is_scan("find ~/Documents -maxdepth '2'"))
+        self.assertFalse(is_scan("echo $((1<<2))"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

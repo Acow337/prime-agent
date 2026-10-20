@@ -560,11 +560,12 @@ fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
         || token.strip_prefix("-d").is_some_and(is_number)
 }
 
-/// Mask single-quoted spans, double-quoted literal data, and unquoted
-/// comments. Double quotes still expand `$HOME`/`${HOME}` and run command
-/// substitution, so inside a double-quoted span only those stay visible:
-/// `find "$HOME/Documents"` is a home-scale scan, but `"grep -rl needle
-/// ~/Documents"` (quoted literal data, including a quoted `|` or `~`) is not.
+/// Mask single-quoted spans, double-quoted literal data, unquoted comments,
+/// and heredoc bodies. Double quotes still expand `$HOME`/`${HOME}` and run
+/// command substitution, so inside a double-quoted span only those stay
+/// visible, plus all-digit spans (a quoted `--max-depth "3"` argument is a
+/// bound, not data). Heredoc bodies are input text, never executed, so the
+/// whole body through the delimiter line is masked.
 fn mask_scan_literals(command: &str) -> String {
     let mut chars: Vec<char> = command.chars().collect();
     let len = chars.len();
@@ -572,6 +573,18 @@ fn mask_scan_literals(command: &str) -> String {
     while i < len {
         let ch = chars[i];
         if ch == '\'' {
+            // An all-digit quoted span is an argument (`-maxdepth '2'`), not
+            // data: keep the digits visible for bound detection.
+            let mut j = i + 1;
+            while j < len && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && chars.get(j) == Some(&'\'') {
+                chars[i] = ' ';
+                chars[j] = ' ';
+                i = j + 1;
+                continue;
+            }
             let mut j = i + 1;
             while j < len && chars[j] != '\'' {
                 chars[j] = ' ';
@@ -583,7 +596,71 @@ fn mask_scan_literals(command: &str) -> String {
             i = j + 1;
             continue;
         }
+        if ch == '<'
+            && chars.get(i + 1) == Some(&'<')
+            && chars.get(i + 2) != Some(&'<')
+            && (i == 0 || chars[i - 1].is_whitespace())
+        {
+            // Heredoc `<<[-]DELIM`: the body until the delimiter line is
+            // input text, never executed, so mask it. The rest of the
+            // heredoc-start line stays live command text.
+            let mut j = i + 2;
+            let mut tabbed = false;
+            if chars.get(j) == Some(&'-') {
+                tabbed = true;
+                j += 1;
+            }
+            let mut word = String::new();
+            while j < len && !chars[j].is_whitespace() {
+                word.push(chars[j]);
+                j += 1;
+            }
+            let delim = word.trim_matches(|c| c == '\'' || c == '"');
+            if !delim.is_empty() {
+                let mut body = j;
+                while body < len && chars[body] != '\n' {
+                    body += 1;
+                }
+                if body < len {
+                    body += 1; // first char of the body
+                    loop {
+                        let mut eol = body;
+                        while eol < len && chars[eol] != '\n' {
+                            eol += 1;
+                        }
+                        let mut start = body;
+                        if tabbed {
+                            while start < eol && chars[start] == '\t' {
+                                start += 1;
+                            }
+                        }
+                        let terminator = chars[start..eol].iter().collect::<String>() == delim;
+                        for c in &mut chars[body..eol] {
+                            *c = ' ';
+                        }
+                        body = eol + 1;
+                        if terminator || eol >= len {
+                            break;
+                        }
+                    }
+                }
+            }
+            i += 2;
+            continue;
+        }
         if ch == '"' {
+            // An all-digit quoted span is an argument (`--max-depth "3"`),
+            // not data: keep the digits visible for bound detection.
+            let mut j = i + 1;
+            while j < len && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && chars.get(j) == Some(&'"') {
+                chars[i] = ' ';
+                chars[j] = ' ';
+                i = j + 1;
+                continue;
+            }
             chars[i] = ' ';
             i += 1;
             while i < len && chars[i] != '"' {
@@ -673,8 +750,66 @@ pub(crate) fn is_unbounded_home_scan(command: &str, tool_timeout: Option<f64>) -
     if tool_timeout.is_some_and(|t| t > 0.0) {
         return false;
     }
+    scan_command_text(command)
+}
+
+/// Scan-detect on the masked command plus every command-substitution body:
+/// `echo "$(grep -rl needle ~/Documents)"` runs the scan in a subshell, so a
+/// substitution body is a command too (and so are its own substitutions).
+fn scan_command_text(command: &str) -> bool {
     let masked = mask_scan_literals(command);
-    for segment in split_on_separators(&masked) {
+    if segments_contain_unbounded_scan(&masked) {
+        return true;
+    }
+    substitution_bodies(&masked)
+        .into_iter()
+        .any(|body| scan_command_text(&body))
+}
+
+/// Bodies of `$(...)` spans (paren-depth matched) and backticks in a masked
+/// command: these execute, so their text is command text.
+fn substitution_bodies(masked: &str) -> Vec<String> {
+    let chars: Vec<char> = masked.chars().collect();
+    let len = chars.len();
+    let mut bodies = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') {
+            let mut depth = 0i32;
+            let mut j = i + 1;
+            while j < len {
+                if chars[j] == '(' {
+                    depth += 1;
+                } else if chars[j] == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        let body: String = chars[i + 2..j].iter().collect();
+                        if !body.trim().is_empty() {
+                            bodies.push(body);
+                        }
+                        i = j;
+                        break;
+                    }
+                }
+                j += 1;
+            }
+        } else if chars[i] == '`' {
+            if let Some(j) = chars[i + 1..].iter().position(|&c| c == '`') {
+                let end = i + 1 + j;
+                let body: String = chars[i + 1..end].iter().collect();
+                if !body.trim().is_empty() {
+                    bodies.push(body);
+                }
+                i = end;
+            }
+        }
+        i += 1;
+    }
+    bodies
+}
+
+fn segments_contain_unbounded_scan(masked: &str) -> bool {
+    for segment in split_on_separators(masked) {
         let tokens = split_ws(segment.trim());
         let Some((first, rest)) = tokens.split_first() else {
             continue;
@@ -722,8 +857,14 @@ pub(crate) fn scan_timeout_from_env(
     env.get(SCAN_TIMEOUT_ENV)
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|secs| {
-            // `Duration::from_secs_f64` panics on values it cannot represent.
-            *secs > 0.0 && std::time::Duration::try_from_secs_f64(*secs).is_ok()
+            // `Duration::from_secs_f64` panics on values it cannot represent,
+            // and `Instant::now() + duration` (the executor's deadline) panics
+            // when the deadline cannot be represented on this platform
+            // (Windows QPC ticks, macOS/Linux tv_sec) — reject both here so
+            // only a usable timeout ever reaches the executor.
+            *secs > 0.0
+                && std::time::Duration::try_from_secs_f64(*secs)
+                    .is_ok_and(|duration| std::time::Instant::now().checked_add(duration).is_some())
         })
 }
 
@@ -927,6 +1068,47 @@ mod tests {
         );
     }
 
+    /// Regression coverage for the third bot-review round: heredoc bodies are
+    /// input text (never executed by the shell), command-substitution bodies
+    /// run in a subshell, and quoted numeric arguments are bounds, not data.
+    #[test]
+    fn heredoc_bodies_and_substitutions_scan_correctly() {
+        // A heredoc body is input data, not a command: no warning, so the
+        // opted-in scan timeout cannot kill an unrelated `cat` either.
+        assert!(!is_unbounded_home_scan(
+            "cat >example.sh <<'EOF'\ngrep -rl needle ~/Documents\nEOF",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "cat <<EOF\ngrep -rl needle ~/Documents\nEOF\necho done",
+            None
+        ));
+        // A scan inside a command substitution runs in a subshell: it warns.
+        assert!(is_unbounded_home_scan(
+            "echo \"$(grep -rl needle ~/Documents)\"",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "files=$(grep -rl needle ~/Documents); echo $files",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "echo \"before $(grep -rl needle ~/Documents) after\"",
+            None
+        ));
+        // Quoted numeric depth arguments are bounds, not data.
+        assert!(!is_unbounded_home_scan(
+            "rg --max-depth \"3\" needle ~/Documents",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "find ~/Documents -maxdepth '2'",
+            None
+        ));
+        // Arithmetic shifts are not heredocs.
+        assert!(!is_unbounded_home_scan("echo $((1<<2))", None));
+    }
+
     #[test]
     fn scan_timeout_env_parses_only_positive_seconds() {
         let env = |v: &str| {
@@ -942,6 +1124,10 @@ mod tests {
         // A duration `Duration::from_secs_f64` cannot represent must not
         // reach the executor (it would panic instead of timing out).
         assert_eq!(env("1e30"), None);
+        // A duration whose deadline `Instant::now() + duration` cannot
+        // represent must not reach the executor either (checked_add fails on
+        // every platform for this value; smaller values are platform-bound).
+        assert_eq!(env("1e19"), None);
         assert_eq!(
             scan_timeout_from_env(&std::collections::HashMap::new()),
             None

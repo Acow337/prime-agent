@@ -149,17 +149,49 @@ def _is_depth_bound(tokens: list[str]) -> bool:
     return False
 
 
-def _is_unbounded_home_scan(command: str) -> bool:
-    """True for the unbounded-scan shape; mirrors the Rust bash_guard rule.
+def _mask_heredoc_bodies(command: str) -> str:
+    """Heredoc bodies are input text, never executed: blank the body lines
+    (through the delimiter line) before scan detection, mirroring the Rust
+    guard. The heredoc-start line itself stays live command text."""
+    lines = command.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.search(r"<<-?([\"']?)([^\s\"';&|)]+)\1", line)
+        if m and (
+            m.start() == 0 or line[m.start() - 1].isspace()
+        ) and not m.group(2).startswith("<"):
+            out.append(line)
+            delim = m.group(2)
+            tabbed = m.group(0).startswith("<<-")
+            i += 1
+            while i < len(lines):
+                body = lines[i]
+                stripped = body.lstrip("\t") if tabbed else body
+                out.append("")  # body lines are data
+                done = stripped == delim
+                i += 1
+                if done:
+                    break
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
 
-    Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
-    root, with no `timeout` prefix and no --max-depth/-maxdepth bound.
-    Single-quoted spans, double-quoted literal data, and unquoted comments
-    are masked first so they cannot masquerade as a scan; only the parts bash
-    actually executes or expands inside double quotes ($HOME, $(...)) stay
-    visible (the same rule as the Rust guard).
-    """
-    command = re.sub(r"'[^']*'", " ", command)
+
+def _mask_scan_literals(command: str) -> str:
+    """Mask quoted literal data, heredoc bodies, and comments so they cannot
+    masquerade as a scan. Only the parts bash actually executes or expands
+    stay visible: all-digit quoted arguments (a depth bound like
+    `--max-depth "3"`), `$HOME`/`${HOME}`, `$(...)`, and backticks (the same
+    rules as the Rust guard)."""
+    command = _mask_heredoc_bodies(command)
+    command = re.sub(
+        r"'([^']*)'",
+        lambda m: m.group(1) if m.group(1).isdigit() else " ",
+        command,
+    )
 
     def _mask_double_quoted_span(m: "re.Match[str]") -> str:
         # Double quotes expand $HOME/${HOME} and run $(...) and backticks; the
@@ -167,6 +199,8 @@ def _is_unbounded_home_scan(command: str) -> bool:
         # quoted pipe or quoted scan text cannot shape the scanner (the same
         # rule as the Rust guard).
         span = m.group(0)
+        if span[1:-1].isdigit():
+            return span[1:-1]
         pieces = []
         last = 0
         for live in re.finditer(r"\$HOME(?!\w)|\$\{HOME\}|\$\([^)]*\)|`[^`]*`", span):
@@ -178,7 +212,12 @@ def _is_unbounded_home_scan(command: str) -> bool:
 
     command = re.sub(r'"[^"]*"', _mask_double_quoted_span, command)
     command = re.sub(r"(?:^|(?<=\s))#.*$", " ", command, flags=re.MULTILINE)
-    for segment in re.split(r"&&|\|\||;|\||\n", command):
+    return command
+
+
+def _segments_contain_unbounded_scan(masked: str) -> bool:
+    """True when any segment of the masked command is an unbounded scan."""
+    for segment in re.split(r"&&|\|\||;|\||\n", masked):
         tokens = segment.split()
         if not tokens or tokens[0] == "timeout":
             continue
@@ -197,6 +236,51 @@ def _is_unbounded_home_scan(command: str) -> bool:
             continue
         return True
     return False
+
+
+def _substitution_bodies(masked: str) -> list[str]:
+    """Bodies of $(...) spans (paren-depth matched) and backticks: these
+    execute, so their text is command text."""
+    bodies: list[str] = []
+    i = 0
+    while i < len(masked):
+        if masked[i] == "$" and i + 1 < len(masked) and masked[i + 1] == "(":
+            depth = 0
+            j = i + 1
+            while j < len(masked):
+                if masked[j] == "(":
+                    depth += 1
+                elif masked[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j < len(masked):
+                bodies.append(masked[i + 2 : j])
+                i = j
+        elif masked[i] == "`":
+            j = masked.find("`", i + 1)
+            if j != -1:
+                bodies.append(masked[i + 1 : j])
+                i = j
+        i += 1
+    return bodies
+
+
+def _is_unbounded_home_scan(command: str) -> bool:
+    """True for the unbounded-scan shape; mirrors the Rust bash_guard rule.
+
+    Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
+    root, with no `timeout` prefix and no --max-depth/-maxdepth bound.
+    Quoted literal data, heredoc bodies, and comments are masked first so
+    they cannot masquerade as a scan; command-substitution bodies run in a
+    subshell, so they are scanned as commands too (the same rules as the
+    Rust guard).
+    """
+    masked = _mask_scan_literals(command)
+    if _segments_contain_unbounded_scan(masked):
+        return True
+    return any(_is_unbounded_home_scan(b) for b in _substitution_bodies(masked))
 
 
 def _note_scan_cost(command: str) -> None:
