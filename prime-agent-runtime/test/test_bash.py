@@ -1489,5 +1489,44 @@ async def _poll_journal(path: str, count: int, timeout: float = 2.0) -> list[dic
     return records
 
 
+class ScanCostGuardTest(unittest.TestCase):
+    """Kernel-side parity of the Rust bash_guard scan-cost warning."""
+
+    INCIDENT = (
+        "grep -rli -e 'training metrics' -e 'advanced dashboard' "
+        "~/Documents ~/Desktop ~/Claude ~/environments ~/outputs ~/Downloads "
+        "2>/dev/null | grep -viE '\.(pdf|jsonl|log|txt)$' | head -10; echo done"
+    )
+
+    def test_scan_shape_mirrors_the_rust_guard(self):
+        is_scan = bash_module._is_unbounded_home_scan
+        # The incident command warns; `| head` is an output cap, not a bound.
+        self.assertTrue(is_scan(self.INCIDENT))
+        self.assertTrue(is_scan("grep -rl needle ~/Documents | head -10"))
+        self.assertTrue(is_scan("rg pattern ~/Documents"))
+        self.assertTrue(is_scan("find ~/Downloads -name '*.pdf'"))
+        # Time and depth bounds, and project-local scans, do not.
+        self.assertFalse(is_scan("timeout 60 grep -rl needle ~/Documents"))
+        self.assertFalse(is_scan("rg --max-depth 3 pattern ~/Downloads"))
+        self.assertFalse(is_scan("find ~/Documents -maxdepth 2 -name '*.pdf'"))
+        self.assertFalse(is_scan("grep -rli pattern ."))
+        self.assertFalse(is_scan("grep -rl pattern src/ crates/"))
+        self.assertFalse(is_scan("rg pattern ."))
+        # Quoted data cannot masquerade as a scan.
+        self.assertFalse(is_scan("echo 'grep -r pattern ~/Documents'"))
+
+    def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
+        with (
+            mock.patch.object(bash_module, "_scan_hints_written", 0),
+            mock.patch("sys.stderr", new=io.StringIO()) as err,
+        ):
+            for _ in range(4):
+                bash_module._note_scan_cost("grep -rl needle ~/Documents")
+            bash_module._note_scan_cost("grep -rl needle .")
+        self.assertEqual(err.getvalue().count("unbounded"), 3)
+        self.assertIn("timeout 60", err.getvalue())
+        self.assertIn("background it", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

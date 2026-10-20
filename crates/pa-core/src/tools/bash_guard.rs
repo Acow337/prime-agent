@@ -519,3 +519,264 @@ pub(crate) fn format_dirty_tree_refusal(
     ));
     lines.join("\n")
 }
+
+/// Env var opt-in: seconds for the auto-timeout applied to matching unbounded
+/// scans; unset or non-positive means off (the scan still runs, only warned).
+pub(crate) const SCAN_TIMEOUT_ENV: &str = "PRIME_AGENT_SCAN_TIMEOUT";
+
+/// A home-scale scan root: `~`-rooted paths and `$HOME` walk the user's whole
+/// home tree, so a recursive scan there costs minutes, not milliseconds.
+fn is_home_scale_root(token: &str) -> bool {
+    token.starts_with('~') || token.starts_with("$HOME") || token.starts_with("${HOME")
+}
+
+/// True when a depth bound appears: rg's `--max-depth`/`-d N`, find's `-maxdepth`.
+fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
+    let lower = token.to_ascii_lowercase();
+    lower.contains("max-depth")
+        || lower.contains("maxdepth")
+        || (lower == "-d"
+            && next.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+        || (lower.starts_with("-d")
+            && lower.len() > 2
+            && lower[2..].chars().all(|c| c.is_ascii_digit()))
+}
+
+/// True when `command` runs a recursive scan (grep -r, rg, find) over a
+/// home-scale root with no bound: no tool timeout, no `timeout` prefix, and no
+/// depth limit. Output caps (`| head`) never bound scan time — a no-match scan
+/// still walks every file — so this is the incident shape: a recursive grep
+/// over six home-scale directories piped to `head` held a turn for 13 minutes.
+/// The bash tool call is awaited inline by the agent loop, so an unbounded
+/// scan stalls the whole turn; callers warn (never block), because searches
+/// are legitimate.
+pub(crate) fn is_unbounded_home_scan(command: &str, tool_timeout: Option<f64>) -> bool {
+    if tool_timeout.is_some() {
+        return false;
+    }
+    let masked: String = mask_quoted_spans(command).into_iter().collect();
+    for segment in split_on_separators(&masked) {
+        let tokens = split_ws(segment.trim());
+        let Some((first, rest)) = tokens.split_first() else {
+            continue;
+        };
+        if *first == "timeout" {
+            continue; // bounded by the timeout(1) prefix
+        }
+        let rest: &[&str] = match *first {
+            "grep" | "egrep" | "fgrep" => {
+                let recursive = rest.iter().any(|t| {
+                    t.starts_with("--recursive")
+                        || (t.starts_with('-')
+                            && !t.starts_with("--")
+                            && t.len() > 1
+                            && t.to_ascii_lowercase().contains('r'))
+                });
+                if recursive {
+                    rest
+                } else {
+                    continue;
+                }
+            }
+            // rg and find recurse by default.
+            "rg" | "find" => rest,
+            _ => continue,
+        };
+        if !rest.iter().any(|t| is_home_scale_root(t)) {
+            continue; // project-local scans are bounded by the tree size
+        }
+        let bounded = rest
+            .iter()
+            .enumerate()
+            .any(|(i, t)| is_depth_bound_token(t, rest.get(i + 1).copied()));
+        if !bounded {
+            return true;
+        }
+    }
+    false
+}
+
+/// The opted-in auto-timeout for matching scans from the environment, if set.
+pub(crate) fn scan_timeout_from_env(
+    env: &std::collections::HashMap<String, String>,
+) -> Option<f64> {
+    env.get(SCAN_TIMEOUT_ENV)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|secs| *secs > 0.0)
+}
+
+/// The scan-cost warning: names the fix, never blocks the search.
+pub(crate) fn format_scan_cost_warning(auto_timeout: Option<f64>) -> String {
+    let base = "Warning: this recursive scan of home-scale directories is unbounded in time; output caps (like `| head`) do not bound scan time. Add `timeout 60 ...`, a depth bound (`--max-depth` for rg, `-maxdepth` for find), or scan a narrower directory.";
+    match auto_timeout {
+        Some(secs) => {
+            format!("{base} A {SCAN_TIMEOUT_ENV} scan timeout of {secs}s applies to this command.")
+        }
+        None => base.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The incident command (session 01a15735): a recursive grep over six
+    /// home-scale trees piped to `head`, held a turn for 13 minutes.
+    const INCIDENT: &str = r"grep -rli -e 'training metrics' -e 'advanced dashboard' ~/Documents ~/Desktop ~/Claude ~/environments ~/outputs ~/Downloads 2>/dev/null | grep -viE '\.(pdf|jsonl|log|txt)$' | head -10; echo done";
+
+    #[test]
+    fn the_incident_scan_shape_warns() {
+        assert!(is_unbounded_home_scan(INCIDENT, None));
+        // `| head` is an output cap, not a scan bound: it still warns.
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle ~/Documents | head -10",
+            None
+        ));
+    }
+
+    #[test]
+    fn time_or_depth_bounds_suppress_the_warning() {
+        assert!(!is_unbounded_home_scan(
+            "timeout 60 grep -rli -e 'training metrics' ~/Documents",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "grep -rli -e 'training metrics' ~/Documents",
+            Some(60.0)
+        ));
+        assert!(!is_unbounded_home_scan(
+            "rg --max-depth 3 pattern ~/Downloads",
+            None
+        ));
+        assert!(!is_unbounded_home_scan("rg -d 2 pattern ~/Downloads", None));
+        assert!(!is_unbounded_home_scan(
+            "find ~/Documents -maxdepth 2 -name '*.pdf'",
+            None
+        ));
+    }
+
+    #[test]
+    fn project_local_and_quoted_scans_do_not_warn() {
+        assert!(!is_unbounded_home_scan(
+            "grep -rli pattern . | head -10",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "grep -rl pattern src/ crates/",
+            None
+        ));
+        assert!(!is_unbounded_home_scan("rg pattern .", None));
+        assert!(!is_unbounded_home_scan("find . -name '*.log'", None));
+        // Quoted data and comments never masquerade as scans.
+        assert!(!is_unbounded_home_scan(
+            "echo 'grep -r pattern ~/Documents'",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "grep -rl pattern src # scan ~/Documents",
+            None
+        ));
+    }
+
+    #[test]
+    fn unflagged_grep_stays_quiet_but_default_recursive_scanners_warn() {
+        assert!(!is_unbounded_home_scan("grep -l pattern ~/Documents", None));
+        assert!(is_unbounded_home_scan(
+            "find ~/Downloads -name '*.pdf'",
+            None
+        ));
+        assert!(is_unbounded_home_scan("rg pattern ~/Documents", None));
+    }
+
+    #[test]
+    fn scan_timeout_env_parses_only_positive_seconds() {
+        let env = |v: &str| {
+            let mut env = std::collections::HashMap::new();
+            env.insert(SCAN_TIMEOUT_ENV.to_string(), v.to_string());
+            scan_timeout_from_env(&env)
+        };
+        assert_eq!(env("30"), Some(30.0));
+        assert_eq!(env("0.5"), Some(0.5));
+        assert_eq!(env("0"), None);
+        assert_eq!(env("-5"), None);
+        assert_eq!(env("abc"), None);
+        assert_eq!(
+            scan_timeout_from_env(&std::collections::HashMap::new()),
+            None
+        );
+    }
+
+    /// Runs the real tool: the incident shape carries the warning on the
+    /// model-facing text, project-local scans do not, and the opted-in
+    /// `PRIME_AGENT_SCAN_TIMEOUT` bounds the command. Mutates process env, so
+    /// it runs as one sequential test (the golden env-bypass convention).
+    #[tokio::test]
+    async fn execute_bash_warns_on_unbounded_scans_and_env_timeouts_them() {
+        use crate::tools::bash::{execute_bash, BashToolOptions};
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+
+        // The warning rides the failing result; the search itself still ran.
+        let result = execute_bash(
+            &cwd_path,
+            &BashToolOptions::default(),
+            "grep -rl needle ~/pa-scan-guard-nonexistent-xyz 2>/dev/null",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let err = result.expect_err("the missing scan root must fail");
+        assert!(
+            err.to_string()
+                .contains("Warning: this recursive scan of home-scale directories"),
+            "no scan warning on: {err}"
+        );
+
+        // A project-local scan carries no warning.
+        std::fs::write(cwd.path().join("a.txt"), "needle").expect("write fixture");
+        let result = execute_bash(
+            &cwd_path,
+            &BashToolOptions::default(),
+            "grep -rl needle .",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("project-local grep");
+        let text = result.content[0].as_text().expect("text block");
+        assert!(text.contains("a.txt"), "grep -l output lost: {text}");
+        assert!(
+            !text.contains("Warning: this recursive scan"),
+            "unexpected warning on project-local scan: {text}"
+        );
+
+        // The opt-in env applies its timeout to the matching command and the
+        // warning names it.
+        std::env::set_var(SCAN_TIMEOUT_ENV, "0.5");
+        let result = execute_bash(
+            &cwd_path,
+            &BashToolOptions::default(),
+            "grep -rl needle ~/pa-scan-guard-nonexistent-xyz 2>/dev/null || sleep 2",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        std::env::remove_var(SCAN_TIMEOUT_ENV);
+        let err = result.expect_err("the scan timeout must fire");
+        assert!(
+            err.to_string().contains("scan timeout of 0.5s"),
+            "warning must name the applied scan timeout: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("Command timed out after 0.5 seconds"),
+            "the env timeout must bound the command: {err}"
+        );
+    }
+}

@@ -7,6 +7,7 @@ import atexit
 import functools
 import json
 import os
+import re
 import secrets
 import selectors
 import shutil
@@ -105,6 +106,62 @@ def _note_degrade(handle: "BashHandle") -> None:
         "returned a snapshot: r.running is True, r.output is the output so "
         "far, r.handle is the live handle. End the turn — a [bash-done] "
         "notification arrives when it finishes.\n"
+    )
+
+
+# Scan-cost guard (parity with the Rust bash_guard, crates/pa-core
+# src/tools/bash_guard.rs): a recursive scan over home-scale roots with no
+# time or depth bound is unbounded in time — output caps (`| head`) never
+# bound how long a no-match scan walks. The Rust tool call is awaited inline
+# by the agent loop; bash() cannot know at dispatch whether the cell will
+# await the handle inline, so the kernel-side surface teaches at dispatch
+# with a budgeted stderr hint and the command still runs (searches are
+# legitimate, the kernel's own await is already bounded by yield_after).
+_MAX_SCAN_HINTS = 3
+_scan_hints_written = 0
+
+
+def _is_unbounded_home_scan(command: str) -> bool:
+    """True for the unbounded-scan shape; mirrors the Rust bash_guard rule.
+
+    Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
+    root, with no `timeout` prefix and no --max-depth/-maxdepth bound. Quoted
+    data is masked first so it cannot masquerade as a scan.
+    """
+    for segment in re.split(r"&&|\|\||;|\||\n", command):
+        segment = re.sub(r"'[^']*'|\"[^\"]*\"", " ", segment)
+        tokens = segment.split()
+        if not tokens or tokens[0] == "timeout":
+            continue
+        if tokens[0] in ("grep", "egrep", "fgrep"):
+            if not any(
+                t.startswith("--recursive")
+                or (t.startswith("-") and not t.startswith("--") and "r" in t.lower())
+                for t in tokens[1:]
+            ):
+                continue
+        elif tokens[0] not in ("rg", "find"):
+            continue
+        if not any(t.startswith(("~", "$HOME", "${HOME")) for t in tokens[1:]):
+            continue
+        if any("max-depth" in t.lower() or "maxdepth" in t.lower() for t in tokens[1:]):
+            continue
+        return True
+    return False
+
+
+def _note_scan_cost(command: str) -> None:
+    """Write the scan-cost hint to the dispatching cell's stderr, within budget."""
+    global _scan_hints_written
+    if _scan_hints_written >= _MAX_SCAN_HINTS or not _is_unbounded_home_scan(command):
+        return
+    _scan_hints_written += 1
+    sys.stderr.write(
+        "bash: this recursive scan of home-scale directories is unbounded "
+        "in time; output caps (| head) do not bound scan time, and "
+        "awaiting it inline can stall the turn. Wrap it in `timeout 60 "
+        "...`, add --max-depth / -maxdepth, or background it and end the "
+        "turn.\n"
     )
 
 
@@ -1134,6 +1191,7 @@ def bash(command: str, yield_after: float | None = None) -> BashHandle:
         raise TypeError("command must be a non-empty str")
     if yield_after is not None and yield_after <= 0:
         raise ValueError("yield_after must be a positive number of seconds")
+    _note_scan_cost(command)
     _install_shutdown_hook()
     handle = BashHandle(command, _effective_yield_after(yield_after))
     from . import repl
