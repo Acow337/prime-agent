@@ -1393,7 +1393,7 @@ fn an_inactive_node_shows_its_live_persistent_shells() {
         json!({ "id": "gone", "path": "/x/gone.jsonl", "messageCount": 2 }),
         json!({ "id": "live", "path": "/x/live.jsonl", "messageCount": 2 }),
     ];
-    let records = reconcile_unified_sessions(&roster, &saved);
+    let records = reconcile_unified_sessions(&roster, &saved, None);
     let persistent = |shells| ShellCounts {
         running: shells,
         persistent: shells,
