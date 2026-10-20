@@ -374,6 +374,36 @@ async fn agent_watch_register_rejects_unknown_child() {
     assert_eq!(error.to_string(), "No direct child matches \"ghost\"");
 }
 
+/// The register-time baseline snapshot is bounded by the registry's
+/// snapshot timeout, not the 30s `STATE_TIMEOUT_MS`: a dead link must
+/// not park the kernel's `rlm.watch.agent` call (a wait-only entry
+/// state does that snapshot inside `run()`). **Mutation check:** drop
+/// the timeout wrap and the register blocks on the blocked `get_state`
+/// for the full `STATE_TIMEOUT_MS`, failing the elapsed bound.
+#[tokio::test]
+async fn agent_watch_register_snapshots_a_dead_link_within_the_bounded_slice() {
+    let (sessions, _follow_up_rx, state) = quick_watch_sessions().await;
+    sessions
+        .inner
+        .agent_watch
+        .lock()
+        .await
+        .set_snapshot_timeout_ms(50);
+    push_child(&sessions, "sub-dead", "live-dead").await;
+    state.block("live-dead");
+    let started = std::time::Instant::now();
+    let watch = sessions
+        .watch_agent("sub-dead".to_string())
+        .await
+        .expect("a blocked child registers baseline-less inside the slice");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the register must not wait the 30s STATE_TIMEOUT_MS on a dead link"
+    );
+    assert_eq!(watch.status, "active");
+    assert_eq!(watch.messages, 0);
+}
+
 /// Cancel is idempotent (`false` the second time) and published events
 /// stay readable after the cancel (nano-rlm: "published inbox events
 /// stay readable").

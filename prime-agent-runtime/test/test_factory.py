@@ -7191,7 +7191,19 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # shared-feed state. The short wait's deadline passes by hand.
         self.executor._sleep_fn = turn_sleep
         result = await self.start()
-        await self.wait_until(lambda: len(self.host.calls_of("rlm.watch.agent")) >= 2)
+        run = self.executor._runs[result["run_id"]]
+        await self.wait_until(
+            lambda: all(
+                run.states[sid].entries[0].status == "waiting"
+                for sid in ("wshort", "wlong")
+            )
+        )
+        # The sibling wait reuses the first wait's live subscription: ONE
+        # register call arms both. A second register would re-baseline
+        # the shared feed (fresh baseline, new epoch) and discard growth
+        # the first wait armed for. (Mutating the sibling reuse back to a
+        # re-register fails this pin: the call count becomes 2.)
+        self.assertEqual(len(self.host.calls_of("rlm.watch.agent")), 1)
         self.clock.advance(0.25)
         # Both waits share the child; the short one times out first and
         # must NOT issue the host cancel.
@@ -7223,6 +7235,99 @@ class FactoryExecutorTest(_ExecutorTestCase):
             [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
             ["watch-agent-watched"],
             "the last wait out consumes the shared subscription",
+        )
+
+    @async_test
+    async def test_wait_timeout_applies_the_escalate_failure_policy(self) -> None:
+        # A wait timeout is an entry failure like any other: under the
+        # default escalate the run pauses BEFORE the failed settle
+        # propagates, so the downstream transition never fires and resume
+        # re-admits the wait entry as a fresh attempt. (Mutating the
+        # timeout back to a direct error settle fails this pin: the
+        # dependent runs and the run fails instead of pausing.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                    {"id": "act", "subagent": "worker"},
+                ],
+                "transitions": [{"from": "w1", "to": "act"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        entry = self.node_status(status, "w1")["entries"][0]
+        self.assertEqual(entry["status"], "error")
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("timeout_ms 500 exceeded", timeouts[0]["detail"])
+        self.assertTrue(self.all_events_of(result, "node_error"))
+        # The failed settle never propagated: the dependent never ran.
+        self.assertEqual(self.node_status(status, "act")["status"], "pending")
+        # Resume re-admits the held wait entry as a fresh attempt: the
+        # wait arms again (a second wait_started) and the readmission is
+        # on the ledger.
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        await self.wait_until(lambda: len(self.all_events_of(result, "wait_started")) == 2)
+        self.assertTrue(self.all_events_of(result, "readmitted"))
+        await rlm_module.rlm.factory.stop(result["run_id"])
+
+    @async_test
+    async def test_unreachable_watch_event_fails_the_wait(self) -> None:
+        # The terminal `-> unreachable` event is not growth: the watched
+        # child is dead, and the wait must settle as an error through the
+        # failure policy instead of completing as done and running
+        # downstream transitions on a broken dependency. (Mutating the
+        # unreachable guard back out fails this pin: the wait fires.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        self.host.watch_events.append(
+            {
+                "id": "watch-dead",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {
+                    "target": "watched",
+                    "start": 0,
+                    "end": 0,
+                    "status": {"from": "idle", "to": "unreachable"},
+                },
+                "at_ms": 1,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        entry = self.node_status(status, "w1")["entries"][0]
+        self.assertEqual(entry["status"], "error")
+        self.assertEqual(self.all_events_of(result, "wait_fired"), [])
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("went unreachable", timeouts[0]["detail"])
+        # The dead subscription is released with the entry.
+        self.assertEqual(
+            [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-watched"],
         )
 
     def test_explicit_null_subagent_with_wait_is_rejected(self) -> None:

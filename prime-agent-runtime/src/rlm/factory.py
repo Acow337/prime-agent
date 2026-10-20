@@ -1839,14 +1839,29 @@ class FactoryExecutor:
         ``retries`` budget restarts (``retry_base`` moves to the current
         attempt count). A binding-failure entry has no instances: it
         re-binds through the readiness pass, and a still-broken upstream
-        settles it into the same pause again.
+        settles it into the same pause again. A wait failure holds an
+        entry whose instances are already done: it re-enters through the
+        readiness pass too (a wait-only state re-arms its wait; a wait
+        state with a subagent re-renders a fresh attempt).
         """
         for state_id in run.order:
             state = run.states[state_id]
             for entry in state.entries:
                 if entry.status != "error" or entry.is_settle:
                     continue
-                entry.status = "running" if entry.instances else "pending"
+                # A wait failure (timeout, unreachable, subscribe error) holds
+                # an entry whose instances are already DONE: a fresh attempt
+                # cannot re-run them (the collect pass only collects running
+                # instances, and a running entry with no runnable instance
+                # stalls the loop). Such an entry re-enters through the
+                # readiness pass instead: a wait-only state re-arms its wait,
+                # a wait state with a subagent re-renders a fresh attempt.
+                if entry.instances and all(
+                    instance.status == "done" for instance in entry.instances
+                ):
+                    entry.status = "pending"
+                else:
+                    entry.status = "running" if entry.instances else "pending"
                 entry.error = None
                 entry.needs_verify = False
                 state.error = None
@@ -3072,11 +3087,13 @@ class FactoryExecutor:
     # -- wait states (the rlm.watch.agent lane) ------------------------------
 
     async def _enter_wait(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
-        """Enter the entry's wait: subscribe once, arm the read cursor,
-        and mark the entry ``waiting`` (the control loop's wait pass polls
-        the ring). A failed subscribe settles the entry as an error
-        through the same settle machinery a timeout uses — never a silent
-        no-op."""
+        """Enter the entry's wait: subscribe (or reuse a sibling wait's
+        live subscription on the same target — a second register would
+        re-baseline the shared feed and discard growth the first wait
+        armed for), arm the read cursor, and mark the entry ``waiting``
+        (the control loop's wait pass polls the ring). A failed subscribe
+        settles the entry as an error through the same failure-policy
+        path a timeout uses — never a silent no-op."""
         wait = state.spec.get("wait") or {}
         target = wait.get("target") or ""
         entry.status = "waiting"
@@ -3112,7 +3129,26 @@ class FactoryExecutor:
                 if len(page.get("events") or []) < arm_limit:
                     break
                 cursor = int(page.get("next_seq") or cursor)
-            handle = await watch_agent(target)
+            # A sibling already parked on the same target holds the one
+            # shared subscription live: re-registering would re-baseline
+            # it (fresh snapshot as the new baseline plus an epoch bump),
+            # so growth observed after this entry armed would be discarded
+            # as a stale observation and the earlier wait would miss the
+            # very activity it armed for and time out. Reuse the sibling's
+            # feed instead: every wait fires on the events its own armed
+            # cursor admits, and the cancel ownership rules below keep
+            # holding.
+            sibling_id = next(
+                (
+                    other.wait_subscription_id
+                    for sibling_state, other in self._waiting_entries(run)
+                    if other is not entry
+                    and (sibling_state.spec.get("wait") or {}).get("target") == target
+                    and other.wait_subscription_id
+                ),
+                None,
+            )
+            handle = {"id": sibling_id} if sibling_id else await watch_agent(target)
         except Exception as exc:
             await self._settle_wait_error(
                 run, state, entry, f"wait subscribe on {target!r} failed: {exc}"
@@ -3133,21 +3169,21 @@ class FactoryExecutor:
     async def _settle_wait_error(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, reason: str
     ) -> None:
-        """End a waiting entry as an error settle (subscribe failure or
-        timeout): the entry's instances are already done, so the normal
-        failure machinery has nothing to retry — the settle propagates
-        through transitions like any error settle."""
+        """End a waiting entry as an error (subscribe failure, timeout, or
+        the watched child going unreachable): the entry's instances are
+        already done, so the retry machinery has nothing to re-run — but
+        the state's failure_policy still owns the error like any entry
+        failure. fail_fast halts the run, escalate (the default) pauses
+        it before the failed settle propagates, and continue settles the
+        error so transitions over it run the dependents."""
         await self._cancel_wait_subscription(run, state, entry)
         if entry.status != "waiting":
             # stop() claimed the entry during the awaited cancel: its
             # cancellation (and its node_cancelled event) stands, and no
             # error settle may overwrite it.
             return
-        entry.status = "error"
-        entry.error = reason
-        entry.is_settle = True
         self._event(run, "wait_timeout", node=state.state_id, entry=entry.index, detail=reason)
-        self._queue_settle(run, state, entry)
+        await self._apply_entry_failure_policy(run, state, entry, reason)
 
     async def _cancel_wait_subscription(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
         """Best-effort cancel of the entry's subscription (a run that
@@ -3239,6 +3275,19 @@ class FactoryExecutor:
             if match is not None:
                 content = match.get("content") or {}
                 status = content.get("status")
+                if isinstance(status, dict) and status.get("to") == "unreachable":
+                    # The terminal `-> unreachable` event is not growth:
+                    # the watched child is dead, and completing the wait
+                    # as done would run downstream transitions on a
+                    # broken dependency. The wait settles as an error
+                    # through the failure policy, exactly like a timeout.
+                    await self._settle_wait_error(
+                        run,
+                        state,
+                        entry,
+                        f"watch target {wait.get('target')!r} went unreachable",
+                    )
+                    continue
                 self._event(
                     run,
                     "wait_fired",
@@ -5376,9 +5425,15 @@ the cap, fails to capture, and fails the producing state through its
   session, typically a resident's child or a prior state's spawn — and
   completes only when that child's message count grows (`wait_fired`
   carries the observed `start`/`end` range; the message indexes are
-  ranges, never content) or `timeout_ms` (1..60000) elapses (the entry
-  settles as an error with a `wait_timeout` event). A stopped run
-  cancels the subscription. `kind` is staged: `"agent"` is live;
+  ranges, never content). A sibling wait already parked on the same
+  target shares its live subscription without re-registering (a second
+  register would re-baseline the shared feed and discard growth the
+  first wait armed for). A run past `timeout_ms` (1..60000), a failed
+  subscribe, or the child's terminal `-> unreachable` event settles the
+  entry as an error (with a `wait_timeout` event) through the state's
+  `failure_policy` — under the default `escalate` the run pauses before
+  the failed settle propagates, exactly like any entry failure. A
+  stopped run cancels the subscription. `kind` is staged: `"agent"` is live;
   `"job"` (stage 2) and `"path"` (stage 3) are refused at write time
   until their handlers land.
 - **Bounds and policies**: `run.max_parallel` (1..64, default 8) is the

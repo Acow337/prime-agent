@@ -523,7 +523,19 @@ impl SupervisorChildSessionsInner {
                 record.active_session_id.clone(),
             )
         };
-        let baseline = self.child_watch_snapshot(&active_session_id).await.ok();
+        // The register-time baseline snapshot is a link round trip on the
+        // same lane the poller snapshots: bound it by the registry's
+        // snapshot timeout, not the 30s `STATE_TIMEOUT_MS` — a dead link
+        // must not park the kernel's `rlm.watch.agent` call (a wait-only
+        // entry state does this inside `run()`).
+        let snapshot_timeout_ms = self.agent_watch.lock().await.snapshot_timeout();
+        let baseline = tokio::time::timeout(
+            Duration::from_millis(snapshot_timeout_ms),
+            self.child_watch_snapshot(&active_session_id),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("agent watch snapshot timed out")))
+        .ok();
         let at_ms = now_ms();
         let mut registry = self.agent_watch.lock().await;
         registry
