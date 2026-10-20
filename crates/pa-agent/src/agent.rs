@@ -111,6 +111,12 @@ pub struct AgentOptions {
     /// The completion notice for promoted bash jobs; `None` keeps
     /// completions silent (no wake lane).
     pub auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
+    /// The registry the loop arms bash-call watchdogs into. `None` gives
+    /// the agent a private registry; an embedding that also puts the same
+    /// registry into the bash tool options wires the loop's window and
+    /// notice lane into the dispatch.
+    pub auto_background_registry:
+        Option<std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>>,
 }
 
 struct MutableAgentState {
@@ -345,6 +351,7 @@ struct AgentInner {
     /// The resolved inline-bash promotion window (zero disables).
     auto_background_after: std::time::Duration,
     auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
+    auto_background_registry: std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>,
 }
 
 impl AgentInner {
@@ -559,6 +566,7 @@ impl AgentInner {
         config.get_continuation_messages = continuation;
         config.tool_execution = self.tool_execution;
         config.auto_background_after = self.auto_background_after;
+        config.auto_background_registry = std::sync::Arc::clone(&self.auto_background_registry);
         config
             .auto_background_notice
             .clone_from(&self.auto_background_notice);
@@ -796,6 +804,9 @@ impl Agent {
                     .unwrap_or(crate::auto_background::DEFAULT_AUTO_BACKGROUND_AFTER_MS),
             ),
             auto_background_notice: options.auto_background_notice,
+            auto_background_registry: options.auto_background_registry.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::auto_background::AutoBackgroundRegistry::new())
+            }),
         });
         Agent { inner }
     }

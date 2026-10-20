@@ -119,6 +119,7 @@ async fn execute_tool_calls_sequential(
                 let auto_background = crate::auto_background::AutoBackgroundDirective {
                     window: config.auto_background_after,
                     notice: config.auto_background_notice.clone(),
+                    registry: std::sync::Arc::clone(&config.auto_background_registry),
                 };
                 let executed =
                     execute_prepared_tool_call(&prepared, signal, emit, &auto_background).await;
@@ -212,6 +213,7 @@ async fn execute_tool_calls_parallel(
                 let auto_background = crate::auto_background::AutoBackgroundDirective {
                     window: config.auto_background_after,
                     notice: config.auto_background_notice.clone(),
+                    registry: std::sync::Arc::clone(&config.auto_background_registry),
                 };
                 let handle = tokio::spawn(async move {
                     let executed = execute_prepared_tool_call(

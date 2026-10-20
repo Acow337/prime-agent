@@ -114,6 +114,8 @@ pub struct AgentLoopConfig {
     pub auto_background_after: std::time::Duration,
     /// The completion notice hook for promoted bash jobs.
     pub auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
+    /// The registry the per-call arms go into (one per agent).
+    pub auto_background_registry: std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
 }
@@ -144,6 +146,9 @@ impl AgentLoopConfig {
                 crate::auto_background::DEFAULT_AUTO_BACKGROUND_AFTER_MS,
             ),
             auto_background_notice: None,
+            auto_background_registry: std::sync::Arc::new(
+                crate::auto_background::AutoBackgroundRegistry::new(),
+            ),
             before_tool_call: None,
             after_tool_call: None,
         }
