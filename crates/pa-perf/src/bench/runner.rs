@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use pa_types::daemon::SAVED_CATALOG_PAGE_FILES;
 
 use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario};
 use crate::corpus::{self, CacheMode, CorpusOptions, Manifest};
@@ -664,20 +665,56 @@ impl Drop for Launch {
     }
 }
 
-/// The left-arrow opens the agents view; the populate needle is the
-/// completed `Inactive (N)` roster heading in the decoded screen (the
-/// heading count repaints as cell diffs, so the byte stream cannot see it
-/// — the screen model does). The count includes the TUI's own fresh
-/// session (rendered as one more inactive row).
-fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
-    let needle = format!("Inactive ({})", ctx.manifest.markers.roster_inactive + 1);
-    let started = Instant::now();
-    child.write(b"\x1b[D")?;
+/// The completed roster's screen observables under the saved catalog's
+/// pagination: the first page folds at most [`SAVED_CATALOG_PAGE_FILES`]
+/// files, the heading counts the fold's inactive rows
+/// (`folded - active_rows` — a paged fold still shows one fewer when the
+/// resumed session renders as its one non-inactive row), and the
+/// completion footer counts the unfolded files (`total_files - folded` —
+/// files, not inactive rows). `total_files` is the whole store at the
+/// moment of the wait.
+fn roster_observables(total_files: usize, active_rows: usize) -> (String, Option<String>) {
+    let folded = total_files.min(SAVED_CATALOG_PAGE_FILES as usize);
+    let heading = format!("Inactive ({})", folded - active_rows);
+    let footer = (total_files > folded)
+        .then(|| format!("{} older sessions not loaded", total_files - folded));
+    (heading, footer)
+}
+
+/// Wait both roster-completion needles (the timed sample ends at whichever
+/// lands last): the heading repaints as pages fold, and the footer lands
+/// when the scan knows the unloaded count.
+fn wait_roster_completed(
+    ctx: &RunCtx,
+    child: &mut PtyChild,
+    heading: &str,
+    footer: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(footer) = footer {
+        child.wait_screen_contains(
+            footer,
+            "the saved-catalog completion footer",
+            Instant::now() + ctx.liveness,
+        )?;
+    }
     child.wait_screen_contains(
-        &needle,
+        heading,
         "the agents view roster",
         Instant::now() + ctx.liveness,
     )?;
+    Ok(())
+}
+
+/// The left-arrow opens the agents view; the populate needle is the
+/// completed roster in the decoded screen (the heading count repaints as
+/// cell diffs, so the byte stream cannot see it — the screen model does).
+/// The store holds the manifest's inactive sessions plus the TUI's own
+/// fresh session (rendered as one more inactive row).
+fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
+    let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive + 1, 0);
+    let started = Instant::now();
+    child.write(b"\x1b[D")?;
+    wait_roster_completed(ctx, child, &heading, footer.as_deref())?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
@@ -689,13 +726,10 @@ fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64>
     child.write(b"\x1b[D")?;
     // Wait the completed roster before typing: keys racing the scan flood
     // were the CI-runner failure (the query echoed nothing). The resumed
-    // session A renders as one IDLE row, so the completed heading counts
-    // the remaining sessions.
-    child.wait_screen_contains(
-        &format!("Inactive ({})", ctx.manifest.markers.roster_inactive - 1),
-        "the agents view roster",
-        Instant::now() + ctx.liveness,
-    )?;
+    // session A renders as one IDLE row — the fold's one non-inactive row
+    // — so the completed heading counts the remaining sessions.
+    let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive, 1);
+    wait_roster_completed(ctx, child, &heading, footer.as_deref())?;
     child.write(ctx.manifest.markers.switch_query.as_bytes())?;
     // The echoed query does not contain the row's "switch" prefix, so this
     // needle is the picker's result row, not the echo.
@@ -983,10 +1017,15 @@ fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
         Scenario::ColdReady | Scenario::WarmReady => {
             "the attach pill (the tray's session-usage row)".to_string()
         }
-        Scenario::AgentsView | Scenario::AgentsViewWarm => format!(
-            "the completed roster heading (Inactive ({}))",
-            ctx.manifest.markers.roster_inactive + 1
-        ),
+        Scenario::AgentsView | Scenario::AgentsViewWarm => {
+            let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive + 1, 0);
+            match footer {
+                Some(footer) => format!(
+                    "the completed roster heading ({heading}) and completion footer ({footer})"
+                ),
+                None => format!("the completed roster heading ({heading})"),
+            }
+        }
         Scenario::OpenSession => format!(
             "the huge session marker {}",
             ctx.manifest.markers.huge.needle
@@ -1111,6 +1150,39 @@ mod tests {
             "sampled runs must be positive"
         );
         assert!(!absent.exists(), "validation must precede output mutation");
+    }
+
+    #[test]
+    fn roster_observables_follow_the_saved_catalog_page_boundary() {
+        for (total_files, active_rows, heading, footer) in [
+            (199usize, 0usize, "Inactive (199)", None),
+            (199, 1, "Inactive (198)", None),
+            (200, 0, "Inactive (200)", None),
+            (200, 1, "Inactive (199)", None),
+            (
+                201,
+                0,
+                "Inactive (200)",
+                Some("1 older sessions not loaded"),
+            ),
+            (
+                201,
+                1,
+                "Inactive (199)",
+                Some("1 older sessions not loaded"),
+            ),
+        ] {
+            let (got_heading, got_footer) = roster_observables(total_files, active_rows);
+            assert_eq!(
+                got_heading, heading,
+                "{total_files} files, {active_rows} active"
+            );
+            assert_eq!(
+                got_footer.as_deref(),
+                footer,
+                "{total_files} files, {active_rows} active"
+            );
+        }
     }
 
     #[test]

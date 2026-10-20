@@ -343,10 +343,7 @@ pub(crate) fn write_session_file(
             continue;
         }
 
-        let text = match &spec.marker {
-            Some(marker) if target - rows.rows_written() <= 4 => marker.clone(),
-            _ => user_text(rng),
-        };
+        let text = user_text(rng);
         let content = if rng.chance(30) {
             UserContent::Blocks(vec![UserContentBlock::Text(TextContent {
                 text: text.clone(),
@@ -479,6 +476,26 @@ pub(crate) fn write_session_file(
         }
     }
 
+    // The marker's final row: one typed user message appended after the
+    // turn loop. The windowed transcript materializes only the visible
+    // viewport rows on a tail-anchored resume, so a marker inside the last
+    // turn can sit above the first paint's window behind a giant final
+    // tool result — the file's last row is always inside that window.
+    if let Some(marker) = &spec.marker {
+        rows.push(
+            "message",
+            serde_json::json!({
+                "message": pa_types::session::AgentMessage::User(UserMessage {
+                    content: UserContent::Text(marker.clone()),
+                    timestamp: rows.millis,
+                    rest: serde_json::Map::new(),
+                })
+            }),
+            rng,
+        )?;
+        last_user_text = marker.clone();
+    }
+
     rows.writer.flush()?;
     Ok(Written {
         rows: rows.counter as usize,
@@ -506,8 +523,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("session directory");
         for seed in 0..16 {
             for target in 9..32 {
+                let path = directory.path().join("session.jsonl");
                 let written = super::write_session_file(
-                    &directory.path().join("session.jsonl"),
+                    &path,
                     &spec(target),
                     &mut crate::rng::Rng::new(seed),
                 )
@@ -516,6 +534,23 @@ mod tests {
                     written.last_user_text, "final user marker",
                     "seed={seed}, target={target}"
                 );
+                // The marker is the file's last display row: the windowed
+                // transcript renders only the tail viewport, so anything
+                // after it would hide the marker from a resume.
+                let contents = std::fs::read_to_string(&path).expect("read session");
+                let last = contents.lines().next_back().expect("the file holds rows");
+                let last: serde_json::Value =
+                    serde_json::from_str(last).expect("the last row parses");
+                assert_eq!(last["type"], "message", "seed={seed}, target={target}");
+                assert_eq!(
+                    last["message"]["role"], "user",
+                    "seed={seed}, target={target}"
+                );
+                let text = last["message"]["content"]
+                    .as_str()
+                    .or_else(|| last["message"]["content"][0]["text"].as_str())
+                    .expect("the last row is a typed user message");
+                assert_eq!(text, "final user marker", "seed={seed}, target={target}");
             }
         }
     }

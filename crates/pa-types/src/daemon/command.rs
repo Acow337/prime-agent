@@ -8,6 +8,13 @@ use super::{
     DaemonResumeCursor, Deserialize, JsonMap, Serialize, Value,
 };
 
+/// The saved-session catalog's page size: the UI's first fetch and every scroll fetch ask for
+/// this many session files (a search asks for the whole remaining store), so the roster's
+/// Inactive heading counts at most this many folded rows — the rest stays behind the
+/// unloaded-count footer until scrolled or searched. The perf bench derives its expected roster
+/// counts from the same contract.
+pub const SAVED_CATALOG_PAGE_FILES: u64 = 200;
+
 /// One page of the display transcript (the branch in order, each compaction as its
 /// summary row), bounded by entry-id cursors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
