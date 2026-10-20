@@ -1575,6 +1575,13 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("cat <<EOF\n$(echo hi) $(grep -rl needle ~/Documents)\nEOF"))
         self.assertTrue(is_scan("cat <<EOF; find \"$HOME\" -name '*.pdf'\nbody\nEOF"))
         self.assertTrue(is_scan("cat <<EOF; echo\nbody\nEOF\nfind \"$HOME\" -name '*.pdf'"))
+        # Digit-led delimiters, here-strings, unclosed heredocs, and quoted
+        # patterns ahead of two roots (round 7).
+        self.assertFalse(is_scan("cat <<123\ngrep -rl needle ~/Documents\n123"))
+        self.assertTrue(is_scan("cat <<<hello\nfind ~/Documents -name '*.pdf'"))
+        self.assertTrue(is_scan("cat <<EOF\n$(grep -rl needle ~/Documents)"))
+        self.assertTrue(is_scan("grep -rl 'needle' ~/Documents src/"))
+        self.assertTrue(is_scan('grep -rl "needle" ~/Documents src/'))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

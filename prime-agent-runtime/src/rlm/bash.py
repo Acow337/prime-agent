@@ -149,6 +149,12 @@ def _is_depth_bound(tokens: list[str]) -> bool:
     return False
 
 
+# Masked quoted arguments leave this placeholder token behind: bash saw an
+# argument here, and the scanner's positional pattern-skip must skip the
+# placeholder, not a scan root that follows it.
+MASK_PLACEHOLDER = "\x01"
+
+
 def _starts_with_home_expansion(chars: list[str], at: int) -> bool:
     """True when chars[at:] starts with $HOME or ${HOME}; a following
     variable-name character ($HOMEDIR) is a different variable. Mirrors the
@@ -192,7 +198,7 @@ def _mask_scan_literals(command: str) -> str:
             while j < n and chars[j] != "'":
                 chars[j] = " "
                 j += 1
-            chars[i] = " "
+            chars[i] = MASK_PLACEHOLDER
             if j < n:
                 chars[j] = " "
             i = j + 1
@@ -218,6 +224,7 @@ def _mask_scan_literals(command: str) -> str:
             and i + 1 < n
             and chars[i + 1] == "<"
             and not (i + 2 < n and chars[i + 2] == "<")
+            and (i == 0 or chars[i - 1] != "<")
         ):
             # Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
             # `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
@@ -254,7 +261,7 @@ def _mask_scan_literals(command: str) -> str:
             # `EOF`, and any quoting anywhere in the word disables expansion.
             quoted = "'" in word or '"' in word
             delim = word.replace("'", "").replace('"', "")
-            if delim and (delim[0].isascii() and (delim[0].isalpha() or delim[0] == "_")):
+            if delim:
                 body = j
                 while body < n and chars[body] != "\n":
                     body += 1
@@ -272,9 +279,12 @@ def _mask_scan_literals(command: str) -> str:
                         if tabbed:
                             while start < eol and chars[start] == "\t":
                                 start += 1
-                        if "".join(chars[start:eol]) == delim or eol >= n:
+                        if "".join(chars[start:eol]) == delim:
                             region_end = probe
-                            break
+                            break  # terminator line: body ends here
+                        if eol >= n:
+                            region_end = n
+                            break  # no terminator: bash reads to EOF
                         probe = eol + 1
                     # Mask the whole body region in one pass: with an
                     # unquoted delimiter, $(...) and backticks stay live
@@ -348,7 +358,7 @@ def _mask_scan_literals(command: str) -> str:
                     chars[j] = " "
                 i = j + 1
                 continue
-            chars[i] = " "
+            chars[i] = MASK_PLACEHOLDER
             i += 1
             while i < n and chars[i] != '"':
                 if chars[i] == "\\" and i + 1 < n:

@@ -560,6 +560,11 @@ fn is_depth_bound_token(token: &str, next: Option<&str>) -> bool {
         || token.strip_prefix("-d").is_some_and(is_number)
 }
 
+/// Masked quoted arguments leave this placeholder token behind: bash saw an
+/// argument, and the scanner's positional pattern-skip skips the placeholder
+/// instead of a scan root that follows it.
+const MASK_PLACEHOLDER: char = '\u{1}';
+
 /// Mask single-quoted spans, double-quoted literal data, unquoted comments,
 /// and heredoc bodies. Double quotes still expand `$HOME`/`${HOME}` and run
 /// command substitution, so a double-quoted span that starts with a home
@@ -594,7 +599,10 @@ fn mask_scan_literals(command: &str) -> String {
                 chars[j] = ' ';
                 j += 1;
             }
-            chars[i] = ' ';
+            // The masked argument leaves a placeholder token: bash saw an
+            // argument here, and the scanner's positional pattern-skip must
+            // skip the placeholder, not a scan root that follows it.
+            chars[i] = MASK_PLACEHOLDER;
             if j < len {
                 chars[j] = ' ';
             }
@@ -621,11 +629,18 @@ fn mask_scan_literals(command: &str) -> String {
             i = if j < len { j + 1 } else { len };
             continue;
         }
-        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') {
+        if ch == '<'
+            && chars.get(i + 1) == Some(&'<')
+            && chars.get(i + 2) != Some(&'<')
+            && (i == 0 || chars[i - 1] != '<')
+        {
             // Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
             // `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
-            // line is input text, never executed, so mask it. A digit-first
-            // delimiter is an arithmetic shift (`$((1<<2))`), not a heredoc.
+            // line is input text, never executed, so mask it. Any nonempty
+            // delimiter word counts (`<<123` too): arithmetic shifts live
+            // inside `$((...))`, which this scan skips whole, so `1<<2`
+            // never reaches this branch. `<<<` here-strings supply one word,
+            // never body lines.
             let mut j = i + 2;
             let mut tabbed = false;
             if chars.get(j) == Some(&'-') {
@@ -665,8 +680,7 @@ fn mask_scan_literals(command: &str) -> String {
             // disables expansion in the body.
             let quoted = word.contains('\'') || word.contains('"');
             let delim: String = word.chars().filter(|c| *c != '\'' && *c != '"').collect();
-            let is_delimiter = !delim.is_empty()
-                && (delim.as_bytes()[0].is_ascii_alphabetic() || delim.as_bytes()[0] == b'_');
+            let is_delimiter = !delim.is_empty();
             if is_delimiter {
                 let mut body = j;
                 while body < len && chars[body] != '\n' {
@@ -688,8 +702,11 @@ fn mask_scan_literals(command: &str) -> String {
                                 start += 1;
                             }
                         }
-                        if chars[start..eol].iter().collect::<String>() == delim || eol >= len {
-                            break probe;
+                        if chars[start..eol].iter().collect::<String>() == delim {
+                            break probe; // terminator line: body ends here
+                        }
+                        if eol >= len {
+                            break len; // no terminator: bash reads to EOF
                         }
                         probe = eol + 1;
                     };
@@ -781,7 +798,7 @@ fn mask_scan_literals(command: &str) -> String {
                 i = j + 1;
                 continue;
             }
-            chars[i] = ' ';
+            chars[i] = MASK_PLACEHOLDER;
             i += 1;
             while i < len && chars[i] != '"' {
                 if chars[i] == '\\' && i + 1 < len {
@@ -1358,6 +1375,39 @@ mod tests {
         ));
         assert!(is_unbounded_home_scan(
             "cat <<EOF; echo\nbody\nEOF\nfind \"$HOME\" -name '*.pdf'",
+            None
+        ));
+    }
+
+    /// Regression coverage for the seventh bot-review round: digit-led
+    /// heredoc delimiters, here-strings, unclosed heredocs, and quoted
+    /// patterns ahead of two scan roots.
+    #[test]
+    fn digit_delimiters_here_strings_and_unclosed_heredocs_scan_correctly() {
+        // `<<123` is a real heredoc: the body is data.
+        assert!(!is_unbounded_home_scan(
+            "cat <<123\ngrep -rl needle ~/Documents\n123",
+            None
+        ));
+        // A here-string supplies one word: following lines stay live.
+        assert!(is_unbounded_home_scan(
+            "cat <<<hello\nfind ~/Documents -name '*.pdf'",
+            None
+        ));
+        // An unclosed heredoc reads to EOF: the last line's substitution
+        // still runs.
+        assert!(is_unbounded_home_scan(
+            "cat <<EOF\n$(grep -rl needle ~/Documents)",
+            None
+        ));
+        // A quoted pattern ahead of two roots keeps every root: the masked
+        // pattern leaves a placeholder for the positional pattern-skip.
+        assert!(is_unbounded_home_scan(
+            "grep -rl 'needle' ~/Documents src/",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "grep -rl \"needle\" ~/Documents src/",
             None
         ));
     }
