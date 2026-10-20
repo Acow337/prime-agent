@@ -1567,6 +1567,14 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertFalse(is_scan("echo $((a<<b))"))
         self.assertTrue(is_scan("echo $((a<<b))\ngrep -rl needle ~/Documents"))
         self.assertFalse(is_scan("cat <<E'OF'\n$(grep -rl needle ~/Documents)\nEOF"))
+        # Escaped and multiline heredoc substitutions (round 6).
+        self.assertFalse(
+            is_scan("cat <<EOF\n\\$(grep -rl needle ~/Documents)\nEOF\nsleep 120")
+        )
+        self.assertTrue(is_scan("cat <<EOF\n$(\nfind ~/Documents\n)\nEOF"))
+        self.assertTrue(is_scan("cat <<EOF\n$(echo hi) $(grep -rl needle ~/Documents)\nEOF"))
+        self.assertTrue(is_scan("cat <<EOF; find \"$HOME\" -name '*.pdf'\nbody\nEOF"))
+        self.assertTrue(is_scan("cat <<EOF; echo\nbody\nEOF\nfind \"$HOME\" -name '*.pdf'"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

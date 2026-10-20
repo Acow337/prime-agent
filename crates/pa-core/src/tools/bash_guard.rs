@@ -636,9 +636,29 @@ fn mask_scan_literals(command: &str) -> String {
                 j += 1;
             }
             let mut word = String::new();
-            while j < len && !chars[j].is_whitespace() {
-                word.push(chars[j]);
-                j += 1;
+            while j < len {
+                // The delimiter word stops at shell operators outside quoted
+                // text, so `<<EOF; cmd` leaves `; cmd` live on the start
+                // line (`<<'EOF;'` keeps the quoted semicolon).
+                let c = chars[j];
+                if c == '\'' || c == '"' {
+                    word.push(c);
+                    j += 1;
+                    while j < len && chars[j] != c {
+                        word.push(chars[j]);
+                        j += 1;
+                    }
+                    if j < len {
+                        word.push(chars[j]);
+                        j += 1;
+                    }
+                } else if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>')
+                {
+                    break;
+                } else {
+                    word.push(c);
+                    j += 1;
+                }
             }
             // Shell quote removal across the whole delimiter word:
             // `E'OF'` is `EOF`, and any quoting anywhere in the word
@@ -654,52 +674,77 @@ fn mask_scan_literals(command: &str) -> String {
                 }
                 if body < len {
                     body += 1; // first char of the body
-                    loop {
-                        let mut eol = body;
+                               // The terminator line ends the heredoc even in the
+                               // middle of a substitution; find it on the raw text.
+                    let mut probe = body;
+                    let region_end = loop {
+                        let mut eol = probe;
                         while eol < len && chars[eol] != '\n' {
                             eol += 1;
                         }
-                        let mut start = body;
+                        let mut start = probe;
                         if tabbed {
                             while start < eol && chars[start] == '\t' {
                                 start += 1;
                             }
                         }
-                        let terminator = chars[start..eol].iter().collect::<String>() == delim;
-                        // An unquoted delimiter still expands command
-                        // substitutions in the body: keep them live, mask
-                        // the literal text around them.
+                        if chars[start..eol].iter().collect::<String>() == delim || eol >= len {
+                            break probe;
+                        }
+                        probe = eol + 1;
+                    };
+                    // Mask the whole body region in one pass: with an
+                    // unquoted delimiter, $(...) and backticks stay live
+                    // (bash runs them in the body, and a substitution may
+                    // span lines); an escaped \$(...) or \` is literal and
+                    // masked; everything else is data. The terminator line
+                    // is data too.
+                    let mut term_eol = region_end;
+                    while term_eol < len && chars[term_eol] != '\n' {
+                        term_eol += 1;
+                    }
+                    if quoted {
+                        for c in &mut chars[body..term_eol] {
+                            *c = ' ';
+                        }
+                    } else {
                         let mut k = body;
-                        while k < eol {
-                            if !quoted && chars[k] == '$' && chars.get(k + 1) == Some(&'(') {
-                                let mut depth = 0i32;
-                                let mut p = k;
-                                while p < eol {
-                                    if chars[p] == '(' {
-                                        depth += 1;
-                                    } else if chars[p] == ')' {
-                                        depth -= 1;
-                                        if depth == 0 {
-                                            break;
-                                        }
-                                    }
-                                    p += 1;
+                        let mut sub_depth = 0i32;
+                        while k < region_end {
+                            let c = chars[k];
+                            if sub_depth > 0 {
+                                // Inside a live command substitution; the
+                                // paren depth carries across body lines.
+                                if c == '(' {
+                                    sub_depth += 1;
+                                } else if c == ')' {
+                                    sub_depth -= 1;
                                 }
-                                k = if p < eol { p + 1 } else { eol };
-                            } else if !quoted && chars[k] == '`' {
-                                let mut p = k + 1;
-                                while p < eol && chars[p] != '`' {
-                                    p += 1;
+                                k += 1;
+                            } else if c == '\\'
+                                && k + 1 < region_end
+                                && matches!(chars[k + 1], '$' | '`' | '\\')
+                            {
+                                // An escaped \$, \`, or \\ is literal.
+                                chars[k] = ' ';
+                                chars[k + 1] = ' ';
+                                k += 2;
+                            } else if c == '$' && k + 1 < region_end && chars[k + 1] == '(' {
+                                sub_depth = 1;
+                                k += 2;
+                            } else if c == '`' {
+                                k += 1;
+                                while k < region_end && chars[k] != '`' {
+                                    k += 1;
                                 }
-                                k = if p < eol { p + 1 } else { eol };
+                                k += 1;
                             } else {
                                 chars[k] = ' ';
+                                k += 1;
                             }
-                            k += 1;
                         }
-                        body = eol + 1;
-                        if terminator || eol >= len {
-                            break;
+                        for c in &mut chars[region_end..term_eol] {
+                            *c = ' ';
                         }
                     }
                 }
@@ -1280,6 +1325,39 @@ mod tests {
         // Quote anywhere in the delimiter disables body expansion.
         assert!(!is_unbounded_home_scan(
             "cat <<E'OF'\n$(grep -rl needle ~/Documents)\nEOF",
+            None
+        ));
+    }
+
+    /// Regression coverage for the sixth bot-review round: escaped
+    /// substitutions are literal in heredoc bodies, substitutions may span
+    /// body lines, two substitutions on one line both count, and `<<EOF;`
+    /// does not swallow the same-line command.
+    #[test]
+    fn escaped_and_multiline_heredoc_substitutions_scan_correctly() {
+        // An escaped \$(...) in an unquoted heredoc is literal, not a scan.
+        assert!(!is_unbounded_home_scan(
+            "cat <<EOF\n\\$(grep -rl needle ~/Documents)\nEOF\nsleep 120",
+            None
+        ));
+        // A substitution spanning body lines still executes.
+        assert!(is_unbounded_home_scan(
+            "cat <<EOF\n$(\nfind ~/Documents\n)\nEOF",
+            None
+        ));
+        // A second substitution on the same body line is detected too.
+        assert!(is_unbounded_home_scan(
+            "cat <<EOF\n$(echo hi) $(grep -rl needle ~/Documents)\nEOF",
+            None
+        ));
+        // `<<EOF;` stops at the semicolon: the same-line command stays
+        // live, and a command after the heredoc block is still detected.
+        assert!(is_unbounded_home_scan(
+            "cat <<EOF; find \"$HOME\" -name '*.pdf'\nbody\nEOF",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "cat <<EOF; echo\nbody\nEOF\nfind \"$HOME\" -name '*.pdf'",
             None
         ));
     }

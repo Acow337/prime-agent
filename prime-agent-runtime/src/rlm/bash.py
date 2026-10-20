@@ -230,10 +230,26 @@ def _mask_scan_literals(command: str) -> str:
                 j += 1
             while j < n and chars[j] in " \t":
                 j += 1
-            word_start = j
-            while j < n and not chars[j].isspace():
-                j += 1
-            word = "".join(chars[word_start:j])
+            word_chars: list[str] = []
+            # The delimiter word stops at shell operators outside quoted
+            # text, so `<<EOF; cmd` leaves `; cmd` live on the start line.
+            while j < n:
+                c = chars[j]
+                if c in ("'", '"'):
+                    word_chars.append(c)
+                    j += 1
+                    while j < n and chars[j] != c:
+                        word_chars.append(chars[j])
+                        j += 1
+                    if j < n:
+                        word_chars.append(chars[j])
+                        j += 1
+                elif c.isspace() or c in ";&|()<>":
+                    break
+                else:
+                    word_chars.append(c)
+                    j += 1
+            word = "".join(word_chars)
             # Shell quote removal across the whole delimiter word: `E'OF'` is
             # `EOF`, and any quoting anywhere in the word disables expansion.
             quoted = "'" in word or '"' in word
@@ -244,48 +260,68 @@ def _mask_scan_literals(command: str) -> str:
                     body += 1
                 if body < n:
                     body += 1  # first char of the body
+                    # The terminator line ends the heredoc even mid-
+                    # substitution; find it on the raw text.
+                    probe = body
+                    region_end = n
                     while True:
-                        eol = body
+                        eol = probe
                         while eol < n and chars[eol] != "\n":
                             eol += 1
-                        start = body
+                        start = probe
                         if tabbed:
                             while start < eol and chars[start] == "\t":
                                 start += 1
-                        terminator = "".join(chars[start:eol]) == delim
-                        # An unquoted delimiter still expands command
-                        # substitutions in the body: keep them live, mask
-                        # the literal text around them.
+                        if "".join(chars[start:eol]) == delim or eol >= n:
+                            region_end = probe
+                            break
+                        probe = eol + 1
+                    # Mask the whole body region in one pass: with an
+                    # unquoted delimiter, $(...) and backticks stay live
+                    # (bash runs them in the body, and a substitution may
+                    # span lines); an escaped \$, \`, or \\ is literal;
+                    # everything else is data. The terminator line is data.
+                    term_eol = region_end
+                    while term_eol < n and chars[term_eol] != "\n":
+                        term_eol += 1
+                    if quoted:
+                        for k in range(body, term_eol):
+                            chars[k] = " "
+                    else:
                         k = body
-                        while k < eol:
-                            if (
-                                not quoted
-                                and chars[k] == "$"
-                                and k + 1 < n
-                                and chars[k + 1] == "("
+                        sub_depth = 0
+                        while k < region_end:
+                            c = chars[k]
+                            if sub_depth > 0:
+                                # Inside a live command substitution; the
+                                # paren depth carries across body lines.
+                                if c == "(":
+                                    sub_depth += 1
+                                elif c == ")":
+                                    sub_depth -= 1
+                                k += 1
+                            elif (
+                                c == "\\"
+                                and k + 1 < region_end
+                                and chars[k + 1] in ("$", "`", "\\")
                             ):
-                                depth = 0
-                                p = k
-                                while p < eol:
-                                    if chars[p] == "(":
-                                        depth += 1
-                                    elif chars[p] == ")":
-                                        depth -= 1
-                                        if depth == 0:
-                                            break
-                                    p += 1
-                                k = (p + 1) if p < eol else eol
-                            elif not quoted and chars[k] == "`":
-                                p = k + 1
-                                while p < eol and chars[p] != "`":
-                                    p += 1
-                                k = (p + 1) if p < eol else eol
+                                # An escaped \$, \`, or \\ is literal.
+                                chars[k] = " "
+                                chars[k + 1] = " "
+                                k += 2
+                            elif c == "$" and k + 1 < region_end and chars[k + 1] == "(":
+                                sub_depth = 1
+                                k += 2
+                            elif c == "`":
+                                k += 1
+                                while k < region_end and chars[k] != "`":
+                                    k += 1
+                                k += 1
                             else:
                                 chars[k] = " "
-                            k += 1
-                        body = eol + 1
-                        if terminator or eol >= n:
-                            break
+                                k += 1
+                        for k in range(region_end, term_eol):
+                            chars[k] = " "
             i += 2
             continue
         if ch == '"':
