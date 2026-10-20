@@ -9,20 +9,18 @@ import provenance
 
 
 class ProvenanceTests(unittest.TestCase):
-    def test_helper_or_lock_change_invalidates_harness_identity(self):
+    def test_helper_change_or_addition_invalidates_harness_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for name in ('provenance.py', 'helper.py', 'runtime.lock', 'driver.lock'):
+            for name in ('provenance.py', 'helper.py'):
                 (root / name).write_text('original')
             with patch('provenance.__file__', str(root / 'provenance.py')):
                 original = provenance.harness_sha256()
                 (root / 'helper.py').write_text('changed helper')
                 helper_changed = provenance.harness_sha256()
-                (root / 'runtime.lock').write_text('changed lock')
-                lock_changed = provenance.harness_sha256()
-                (root / 'new.lock').write_text('new build dependency lock')
-                wheel_lock_added = provenance.harness_sha256()
-            self.assertEqual(len({original, helper_changed, lock_changed, wheel_lock_added}), 4)
+                (root / 'new_helper.py').write_text('new helper')
+                helper_added = provenance.harness_sha256()
+            self.assertEqual(len({original, helper_changed, helper_added}), 3)
 
 
 if __name__ == '__main__':

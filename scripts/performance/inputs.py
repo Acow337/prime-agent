@@ -11,11 +11,14 @@ its source repository out of band.
 """
 from __future__ import annotations
 import argparse
+import gzip
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
 import tarfile
+import tempfile
 
 from provenance import file_sha256
 
@@ -23,6 +26,32 @@ MAX_FILE = 512 * 1024 ** 2
 MAX_TOTAL = 1024 ** 3
 MAX_MANIFEST_BYTES = 1024 ** 2
 TARGET = 'x86_64-unknown-linux-gnu'
+
+
+class _CappedReader:
+    """A read-capped view of the expanded tar stream. tarfile reads a PAX
+    or GNU extension header of its declared size in one call, so a read
+    request larger than the bounded stream is rejected rather than
+    allocated."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        stream.seek(0, os.SEEK_END)
+        self._length = stream.tell()
+        stream.seek(0)
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = self._length
+        if size > self._length:
+            raise ValueError('artifact exceeds expanded size limit')
+        return self._stream.read(size)
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        return self._stream.seek(offset, whence)
+
+    def tell(self):
+        return self._stream.tell()
 
 
 def portable_path(name: str) -> PurePosixPath:
@@ -79,8 +108,21 @@ def prepare(artifact: Path, destination: Path, sha: str) -> None:
     if file_sha256(payload) != binaries[0].get('sha256'):
         raise ValueError('release payload checksum mismatch')
     destination.mkdir(parents=True, exist_ok=False)
-    with tarfile.open(payload, 'r:gz') as archive:
-        extract(archive, destination)
+    # tarfile reads PAX/GNU extension headers of their declared size into
+    # memory while parsing, so the whole decompressed stream (metadata
+    # included) is bounded to disk before tarfile ever sees a header; the
+    # most it can then read into memory at once is the capped stream.
+    with open(payload, 'rb') as compressed:
+        with gzip.GzipFile(fileobj=compressed) as stream, tempfile.TemporaryFile() as expanded:
+            total = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                total += len(chunk)
+                if total > MAX_TOTAL:
+                    raise ValueError('artifact exceeds expanded size limit')
+                expanded.write(chunk)
+            expanded.seek(0)
+            with tarfile.open(fileobj=_CappedReader(expanded), mode='r:') as archive:
+                extract(archive, destination)
     if file_sha256(destination / 'prime-agent') != binaries[0].get('executableSha256'):
         raise ValueError('release executable mismatch')
 

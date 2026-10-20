@@ -125,11 +125,46 @@ class InventoryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     inventory(executable, skills)
 
+    def test_relative_pth_entries_resolve_against_site_packages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, executable = fake_venv(directory)
+            skills = fake_skills(directory)
+            site = root / 'lib/python3.12/site-packages'
+            data = self.inventory_data(root, executable, skills)
+            (site / 'relative.pth').write_text('extra-packages\n')
+            with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
+                inventory(executable, skills)
+            (site / 'relative.pth').write_text('../../../../harness/site-packages\n')
+            with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
+                with self.assertRaises(ValueError):
+                    inventory(executable, skills)
+            # Only import statements are executable; a path entry merely
+            # named like one ('imports/...') must not bypass the check.
+            (site / 'relative.pth').write_text('imports/../../../../../harness/site-packages\n')
+            with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
+                with self.assertRaises(ValueError):
+                    inventory(executable, skills)
+
     def test_rejects_linked_packages(self):
         with tempfile.TemporaryDirectory() as directory:
             root, executable = fake_venv(directory)
             site = root / 'lib/python3.12/site-packages'
             (site / 'escape.py').symlink_to(executable)
+            data = {'prefix': str(root), 'executable': str(executable),
+                    'modules': {'rlm': str((root / 'lib/python3.12/site-packages/rlm/__init__.py').resolve())},
+                    'packages': []}
+            with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
+                with self.assertRaises(ValueError):
+                    inventory(executable)
+
+    def test_rejects_symlinked_package_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, executable = fake_venv(directory)
+            site = root / 'lib/python3.12/site-packages'
+            shared = Path(directory) / 'shared-packages'
+            (shared / 'pandas').mkdir(parents=True)
+            (shared / 'pandas/__init__.py').write_text('foreign package fixture')
+            (site / 'pandas').symlink_to(shared / 'pandas', target_is_directory=True)
             data = {'prefix': str(root), 'executable': str(executable),
                     'modules': {'rlm': str((root / 'lib/python3.12/site-packages/rlm/__init__.py').resolve())},
                     'packages': []}

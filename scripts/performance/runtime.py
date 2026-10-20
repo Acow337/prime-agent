@@ -27,15 +27,22 @@ def bundled_skills(skills_root: Path) -> list[tuple[str, Path]]:
 
 
 def _foreign_pth_files(root: Path, allowed: list[Path]) -> list[str]:
-    """Absolute .pth entries outside the venv and every declared release root:
-    the old harness shared-dependency escape hatch."""
+    """.pth path entries outside the venv and every declared release root:
+    the old harness shared-dependency escape hatch. Python resolves entries
+    relative to the containing site-packages directory, so relative entries
+    are joined against it before checking where they land."""
     foreign = []
     for site in root.glob('lib*/python*/site-packages'):
         for path in site.glob('*.pth'):
             for line in filter(None, path.read_text(errors='replace').splitlines()):
-                target = Path(line)
-                if target.is_absolute() and not any(
-                        target.resolve().is_relative_to(base) for base in allowed):
+                if line.startswith('#') or line.startswith(('import ', 'import\t')):
+                    # Comments are skipped and import lines execute at
+                    # interpreter startup rather than naming paths; the
+                    # .pth files themselves are inventoried as installed
+                    # files, so only path entries are checked.
+                    continue
+                target = path.parent / Path(line)
+                if not any(target.resolve().is_relative_to(base) for base in allowed):
                     foreign.append(f'{path}: {line}')
                     break
     return foreign
@@ -76,12 +83,16 @@ print(json.dumps({'python': sys.version, 'prefix': sys.prefix, 'executable': sys
     for name, module_path in data['modules'].items():
         if not any(Path(module_path).is_relative_to(base) for base in allowed):
             raise ValueError(f'probed module outside the venv and release package: {name}')
-    files = [p for p in root.rglob('*') if p.is_file() and p.suffix != '.pyc']
+    entries = list(root.rglob('*'))
+    # rglob does not descend into symlinked directories and is_file() filters
+    # them out, so package entries are checked for escapes first.
+    if any(p.is_symlink() or not p.resolve().is_relative_to(root)
+           for p in entries if 'site-packages' in p.parts):
+        raise ValueError('runtime package escapes its environment')
+    files = [p for p in entries if p.is_file() and p.suffix != '.pyc']
     if len(files) > MAX_INSTALLED_FILES or sum(p.stat().st_size for p in files) > MAX_INSTALLED_BYTES:
         raise ValueError('oversized installed runtime')
     package_files = [p for p in files if 'site-packages' in p.parts]
-    if any(p.is_symlink() or not p.resolve().is_relative_to(root) for p in package_files):
-        raise ValueError('runtime package escapes its environment')
     foreign = _foreign_pth_files(root, allowed)
     if foreign:
         raise ValueError('runtime venv references undeclared files outside itself: '

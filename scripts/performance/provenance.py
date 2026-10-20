@@ -14,6 +14,6 @@ def file_sha256(path: Path) -> str:
 
 def harness_sha256() -> str:
     root = Path(__file__).parent
-    files = sorted([*root.glob('*.py'), *root.glob('*.lock')])
+    files = sorted(root.glob('*.py'))
     inventory = {p.name: file_sha256(p) for p in files}
     return hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()

@@ -11,7 +11,7 @@ use anyhow::Context;
 use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario};
 use crate::corpus::{self, CacheMode, CorpusOptions, Manifest};
 
-use super::pty::PtyChild;
+use super::pty::{kitty_keystrokes, PtyChild};
 
 /// The first paint's needle: the brand splash is the empty chat's header
 /// (the corpus settings keep the TUI out of the first-run flow). Pinned
@@ -467,22 +467,33 @@ fn spawn_for_scenario(
         // The held TUI opens switch-a first (it also spawns the daemon,
         // the cold-launch path); the measured TUI then opens the huge
         // session on that daemon, so the sample carries the concurrent
-        // session's daemon load.
+        // session's daemon load. The measured launch pumps the held TUI
+        // for its whole first-needle wait — the held client is otherwise
+        // never drained, and its filled pty backpressures the shared
+        // daemon into the timed open.
         let held_dump = ctx.corpus_root.join("failed-streams").join(format!(
             "{}-held-run{run}.bin",
             crate::report::key_of(scenario)
         ));
-        let held = Launch::spawn(
+        let mut held = Launch::spawn(
             ctx,
             socket,
             Some(&ctx.manifest.markers.switch_a.file),
             ctx.manifest.markers.switch_a.needle.as_bytes(),
             held_dump,
+            None,
         )?;
-        let launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle, dump)?;
+        let launch = Launch::spawn(
+            ctx,
+            socket,
+            resume.as_deref(),
+            &first_needle,
+            dump,
+            Some(&mut held),
+        )?;
         return Ok((launch, Some(held)));
     }
-    let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle, dump)?;
+    let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle, dump, None)?;
     if matches!(
         scenario,
         Scenario::ColdStart | Scenario::WarmStart | Scenario::ColdReady | Scenario::WarmReady
@@ -533,7 +544,7 @@ fn post_launch(
                 .corpus_root
                 .join("failed-streams")
                 .join("agents-view-warm-second.bin");
-            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump)?;
+            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump, None)?;
             let sample = agents_view_populate(ctx, &mut second.child)?;
             Ok((sample, Some(second)))
         }
@@ -563,13 +574,16 @@ struct Launch {
 impl Launch {
     /// Spawn the TUI (fresh daemon when none listens on `socket`), wait the
     /// first needle (the brand-splash paint, or the resumed transcript's
-    /// marker), and record exec -> needle.
+    /// marker), and record exec -> needle. A `held` peer is pumped for the
+    /// whole wait: it shares the daemon with this launch, and its unpumped
+    /// pty would backpressure the daemon into the measured open.
     fn spawn(
         ctx: &RunCtx,
         socket: &Path,
         resume: Option<&Path>,
         first_needle: &[u8],
         stream_dump: PathBuf,
+        held: Option<&mut Launch>,
     ) -> anyhow::Result<Self> {
         let mut args = vec![
             "--daemon-socket".into(),
@@ -603,12 +617,22 @@ impl Launch {
             stream_dump: Some(stream_dump),
             completed: false,
         };
-        launch.child.wait_from(
-            launch.child.mark(),
-            first_needle,
-            what,
-            started + ctx.liveness,
-        )?;
+        if let Some(held) = held {
+            launch.child.wait_from_pumping(
+                launch.child.mark(),
+                first_needle,
+                what,
+                started + ctx.liveness,
+                Some(&mut held.child),
+            )?;
+        } else {
+            launch.child.wait_from(
+                launch.child.mark(),
+                first_needle,
+                what,
+                started + ctx.liveness,
+            )?;
+        }
         launch.first_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(launch)
     }
@@ -711,22 +735,32 @@ fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// The editor acknowledgment: ten characters typed into the prompt, the
-/// echo paint, then the clear. Timed: payload -> the full echo visible on
-/// the screen; the clear (escape, `app.input.clear`) is verified — the
-/// payload must leave the screen before the run completes — but untimed.
+/// The editor acknowledgment: ten keystrokes into the prompt, the echo
+/// paint, then the clear. Timed: payload -> the full echo visible on the
+/// screen; the clear is verified — the rows that painted the echo must
+/// hold no payload character before the run completes — but untimed.
 fn editor_echo_ack(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     let started = Instant::now();
-    child.write(EDITOR_PAYLOAD.as_bytes())?;
+    // The payload and its delete ride the kitty protocol the harness
+    // itself advertised (KITTY_ANSWER reports flags `1|2|4`): the
+    // product's enhanced-key dedup coalesces identical back-to-back plain
+    // presses within one terminal write, so ten raw z bytes would arrive
+    // as five keystrokes.
+    child.write(&kitty_keystrokes('z' as u32, EDITOR_PAYLOAD.len()))?;
     child.wait_screen_contains(
         EDITOR_PAYLOAD,
         "the editor echo",
         Instant::now() + ctx.liveness,
     )?;
     let sample = started.elapsed().as_secs_f64() * 1000.0;
-    child.write(&[0x7f; 10])?;
-    child.wait_screen_lacks(
-        EDITOR_PAYLOAD,
+    // The clear's acknowledgment is scoped to the editor's own rows: the
+    // substring form accepts one backspace's nine remaining z's, so every
+    // payload character must leave the rows that painted the echo.
+    let editor_rows = child.rows_containing(EDITOR_PAYLOAD)?;
+    child.write(&kitty_keystrokes(0x7f, EDITOR_PAYLOAD.len()))?;
+    child.wait_rows_lack(
+        &editor_rows,
+        "z",
         "the cleared editor",
         Instant::now() + ctx.liveness,
     )?;
@@ -1102,6 +1136,7 @@ mod tests {
             None,
             b"absent paint",
             dump.clone(),
+            None,
         );
         assert!(
             launched.is_err(),

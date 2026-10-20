@@ -35,14 +35,21 @@ python3 scripts/performance/inputs.py \
 
 Extraction is Linux-only. Absolute/traversing paths, links, special files,
 duplicate normalized paths and expanded-size overflows are rejected. Files are
-limited to 512 MiB each and 1 GiB total; compressed size alone is not a bound.
+limited to 512 MiB each. The complete decompressed TAR stream, including
+extension metadata, is limited to 1 GiB before parsing; parser read requests
+cannot exceed the bounded stream. Compressed size alone is not a bound.
 
 ## Use the product's runtime
 
 Prepare each side in a separate disposable workload environment by running its
 **actual matching binary** with `--prime-agent-bootstrap` and `PI_PACKAGE_DIR`
-pointing to its extracted release bundle. Keep its isolated `HOME` and resulting
-`kernel-venv/bin/python`; pass that interpreter to the comparison. Product code
+pointing to its extracted release bundle. This prepares the base runtime and
+default packages, not bundled Python skills. Start one normal session with that
+binary and wait for kernel preparation to finish while still online, so the
+product installs its discovered skills too. Then close the session. Keep its
+isolated `HOME` and resulting `kernel-venv/bin/python`; pass that interpreter to
+the comparison. The inventory requires every bundled Python skill to be installed
+before measurement; missing skills mean preparation is incomplete. Product code
 owns dependency resolution (`DEFAULT_RLM_EXTRA_PACKAGES` and the bundled runtime
 metadata/lock). This harness neither installs a copied dependency list nor adds
 a `.pth` link to its own environment. Bootstrap/package installation is untimed

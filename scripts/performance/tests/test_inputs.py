@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import io
 import json
@@ -130,18 +131,52 @@ class InputTests(unittest.TestCase):
             prepare(artifact, self.root / 'payload', 'c' * 40)
 
     def test_tampered_payload_and_executable_hashes_rejected(self):
+        artifact = self.artifact()
         for damage in ('payload', 'executable'):
             with self.subTest(damage=damage), tempfile.TemporaryDirectory() as directory:
-                artifact = shutil.copytree(self.artifact(), Path(directory) / 'artifact')
-                manifest_path = artifact / 'manifest.json'
+                damaged = shutil.copytree(artifact, Path(directory) / 'artifact')
+                manifest_path = damaged / 'manifest.json'
                 if damage == 'payload':
-                    (artifact / 'release.tar.gz').write_bytes(b'tampered')
+                    (damaged / 'release.tar.gz').write_bytes(b'tampered')
                 else:
                     manifest = json.loads(manifest_path.read_text())
                     manifest['binaries'][0]['executableSha256'] = '0' * 64
                     manifest_path.write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
-                    prepare(artifact, Path(directory) / 'payload', SHA)
+                    prepare(damaged, Path(directory) / 'payload', SHA)
+
+    def pax_bomb_artifact(self):
+        """A checksum-valid release whose tar opens with a PAX extension
+        header declaring far more data than the archive holds: tarfile
+        reads an extension header of its declared size in one call."""
+        artifact = self.artifact()
+        payload = artifact / 'release.tar.gz'
+        record = tarfile.TarInfo('pax-bomb')
+        record.type = tarfile.XHDTYPE
+        record.size = 1024 ** 3
+        buffer = io.BytesIO()
+        with gzip.GzipFile(fileobj=buffer, mode='wb') as stream:
+            stream.write(record.tobuf(tarfile.GNU_FORMAT))
+            stream.write(b'\0' * 8192)
+        payload.write_bytes(buffer.getvalue())
+        manifest_path = artifact / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['binaries'][0]['sha256'] = file_sha256(payload)
+        manifest_path.write_text(json.dumps(manifest))
+        return artifact
+
+    def test_expansion_beyond_the_total_cap_rejects_before_parsing(self):
+        artifact = self.pax_bomb_artifact()
+        with patch('inputs.MAX_TOTAL', 4096), patch('tarfile.open') as opened:
+            with self.assertRaises(ValueError):
+                prepare(artifact, self.root / 'payload', SHA)
+        opened.assert_not_called()
+
+    def test_declared_metadata_cannot_read_past_the_bounded_stream(self):
+        artifact = self.pax_bomb_artifact()
+        with patch('inputs.MAX_TOTAL', 1024 * 1024):
+            with self.assertRaises(ValueError):
+                prepare(artifact, self.root / 'payload', SHA)
 
     def test_manifest_shape_and_symlink_rejected(self):
         artifact = self.artifact()
