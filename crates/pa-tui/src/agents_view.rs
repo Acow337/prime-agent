@@ -189,10 +189,7 @@ const PULSE_INTERVAL_MS: u64 = 250;
 /// The saved-catalog stream's batch window: rows reconcile on this cadence (progressive render).
 const SAVED_CATALOG_RECONCILE_INTERVAL_MS: u64 = 75;
 
-/// The session files one saved-catalog page folds: the first fetch and every scroll fetch ask for
-/// this many (several screens' worth); a search asks for the whole rest of the store. The
-/// protocol contract lives in pa-types (the perf bench derives its expected roster counts from
-/// it); the `pub(crate)` re-export keeps `super::` imports working.
+/// Saved-session files loaded per catalog page.
 pub(crate) use pa_types::daemon::SAVED_CATALOG_PAGE_FILES;
 
 /// The part of the store the catalog has not folded yet: its file count and the daemon's cursor

@@ -71,8 +71,7 @@ def main() -> None:
     runtimes = {}
     try:
         for side in ('base', 'head'):
-            # A product uv venv's bin/python is a symlink to the uv-managed
-            # interpreter; resolving it would report the base env, not the venv.
+            # Keep the venv path rather than resolving its base-interpreter symlink.
             runtime = getattr(args, f'{side}_runtime').absolute()
             if not runtime.is_file():
                 raise ValueError(f'missing prepared runtime: {runtime}')

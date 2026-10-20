@@ -18,15 +18,7 @@ use nix::pty::{openpty, Winsize};
 pub(crate) const KITTY_QUERY: &[u8] = b"\x1b[?u";
 pub(crate) const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 
-/// `count` keystrokes over the kitty protocol the harness itself reported
-/// in [`KITTY_ANSWER`] (flags `1|2|4`): one CSI-u press + release pair
-/// per keystroke, the form a flags-7 terminal sends under event-type
-/// reporting. Raw plain characters do not survive the product's
-/// enhanced-key dedup — identical back-to-back plain presses within one
-/// terminal write coalesce to one keystroke (ten raw z bytes arrive as
-/// five) — while each release both drops before any surface sees it and
-/// clears the dedup's pending run between presses. `codepoint` is the
-/// key's CSI-u codepoint (`'z'` for text, `0x7f` for backspace).
+/// Emit press/release pairs so enhanced-key dedup preserves repeated keys.
 pub(crate) fn kitty_keystrokes(codepoint: u32, count: usize) -> Vec<u8> {
     let one = format!("\x1b[{codepoint};1:1u\x1b[{codepoint};1:3u");
     one.repeat(count).into_bytes()
@@ -138,10 +130,7 @@ impl PtyChild {
         self.wait_from_pumping(mark, needle, what, deadline, None)
     }
 
-    /// [`wait_from`] while also pumping a concurrently held child: the
-    /// held client shares the daemon with the measured one and is never
-    /// pumped elsewhere, so without this drain its pty fills and the
-    /// daemon's writes to it backpressure into the measured wait.
+    /// Drain the shared daemon's held peer without delaying the measured wait.
     pub(crate) fn wait_from_pumping(
         &mut self,
         mark: usize,
@@ -180,11 +169,7 @@ impl PtyChild {
                 );
             }
             if let Some(held) = held.as_deref_mut() {
-                // One zero-timeout slice: drain only what is already
-                // buffered (the measured poll below owns the wait, so
-                // the held drain must never add idle time to it), one
-                // chunk per iteration to keep the drain fair against
-                // the measured stream.
+                // An idle peer must not add time to the measured wait.
                 held.pump(Some(Instant::now()))?;
                 if let Some(status) = held.exited {
                     anyhow::bail!(
@@ -283,16 +268,7 @@ impl PtyChild {
         }
     }
 
-    /// The decoded rows that currently hold `needle` — the area a clear
-    /// observable waits on: the substring form accepts a partially cleared
-    /// editor (one deleted character already breaks a ten-character needle
-    /// while nine remain), and a screen-wide character check would also
-    /// wait on unrelated chrome.
-    ///
-    /// # Errors
-    ///
-    /// Errors when no row holds `needle` — the caller observed it just
-    /// before, on the unchanged screen.
+    /// Scope clearing to the editor rows, not unrelated chrome.
     pub(crate) fn rows_containing(&self, needle: &str) -> anyhow::Result<Vec<usize>> {
         let rows: Vec<usize> = self
             .screen
@@ -307,13 +283,7 @@ impl PtyChild {
         Ok(rows)
     }
 
-    /// Wait until `rows` hold no `needle` characters, bounded by `deadline`
-    /// (the clear observable scoped to the rows that painted the payload).
-    ///
-    /// # Errors
-    ///
-    /// Errors when the child exits with `needle` still in `rows`, or the
-    /// deadline passes (with the decoded screen attached).
+    /// Wait until the editor rows contain no payload characters.
     pub(crate) fn wait_rows_lack(
         &mut self,
         rows: &[usize],
@@ -537,8 +507,7 @@ mod tests {
             std::path::Path::new("/bin/sh"),
             &[
                 "-c".into(),
-                // The trailing read holds the child alive through the
-                // wait: the timeout (not an exit) must be the observable.
+                // Keep the mock alive until the clear deadline.
                 "stty -icanon -echo; printf 'zzzzzzzzz'; head -c 1 >/dev/null; printf 'z\\033[1D\\033[1P'; head -c 1 >/dev/null".into(),
             ],
             &[],
@@ -555,9 +524,7 @@ mod tests {
             .rows_containing("zzzzzzzzz")
             .expect("the payload paints its own rows");
         child.write(b"c").expect("release the mock's delete");
-        // The delete removes the newest character but leaves nine z's: the
-        // clear must not be acknowledged while a payload character remains
-        // in the rows, so the wait runs out of its short deadline.
+        // A partial clear must not acknowledge completion.
         let error = child
             .wait_rows_lack(
                 &rows,
@@ -572,11 +539,7 @@ mod tests {
     #[test]
     fn a_flooding_held_peer_never_backpressures_the_measured_wait() {
         let directory = tempfile::tempdir().expect("mock directory");
-        // The flooding peer writes 256KiB (past the pty's ~64KiB kernel
-        // buffer), then gates the measured peer's paint through the
-        // filesystem, then holds on stdin — without the measured wait's
-        // zero-timeout drain, its write blocks forever, the gate never
-        // opens, and the needle never paints.
+        // Gate the measured paint on draining more than the PTY buffer.
         let mut held = PtyChild::spawn(
             std::path::Path::new("/bin/sh"),
             &[
@@ -615,8 +578,6 @@ mod tests {
     #[test]
     fn a_held_peer_dying_mid_wait_fails_the_measured_wait() {
         let directory = tempfile::tempdir().expect("mock directory");
-        // The dying peer exits at once; the measured peer (/bin/cat) never
-        // paints — the loud held-exit failure is the only outcome.
         let mut held = PtyChild::spawn(
             std::path::Path::new("/bin/sh"),
             &["-c".into(), "printf 'held diagnostic'; exit 3".into()],

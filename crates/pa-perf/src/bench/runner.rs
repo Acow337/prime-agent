@@ -25,10 +25,7 @@ const FIRST_PAINT_NEEDLE: &[u8] = "▗▄▄█▀".as_bytes();
 /// "0 (0%)".
 const READY_NEEDLE: &str = "0 (0%)";
 
-/// The editor-acknowledgment payload: ten characters, all `z` — the one
-/// letter no generated corpus text carries, and no chrome hint repeats
-/// ten times (the switch markers' `zq` token is three characters), so the
-/// echo and its clear are unambiguous on the screen model.
+/// Repeated z characters distinguish editor input from corpus and chrome.
 const EDITOR_PAYLOAD: &str = "zzzzzzzzzz";
 
 /// One bench run's anchored paths.
@@ -78,13 +75,7 @@ fn child_env(ctx: &RunCtx) -> Vec<(String, String)> {
         ("TERM".to_string(), "xterm-ghostty".to_string()),
         ("TERM_PROGRAM".to_string(), "ghostty".to_string()),
     ];
-    // PI_PACKAGE_DIR carries the packaged runtime dir to the binary and its
-    // workers (a release binary resolves prime-agent-runtime/ beside the
-    // executable or through it); PRIME_AGENT_KERNEL_PYTHON and UV_OFFLINE
-    // pin the kernel runtime the staged environment selected (the actual
-    // product venv, not a bootstrap one) and keep it offline — both ride
-    // the same env chain down to the workers' kernels; PATH/HOME/TMPDIR
-    // are the ambient basics.
+    // Preserve the staged product runtime and offline policy in child processes.
     for carry in [
         "PATH",
         "HOME",
@@ -155,8 +146,7 @@ fn sample_runs(
     Ok(samples)
 }
 
-/// One scenario pass; returns the sample in ms and the owned-tree RSS
-/// bytes (`None` off Linux).
+/// Return latency and owned-tree RSS for one scenario.
 fn scenario_once(
     ctx: &RunCtx,
     scenario: Scenario,
@@ -192,18 +182,13 @@ fn launch(
     let outcome: anyhow::Result<(f64, Option<u64>, Launch)> = (|| {
         let (mut launched, held) = spawn_for_scenario(ctx, &socket, scenario, run)?;
         let (sample, extra) = launch_scenario(ctx, &mut launched, scenario, held)?;
-        // The owned-tree RSS sample: one immediate /proc read rooted at
-        // the measured TUI, any concurrently held TUI, and the daemon —
-        // the workers and kernels still live under those roots, and no
-        // teardown has started. Off Linux this is None, never a fake zero.
+        // Sample owned processes before any client or daemon teardown.
         let rss = sample_rss(
             launched.child.pid(),
             extra.as_ref().map(|extra| extra.child.pid()),
             daemon.as_ref().map(|owned| owned.child.id() as i32),
         )?;
-        // Every measured client must disconnect before daemon shutdown.
-        // Keeping one alive while waiting for daemon exit can hold server
-        // connection draining open or start the client's reconnect path.
+        // Disconnect clients before waiting for daemon shutdown.
         if let Some(mut extra) = extra {
             extra.completed = true;
             extra.child.finish();
@@ -241,10 +226,7 @@ fn launch(
     Ok(result)
 }
 
-/// The owned-tree RSS sample taken right after the scenario's observable
-/// action: Linux reads `/proc` over the owned roots (the `rss` module);
-/// any other unix platform reports `None` — the explicit unavailability,
-/// never a fake zero.
+/// Sample owned process-tree RSS from Linux procfs.
 #[cfg(target_os = "linux")]
 fn sample_rss(
     tui_pid: i32,
@@ -254,8 +236,7 @@ fn sample_rss(
     super::rss::sample(tui_pid, held_pid, daemon_pid)
 }
 
-/// The non-Linux refusal: no `/proc` to read, so the sample is
-/// unavailable rather than invented.
+/// RSS is unavailable without Linux procfs.
 #[cfg(not(target_os = "linux"))]
 fn sample_rss(
     _tui_pid: i32,
@@ -433,9 +414,7 @@ fn push(
     }
 }
 
-/// The resume target + first needle per scenario, then the spawn(s): the
-/// concurrent-session launch opens its held TUI on switch-a first, so the
-/// returned tuple carries it next to the measured launch.
+/// Spawn the measured TUI and any concurrently held peer.
 fn spawn_for_scenario(
     ctx: &RunCtx,
     socket: &Path,
@@ -465,13 +444,7 @@ fn spawn_for_scenario(
         .join("failed-streams")
         .join(format!("{}-run{run}.bin", crate::report::key_of(scenario)));
     if scenario == Scenario::ConcurrentSession {
-        // The held TUI opens switch-a first (it also spawns the daemon,
-        // the cold-launch path); the measured TUI then opens the huge
-        // session on that daemon, so the sample carries the concurrent
-        // session's daemon load. The measured launch pumps the held TUI
-        // for its whole first-needle wait — the held client is otherwise
-        // never drained, and its filled pty backpressures the shared
-        // daemon into the timed open.
+        // Keep the existing client drained while timing the shared-daemon open.
         let held_dump = ctx.corpus_root.join("failed-streams").join(format!(
             "{}-held-run{run}.bin",
             crate::report::key_of(scenario)
@@ -504,10 +477,7 @@ fn spawn_for_scenario(
     Ok((launch, None))
 }
 
-/// The scenario mechanics after the launch needle; a completed launch
-/// never dumps its stream. The second return value carries any extra
-/// measured TUI still open at the action's end (the held or second TUI)
-/// so the launch can sample RSS over it before teardown.
+/// Run the action and retain extra clients until RSS is sampled.
 fn launch_scenario(
     ctx: &RunCtx,
     launch: &mut Launch,
@@ -535,18 +505,28 @@ fn post_launch(
             launch.wait_ready()?;
             Ok((editor_echo_ack(ctx, &mut launch.child)?, held))
         }
-        Scenario::AgentsView => Ok((agents_view_populate(ctx, &mut launch.child)?, None)),
+        Scenario::AgentsView => {
+            // Include the viewer's fresh session in the stored-file count.
+            let counts = (ctx.manifest.markers.roster_inactive + 1, 0);
+            Ok((
+                agents_view_populate(ctx, &mut launch.child, counts.0, counts.1)?,
+                None,
+            ))
+        }
         Scenario::AgentsViewWarm => {
             // The first populate warms the daemon's in-process scan cache;
             // the second TUI measures the warm path on the same daemon.
-            agents_view_populate(ctx, &mut launch.child)?;
+            let counts = (ctx.manifest.markers.roster_inactive + 1, 0);
+            agents_view_populate(ctx, &mut launch.child, counts.0, counts.1)?;
             let socket = launch.socket.clone();
             let dump = ctx
                 .corpus_root
                 .join("failed-streams")
                 .join("agents-view-warm-second.bin");
             let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump, None)?;
-            let sample = agents_view_populate(ctx, &mut second.child)?;
+            // The held client adds one stored file and one live row.
+            let counts = (ctx.manifest.markers.roster_inactive + 2, 1);
+            let sample = agents_view_populate(ctx, &mut second.child, counts.0, counts.1)?;
             Ok((sample, Some(second)))
         }
         Scenario::SessionSwitch => Ok((switch_to_target_b(ctx, &mut launch.child)?, None)),
@@ -573,11 +553,7 @@ struct Launch {
 }
 
 impl Launch {
-    /// Spawn the TUI (fresh daemon when none listens on `socket`), wait the
-    /// first needle (the brand-splash paint, or the resumed transcript's
-    /// marker), and record exec -> needle. A `held` peer is pumped for the
-    /// whole wait: it shares the daemon with this launch, and its unpumped
-    /// pty would backpressure the daemon into the measured open.
+    /// Spawn the TUI and measure its first paint while draining any held peer.
     fn spawn(
         ctx: &RunCtx,
         socket: &Path,
@@ -665,14 +641,7 @@ impl Drop for Launch {
     }
 }
 
-/// The completed roster's screen observables under the saved catalog's
-/// pagination: the first page folds at most [`SAVED_CATALOG_PAGE_FILES`]
-/// files, the heading counts the fold's inactive rows
-/// (`folded - active_rows` — a paged fold still shows one fewer when the
-/// resumed session renders as its one non-inactive row), and the
-/// completion footer counts the unfolded files (`total_files - folded` —
-/// files, not inactive rows). `total_files` is the whole store at the
-/// moment of the wait.
+/// Derive the first-page heading and unloaded-file footer.
 fn roster_observables(total_files: usize, active_rows: usize) -> (String, Option<String>) {
     let folded = total_files.min(SAVED_CATALOG_PAGE_FILES as usize);
     let heading = format!("Inactive ({})", folded - active_rows);
@@ -681,9 +650,7 @@ fn roster_observables(total_files: usize, active_rows: usize) -> (String, Option
     (heading, footer)
 }
 
-/// Wait both roster-completion needles (the timed sample ends at whichever
-/// lands last): the heading repaints as pages fold, and the footer lands
-/// when the scan knows the unloaded count.
+/// Wait for both first-page completion observables.
 fn wait_roster_completed(
     ctx: &RunCtx,
     child: &mut PtyChild,
@@ -705,13 +672,14 @@ fn wait_roster_completed(
     Ok(())
 }
 
-/// The left-arrow opens the agents view; the populate needle is the
-/// completed roster in the decoded screen (the heading count repaints as
-/// cell diffs, so the byte stream cannot see it — the screen model does).
-/// The store holds the manifest's inactive sessions plus the TUI's own
-/// fresh session (rendered as one more inactive row).
-fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
-    let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive + 1, 0);
+/// Time the first page using the scenario's stored-file and live-row counts.
+fn agents_view_populate(
+    ctx: &RunCtx,
+    child: &mut PtyChild,
+    total_files: usize,
+    active_rows: usize,
+) -> anyhow::Result<f64> {
+    let (heading, footer) = roster_observables(total_files, active_rows);
     let started = Instant::now();
     child.write(b"\x1b[D")?;
     wait_roster_completed(ctx, child, &heading, footer.as_deref())?;
@@ -724,10 +692,7 @@ fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f6
 /// letter z), so Enter always drills THE row.
 fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     child.write(b"\x1b[D")?;
-    // Wait the completed roster before typing: keys racing the scan flood
-    // were the CI-runner failure (the query echoed nothing). The resumed
-    // session A renders as one IDLE row — the fold's one non-inactive row
-    // — so the completed heading counts the remaining sessions.
+    // Wait for the first page before typing so the scan cannot swallow the query.
     let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive, 1);
     wait_roster_completed(ctx, child, &heading, footer.as_deref())?;
     child.write(ctx.manifest.markers.switch_query.as_bytes())?;
@@ -769,17 +734,10 @@ fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// The editor acknowledgment: ten keystrokes into the prompt, the echo
-/// paint, then the clear. Timed: payload -> the full echo visible on the
-/// screen; the clear is verified — the rows that painted the echo must
-/// hold no payload character before the run completes — but untimed.
+/// Time the ten-character echo; verify its complete clear afterward.
 fn editor_echo_ack(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     let started = Instant::now();
-    // The payload and its delete ride the kitty protocol the harness
-    // itself advertised (KITTY_ANSWER reports flags `1|2|4`): the
-    // product's enhanced-key dedup coalesces identical back-to-back plain
-    // presses within one terminal write, so ten raw z bytes would arrive
-    // as five keystrokes.
+    // Plain repeated bytes are deduplicated under the advertised Kitty mode.
     child.write(&kitty_keystrokes('z' as u32, EDITOR_PAYLOAD.len()))?;
     child.wait_screen_contains(
         EDITOR_PAYLOAD,
@@ -787,9 +745,7 @@ fn editor_echo_ack(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
         Instant::now() + ctx.liveness,
     )?;
     let sample = started.elapsed().as_secs_f64() * 1000.0;
-    // The clear's acknowledgment is scoped to the editor's own rows: the
-    // substring form accepts one backspace's nine remaining z's, so every
-    // payload character must leave the rows that painted the echo.
+    // A missing full substring can still leave payload characters behind.
     let editor_rows = child.rows_containing(EDITOR_PAYLOAD)?;
     child.write(&kitty_keystrokes(0x7f, EDITOR_PAYLOAD.len()))?;
     child.wait_rows_lack(
@@ -991,7 +947,6 @@ fn build_result(
             sessions: ctx.manifest.counts.sessions,
             total_rows: ctx.manifest.counts.total_rows,
             child_sessions: ctx.manifest.counts.child_sessions,
-            archive: ctx.manifest.counts.archive,
         },
     }
 }
@@ -1017,8 +972,17 @@ fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
         Scenario::ColdReady | Scenario::WarmReady => {
             "the attach pill (the tray's session-usage row)".to_string()
         }
-        Scenario::AgentsView | Scenario::AgentsViewWarm => {
+        Scenario::AgentsView => {
             let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive + 1, 0);
+            match footer {
+                Some(footer) => format!(
+                    "the completed roster heading ({heading}) and completion footer ({footer})"
+                ),
+                None => format!("the completed roster heading ({heading})"),
+            }
+        }
+        Scenario::AgentsViewWarm => {
+            let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive + 2, 1);
             match footer {
                 Some(footer) => format!(
                     "the completed roster heading ({heading}) and completion footer ({footer})"
@@ -1061,7 +1025,6 @@ mod tests {
             rows: 100,
             huge_rows: 100,
             tree_parents: 0,
-            archive: 0,
             cwd_files: 1,
             ..crate::corpus::Profile::Small.defaults()
         })
@@ -1308,8 +1271,7 @@ mod tests {
         let (sample, rss, launched) = launch(&ctx, Scenario::WarmStart, 0)
             .expect("the daemon must drain its measured UI connection before exit");
         assert!(sample >= 0.0);
-        // The RSS sample is owned-tree bytes on Linux (procfs) and the
-        // explicit unavailability elsewhere — never a fake zero.
+        // Missing procfs must not become a zero RSS sample.
         #[cfg(target_os = "linux")]
         assert!(rss.is_some());
         #[cfg(not(target_os = "linux"))]

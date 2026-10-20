@@ -38,7 +38,6 @@ DIR/
   agent/                           # point PRIME_AGENT_CODING_AGENT_DIR here
     settings.json                  # onboarding pre-answered, traces off
     sessions/<uuid>.jsonl          # current-format session files (flat)
-    sessions-archive/<uuid>.jsonl
     rlm-ledger/<hash16>.jsonl      # written through pa-daemon's RlmSpawnLedger
     session-artifacts/...          # kernel-state stubs, harness/, sub-<id>/ trees
 ```
@@ -63,7 +62,6 @@ collide around ~22K rows and silently break branch reconstruction.
 | `--depth` | subagent tree depth | 2 | 2 | 3 | 2 |
 | `--tree-parents` | sessions growing a tree | 2 | 5 | 8 | 10 |
 | `--wide-children` | one parent's direct children (the operator's ~110-wide real parent) | 0 | 0 | 110 | 0 |
-| `--archive` | sessions in sessions-archive/ | 3 | 20 | 200 | 500 |
 | `--cwd-files` | files in the project tree | 200 | 2,000 | 4,000 | 2,000 |
 | `--artifacts` | per-session artifact partitions (on/off) | on | on | on | on |
 | `--cache` | cold/warm (see below) | cold | cold | cold | cold |

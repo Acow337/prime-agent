@@ -139,8 +139,7 @@ class InventoryTests(unittest.TestCase):
             with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
                 with self.assertRaises(ValueError):
                     inventory(executable, skills)
-            # Only import statements are executable; a path entry merely
-            # named like one ('imports/...') must not bypass the check.
+            # A path named like an import must not bypass the check.
             (site / 'relative.pth').write_text('imports/../../../../../harness/site-packages\n')
             with patch('runtime.subprocess.run', return_value=Mock(stdout=json.dumps(data))):
                 with self.assertRaises(ValueError):

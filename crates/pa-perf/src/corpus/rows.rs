@@ -476,11 +476,7 @@ pub(crate) fn write_session_file(
         }
     }
 
-    // The marker's final row: one typed user message appended after the
-    // turn loop. The windowed transcript materializes only the visible
-    // viewport rows on a tail-anchored resume, so a marker inside the last
-    // turn can sit above the first paint's window behind a giant final
-    // tool result — the file's last row is always inside that window.
+    // Only the visible tail paints on resume, so the marker must be last.
     if let Some(marker) = &spec.marker {
         rows.push(
             "message",
@@ -534,9 +530,6 @@ mod tests {
                     written.last_user_text, "final user marker",
                     "seed={seed}, target={target}"
                 );
-                // The marker is the file's last display row: the windowed
-                // transcript renders only the tail viewport, so anything
-                // after it would hide the marker from a resume.
                 let contents = std::fs::read_to_string(&path).expect("read session");
                 let last = contents.lines().next_back().expect("the file holds rows");
                 let last: serde_json::Value =

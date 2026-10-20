@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded release-artifact validation and offline input preparation; no candidate execution.
-
-prepare() consumes the product's existing release artifact directly: the
-manifest.json a commit-stamped continuous build uploads beside the Linux
-x64 tarball it names. The manifest binds the payload archive and the shipped
-executable by sha256; it does not attest the builder. The caller
-independently binds each artifact directory to its exact commit SHA
-(checked here against the manifest's commit stamp), its workflow run and
-its source repository out of band.
-"""
+"""Validate commit-bound release artifacts and prepare bounded offline inputs."""
 from __future__ import annotations
 import argparse
 import gzip
@@ -29,10 +20,7 @@ TARGET = 'x86_64-unknown-linux-gnu'
 
 
 class _CappedReader:
-    """A read-capped view of the expanded tar stream. tarfile reads a PAX
-    or GNU extension header of its declared size in one call, so a read
-    request larger than the bounded stream is rejected rather than
-    allocated."""
+    """Reject oversized TAR metadata reads before allocation."""
 
     def __init__(self, stream):
         self._stream = stream
@@ -108,10 +96,7 @@ def prepare(artifact: Path, destination: Path, sha: str) -> None:
     if file_sha256(payload) != binaries[0].get('sha256'):
         raise ValueError('release payload checksum mismatch')
     destination.mkdir(parents=True, exist_ok=False)
-    # tarfile reads PAX/GNU extension headers of their declared size into
-    # memory while parsing, so the whole decompressed stream (metadata
-    # included) is bounded to disk before tarfile ever sees a header; the
-    # most it can then read into memory at once is the capped stream.
+    # Bound extension metadata before tarfile can allocate its declared size.
     with open(payload, 'rb') as compressed:
         with gzip.GzipFile(fileobj=compressed) as stream, tempfile.TemporaryFile() as expanded:
             total = 0

@@ -12,10 +12,7 @@ MAX_DECLARED_BYTES = 256 * 1024 ** 2
 
 
 def bundled_skills(skills_root: Path) -> list[tuple[str, Path]]:
-    """The python skills packaged with the release, by the product's own rule:
-    a skills/<dir>/pyproject.toml whose src/<dir with dashes as underscores>/
-    __init__.py exists (pa-core skills/discovery.rs). The product installs them
-    editable, so their sources stay in the release package."""
+    """Discover packaged Python skills using the product's source-layout rule."""
     skills = []
     for pyproject in sorted(skills_root.glob('*/pyproject.toml')):
         name = pyproject.parent.name.replace('-', '_')
@@ -27,19 +24,13 @@ def bundled_skills(skills_root: Path) -> list[tuple[str, Path]]:
 
 
 def _foreign_pth_files(root: Path, allowed: list[Path]) -> list[str]:
-    """.pth path entries outside the venv and every declared release root:
-    the old harness shared-dependency escape hatch. Python resolves entries
-    relative to the containing site-packages directory, so relative entries
-    are joined against it before checking where they land."""
+    """Reject path entries outside the venv and declared skill sources."""
     foreign = []
     for site in root.glob('lib*/python*/site-packages'):
         for path in site.glob('*.pth'):
             for line in filter(None, path.read_text(errors='replace').splitlines()):
                 if line.startswith('#') or line.startswith(('import ', 'import\t')):
-                    # Comments are skipped and import lines execute at
-                    # interpreter startup rather than naming paths; the
-                    # .pth files themselves are inventoried as installed
-                    # files, so only path entries are checked.
+                    # Executable lines are hashed, not treated as paths.
                     continue
                 target = path.parent / Path(line)
                 if not any(target.resolve().is_relative_to(base) for base in allowed):
@@ -49,12 +40,7 @@ def _foreign_pth_files(root: Path, allowed: list[Path]) -> list[str]:
 
 
 def inventory(python: Path, skills_root: Path | None = None) -> dict:
-    """Record and verify one prepared product kernel venv. The venv itself must
-    hold the rlm runtime (a copied wheel install) and every installed package
-    file; the product's editable skill installs may reference their release
-    package sources, which are declared via `skills_root` and inventoried as
-    candidate files. Anything resolving anywhere else — a shared harness
-    site-packages, for example — fails here."""
+    """Hash a prepared product venv and its declared editable skill sources."""
     skills = bundled_skills(skills_root) if skills_root is not None else []
     code = '''
 import importlib, importlib.metadata, json, sys
@@ -72,9 +58,7 @@ print(json.dumps({'python': sys.version, 'prefix': sys.prefix, 'executable': sys
     if len(result.stdout) > 1024 ** 2:
         raise ValueError('oversized runtime inventory')
     data = json.loads(result.stdout)
-    # Raw paths on both sides: resolving the executable would dereference a
-    # uv venv's bin/python symlink back to the base interpreter, while
-    # resolving only the prefix would break venvs under symlinked roots.
+    # Do not resolve the venv interpreter symlink back to its base Python.
     if Path(data['prefix']) != Path(data['executable']).parent.parent:
         raise ValueError('runtime interpreter does not belong to its reported venv')
     root = Path(data['prefix']).resolve()
@@ -84,16 +68,12 @@ print(json.dumps({'python': sys.version, 'prefix': sys.prefix, 'executable': sys
     for name, module_path in data['modules'].items():
         if not any(Path(module_path).is_relative_to(base) for base in allowed):
             raise ValueError(f'probed module outside the venv and release package: {name}')
-    # A venv with include-system-site-packages (or any distribution whose
-    # metadata lives outside the venv) imports packages the inventory never
-    # hashes: every installed distribution's root must lie inside the venv;
-    # editable installs root at their metadata in the venv's site-packages.
+    # External distributions are not covered by the venv file hashes.
     if any(not Path(directory).resolve().is_relative_to(root)
            for _, directory in data['distribution_roots']):
         raise ValueError('installed distribution outside the venv')
     entries = list(root.rglob('*'))
-    # rglob does not descend into symlinked directories and is_file() filters
-    # them out, so package entries are checked for escapes first.
+    # Check directory links before the file filter hides them.
     if any(p.is_symlink() or not p.resolve().is_relative_to(root)
            for p in entries if 'site-packages' in p.parts):
         raise ValueError('runtime package escapes its environment')

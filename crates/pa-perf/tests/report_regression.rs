@@ -23,7 +23,6 @@ fn result(scenario: Scenario, median_ms: f64) -> BenchResult {
             sessions: 10,
             total_rows: 3_500,
             child_sessions: 12,
-            archive: 3,
         },
     }
 }

@@ -1,8 +1,4 @@
-//! The Linux owned-tree RSS sample: one immediate `/proc` snapshot over
-//! the harness-owned roots — the measured TUI, any concurrently held TUI,
-//! and the pre-started daemon — summed per process. Cold launches spawn
-//! the daemon as a direct child of the measured TUI. Workers and kernels
-//! follow the daemon's descendant tree. Never PSS or a whole-host RSS total.
+//! Immediate Linux process-tree RSS for the harness-owned roots.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,8 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 struct ProcRow {
     pid: i32,
     ppid: i32,
-    /// `VmRSS` in bytes; absent when the status body carries no `VmRSS`
-    /// line (kernel threads) — present in the tree, counted as zero.
+    /// Missing VmRSS counts as zero for a process that still belongs to the tree.
     rss_bytes: Option<u64>,
 }
 
@@ -32,9 +27,7 @@ fn parse_rss(status: &str) -> Option<u64> {
     Some(kb * 1024)
 }
 
-/// Sum the resident sets of every row inside `roots`' descendant trees (the
-/// roots included), over one snapshot's rows. Overlapping roots count once;
-/// a root missing from the snapshot fails instead of sampling a silent zero.
+/// Sum each owned process once; a missing root fails the sample.
 fn tree_rss_bytes(rows: &[ProcRow], roots: &[i32]) -> anyhow::Result<u64> {
     anyhow::ensure!(
         !roots.is_empty(),
@@ -67,21 +60,12 @@ fn tree_rss_bytes(rows: &[ProcRow], roots: &[i32]) -> anyhow::Result<u64> {
     Ok(total)
 }
 
-/// One immediate sample of the launch's owned trees: a single `/proc` sweep,
-/// one status read per process, then the pure tree sum. Processes that exit
-/// mid-sweep drop out (their rows are gone); a dead root fails the sample.
-///
-/// # Errors
-///
-/// Propagates `/proc` read failures and missing-root failures.
+/// Read one procfs snapshot and sum the owned process trees.
 pub(super) fn sample(
     tui_pid: i32,
     held_pid: Option<i32>,
     daemon_pid: Option<i32>,
 ) -> anyhow::Result<Option<u64>> {
-    // The roots in ownership order: the measured TUI (the cold launches'
-    // daemon is its setsid child), a concurrently held TUI, the
-    // harness-spawned daemon. Cold daemons are descendants of the TUI.
     let mut roots = vec![tui_pid];
     roots.extend(held_pid);
     roots.extend(daemon_pid);
@@ -114,8 +98,6 @@ pub(super) fn sample(
 mod tests {
     use super::*;
 
-    /// The `/proc/<pid>/status` shape, restricted to the fields the
-    /// parsers read.
     fn status(pid: i32, ppid: i32, rss_kb: Option<u64>) -> String {
         let rss = rss_kb.map_or_else(String::new, |kb| {
             format!("VmPeak:\t  {kb} kB\nVmSize:\t  {kb} kB\nVmRSS:\t  {kb} kB\n")
@@ -172,8 +154,7 @@ mod tests {
     #[test]
     fn overlapping_roots_count_the_shared_tree_once() {
         let rows = [row(1, 0, 10), row(2, 1, 20), row(3, 2, 30)];
-        // Passing both the TUI and its own daemon as roots must not
-        // double-count the daemon's subtree.
+        // Both roots must not double-count the shared subtree.
         assert_eq!(
             tree_rss_bytes(&rows, &[1, 2]).expect("the overlapping roots"),
             (10 + 20 + 30) * 1024
