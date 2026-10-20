@@ -1605,6 +1605,11 @@ class ScanCostGuardTest(unittest.TestCase):
         )
         self.assertTrue(is_scan("grep -rl -- -needle ~/Documents"))
         self.assertFalse(is_scan('grep -rl -- "$HOME" src/'))
+        # BSD find -f, empty quoted delimiters, nested subs in home spans
+        # (round 12).
+        self.assertTrue(is_scan("find -f ~/Documents"))
+        self.assertFalse(is_scan("cat <<''\ngrep -rl needle ~/Documents\n\n"))
+        self.assertTrue(is_scan('"$HOME/x; $(echo a; grep -rl needle ~/Documents)"'))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

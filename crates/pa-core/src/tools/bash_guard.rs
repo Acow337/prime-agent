@@ -698,7 +698,9 @@ fn mask_scan_literals(command: &str) -> String {
             // word disables expansion in the body.
             let quoted = word.contains('\'') || word.contains('"') || backslashed;
             let delim: String = word.chars().filter(|c| *c != '\'' && *c != '"').collect();
-            let is_delimiter = !delim.is_empty();
+            // A present (even empty, `<<''`) delimiter word is a heredoc;
+            // a missing one is not.
+            let is_delimiter = !word.is_empty();
             if is_delimiter {
                 let mut body = j;
                 while body < len && chars[body] != '\n' {
@@ -817,16 +819,48 @@ fn mask_scan_literals(command: &str) -> String {
             if starts_with_home_expansion(&chars, i + 1) {
                 let mut j = i + 1;
                 while j < len && chars[j] != '"' {
-                    if matches!(chars[j], ';' | '&' | '|' | '\n') {
-                        chars[j] = ' ';
-                    }
                     j += 1;
                 }
-                chars[i] = ' ';
-                if j < len {
-                    chars[j] = ' ';
+                let close = j;
+                // Mask separator characters outside substitutions: quoted
+                // separators are data, but a $(...)/backtick inside the span
+                // still executes and its body must stay intact for the
+                // substitution scan.
+                let mut k = i + 1;
+                let mut sub_depth = 0i32;
+                let mut backtick = false;
+                while k < close {
+                    let c = chars[k];
+                    if sub_depth > 0 {
+                        if c == '(' {
+                            sub_depth += 1;
+                        } else if c == ')' {
+                            sub_depth -= 1;
+                        }
+                        k += 1;
+                    } else if backtick {
+                        if c == '`' {
+                            backtick = false;
+                        }
+                        k += 1;
+                    } else if c == '$' && chars.get(k + 1) == Some(&'(') {
+                        sub_depth = 1;
+                        k += 2;
+                    } else if c == '`' {
+                        backtick = true;
+                        k += 1;
+                    } else {
+                        if matches!(c, ';' | '&' | '|' | '\n') {
+                            chars[k] = ' ';
+                        }
+                        k += 1;
+                    }
                 }
-                i = j + 1;
+                chars[i] = ' ';
+                if close < len {
+                    chars[close] = ' ';
+                }
+                i = close + 1;
                 continue;
             }
             chars[i] = MASK_PLACEHOLDER;
@@ -1077,15 +1111,19 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
         // `--file`) supply the pattern instead: their operands are skipped,
         // not roots. rg's `--files` listing mode takes no pattern at all, so
         // every positional is a path.
+        // Pattern options belong to grep-family and rg only: BSD find's
+        // `-f` supplies the hierarchy to walk, not a pattern file.
+        let takes_pattern_options = matches!(*first, "grep" | "egrep" | "fgrep" | "rg");
         let rg_files_mode = *first == "rg" && rest.contains(&"--files");
-        let pattern_from_option = rest.iter().any(|t| {
-            *t == "-e"
-                || *t == "--regexp"
-                || *t == "-f"
-                || *t == "--file"
-                || t.starts_with("--regexp=")
-                || t.starts_with("--file=")
-        });
+        let pattern_from_option = takes_pattern_options
+            && rest.iter().any(|t| {
+                *t == "-e"
+                    || *t == "--regexp"
+                    || *t == "-f"
+                    || *t == "--file"
+                    || t.starts_with("--regexp=")
+                    || t.starts_with("--file=")
+            });
         let mut root_tokens: Vec<&str> = Vec::new();
         let mut skip_next = false;
         let mut pattern_skipped = rg_files_mode || pattern_from_option;
@@ -1101,11 +1139,14 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
                 seen_ddash = true;
                 continue;
             }
-            if !seen_ddash && (*t == "-e" || *t == "--regexp" || *t == "-f" || *t == "--file") {
+            if !seen_ddash
+                && takes_pattern_options
+                && (*t == "-e" || *t == "--regexp" || *t == "-f" || *t == "--file")
+            {
                 skip_next = true;
                 continue;
             }
-            if t.starts_with("--regexp=") || t.starts_with("--file=") {
+            if takes_pattern_options && (t.starts_with("--regexp=") || t.starts_with("--file=")) {
                 continue;
             }
             if !pattern_skipped
@@ -1649,6 +1690,20 @@ mod tests {
             None
         ));
         assert!(!is_unbounded_home_scan("grep -rl -- \"$HOME\" src/", None));
+        // BSD find -f supplies the hierarchy, not a pattern file (round 12).
+        assert!(is_unbounded_home_scan("find -f ~/Documents", None));
+        // An empty quoted delimiter is a real heredoc: the body ends at the
+        // empty line.
+        assert!(!is_unbounded_home_scan(
+            "cat <<''\ngrep -rl needle ~/Documents\n\n",
+            None
+        ));
+        // Separators inside substitutions embedded in a home span stay
+        // intact: the nested scan still warns.
+        assert!(is_unbounded_home_scan(
+            "\"$HOME/x; $(echo a; grep -rl needle ~/Documents)\"",
+            None
+        ));
     }
 
     #[test]

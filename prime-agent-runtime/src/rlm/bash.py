@@ -285,7 +285,8 @@ def _mask_scan_literals(command: str) -> str:
             # disables expansion.
             quoted = "'" in word or '"' in word or backslashed
             delim = word.replace("'", "").replace('"', "")
-            if delim:
+            # A present (even empty, `<<''`) delimiter word is a heredoc.
+            if word:
                 body = j
                 while body < n and chars[body] != "\n":
                     body += 1
@@ -381,18 +382,43 @@ def _mask_scan_literals(command: str) -> str:
             # its own token (the positional pattern-skip in the segment
             # scanner keeps quoted patterns from counting as roots).
             if _starts_with_home_expansion(chars, i + 1):
-                # Mask separator characters inside the span: quoted
-                # separators are data and must not split the command into
-                # segments.
+                # Mask separator characters outside substitutions: quoted
+                # separators are data, but a $(...)/backtick inside the span
+                # still executes and its body must stay intact for the
+                # substitution scan.
                 j = i + 1
                 while j < n and chars[j] != '"':
-                    if chars[j] in (";", "&", "|", "\n"):
-                        chars[j] = " "
                     j += 1
+                close = j
+                k = i + 1
+                sub_depth = 0
+                backtick = False
+                while k < close:
+                    c = chars[k]
+                    if sub_depth > 0:
+                        if c == "(":
+                            sub_depth += 1
+                        elif c == ")":
+                            sub_depth -= 1
+                        k += 1
+                    elif backtick:
+                        if c == "`":
+                            backtick = False
+                        k += 1
+                    elif c == "$" and k + 1 < close and chars[k + 1] == "(":
+                        sub_depth = 1
+                        k += 2
+                    elif c == "`":
+                        backtick = True
+                        k += 1
+                    else:
+                        if c in (";", "&", "|", "\n"):
+                            chars[k] = " "
+                        k += 1
                 chars[i] = " "
-                if j < n:
-                    chars[j] = " "
-                i = j + 1
+                if close < n:
+                    chars[close] = " "
+                i = close + 1
                 continue
             chars[i] = MASK_PLACEHOLDER
             i += 1
@@ -482,8 +508,11 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         # Pattern options (-e/--regexp/-f/--file) supply the pattern: their
         # operands are skipped, not roots. rg's --files listing mode takes
         # no pattern at all, so every positional is a path.
+        # Pattern options belong to grep-family and rg only: BSD find's
+        # `-f` supplies the hierarchy to walk, not a pattern file.
+        takes_pattern_options = tokens[0] in ("grep", "egrep", "fgrep", "rg")
         rg_files_mode = tokens[0] == "rg" and "--files" in rest
-        pattern_from_option = any(
+        pattern_from_option = takes_pattern_options and any(
             t in ("-e", "--regexp", "-f", "--file")
             or t.startswith(("--regexp=", "--file="))
             for t in rest
@@ -501,10 +530,15 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
                 # pattern even when it starts with `-`.
                 seen_ddash = True
                 continue
-            if not seen_ddash and t in ("-e", "--regexp", "-f", "--file"):
+            if not seen_ddash and takes_pattern_options and t in (
+                "-e",
+                "--regexp",
+                "-f",
+                "--file",
+            ):
                 skip_next = True
                 continue
-            if t.startswith(("--regexp=", "--file=")):
+            if takes_pattern_options and t.startswith(("--regexp=", "--file=")):
                 continue
             if not pattern_skipped and tokens[0] in (
                 "grep",
