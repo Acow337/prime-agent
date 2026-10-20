@@ -165,6 +165,13 @@ def _is_redirect_operator(token: str) -> bool:
     return token.lstrip("0123456789") in _REDIRECT_OPERATORS
 
 
+# find's global options precede the paths, so they do not start the
+# expression; `-O level` / `-D debugopts` take an operand when bare.
+_FIND_GLOBAL_OPTIONS = frozenset(
+    {"-H", "-L", "-P", "-X", "-d", "-s", "-x", "--"}
+)
+
+
 # Masked quoted arguments leave this placeholder token behind: bash saw an
 # argument here, and the scanner's positional pattern-skip must skip the
 # placeholder, not a scan root that follows it.
@@ -543,6 +550,11 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
                     continue
                 if expression:
                     i += 1
+                    continue
+                if t in _FIND_GLOBAL_OPTIONS or t.startswith(("-O", "-D")):
+                    # Global options never start the expression; a bare
+                    # `-O`/`-D` consumes its operand token.
+                    i += 2 if t in ("-O", "-D") else 1
                     continue
                 if t == "-f":
                     if i + 1 < len(rest):

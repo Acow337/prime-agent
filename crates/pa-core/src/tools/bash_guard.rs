@@ -574,6 +574,14 @@ fn is_redirect_operator(token: &str) -> bool {
     )
 }
 
+/// find's global options precede the paths, so they do not start the
+/// expression; a bare `-O`/`-D` consumes its operand token.
+fn is_find_global_option(token: &str) -> bool {
+    matches!(token, "-H" | "-L" | "-P" | "-X" | "-d" | "-s" | "-x" | "--")
+        || token.starts_with("-O")
+        || token.starts_with("-D")
+}
+
 /// Masked quoted arguments leave this placeholder token behind: bash saw an
 /// argument, and the scanner's positional pattern-skip skips the placeholder
 /// instead of a scan root that follows it.
@@ -1154,6 +1162,11 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
                     i += 1;
                     continue;
                 }
+                if is_find_global_option(t) {
+                    // A bare `-O`/`-D` consumes its operand token.
+                    i += if t == "-O" || t == "-D" { 2 } else { 1 };
+                    continue;
+                }
                 if t == "-f" {
                     if let Some(hierarchy) = rest.get(i + 1).copied() {
                         root_tokens.push(hierarchy);
@@ -1317,6 +1330,23 @@ mod tests {
             None
         ));
         assert!(is_unbounded_home_scan("find -f ~/Documents", None));
+        // find's global options precede the paths, so a home root behind
+        // -L/-H/-P/--/-O is still a scan root (bot round on the fix head).
+        assert!(is_unbounded_home_scan(
+            "find -L ~/Documents -name '*.pdf'",
+            None
+        ));
+        assert!(is_unbounded_home_scan("find -H ~/Documents", None));
+        assert!(is_unbounded_home_scan("find -P ~/Documents", None));
+        assert!(is_unbounded_home_scan("find -- ~/Documents", None));
+        assert!(is_unbounded_home_scan("find -X ~/Documents", None));
+        assert!(is_unbounded_home_scan("find -O3 ~/Documents", None));
+        assert!(is_unbounded_home_scan("find -O 3 ~/Documents", None));
+        assert!(!is_unbounded_home_scan("find -L . -newer ~/stamp", None));
+        assert!(!is_unbounded_home_scan(
+            r"find -L . -name '*.log' -exec cp {} ~/backup/ \;",
+            None
+        ));
     }
 
     #[test]

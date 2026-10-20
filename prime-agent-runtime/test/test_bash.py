@@ -1630,6 +1630,17 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("grep -rl needle ~/Documents 2> ~/err.log"))
         self.assertTrue(is_scan("find ~/Documents -name '*.pdf' > ~/out.txt"))
         self.assertTrue(is_scan("find -f ~/Documents"))
+        # find's global options precede the paths, so a home root behind
+        # -L/-H/-P/--/-O is still a scan root (bot round on the fix head).
+        self.assertTrue(is_scan("find -L ~/Documents -name '*.pdf'"))
+        self.assertTrue(is_scan("find -H ~/Documents"))
+        self.assertTrue(is_scan("find -P ~/Documents"))
+        self.assertTrue(is_scan("find -- ~/Documents"))
+        self.assertTrue(is_scan("find -X ~/Documents"))
+        self.assertTrue(is_scan("find -O3 ~/Documents"))
+        self.assertTrue(is_scan("find -O 3 ~/Documents"))
+        self.assertFalse(is_scan("find -L . -newer ~/stamp"))
+        self.assertFalse(is_scan("find -L . -name '*.log' -exec cp {} ~/backup/ \;"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (
