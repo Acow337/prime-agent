@@ -197,6 +197,22 @@ def _mask_scan_literals(command: str) -> str:
                 chars[j] = " "
             i = j + 1
             continue
+        if ch == "$" and i + 2 < n and chars[i + 1] == "(" and chars[i + 2] == "(":
+            # Arithmetic expansion `$((...))` is not command text for the
+            # guard: skip it whole so a `<<` shift inside it (`$((a<<b))`)
+            # cannot read as a heredoc operator.
+            depth = 0
+            j = i + 1
+            while j < n:
+                if chars[j] == "(":
+                    depth += 1
+                elif chars[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            i = (j + 1) if j < n else n
+            continue
         if (
             ch == "<"
             and i + 1 < n
@@ -218,8 +234,10 @@ def _mask_scan_literals(command: str) -> str:
             while j < n and not chars[j].isspace():
                 j += 1
             word = "".join(chars[word_start:j])
-            quoted = word.startswith(("'", '"'))
-            delim = word.strip("'\"")
+            # Shell quote removal across the whole delimiter word: `E'OF'` is
+            # `EOF`, and any quoting anywhere in the word disables expansion.
+            quoted = "'" in word or '"' in word
+            delim = word.replace("'", "").replace('"', "")
             if delim and (delim[0].isascii() and (delim[0].isalpha() or delim[0] == "_")):
                 body = j
                 while body < n and chars[body] != "\n":

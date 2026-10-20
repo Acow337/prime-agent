@@ -1561,6 +1561,12 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan('echo "use <<EOF in scripts"; grep -rl needle ~/Documents'))
         self.assertTrue(is_scan("echo 'cat <<EOF'; grep -rl needle ~/Documents"))
         self.assertTrue(is_scan("# cat <<EOF\ngrep -rl needle ~/Documents"))
+        # Partially quoted delimiters and named arithmetic shifts (round 5).
+        self.assertFalse(is_scan("cat <<E'OF'\ngrep -rl needle ~/Documents\nEOF"))
+        self.assertTrue(is_scan("cat <<E'OF'\nbody\nEOF\nfind \"$HOME\" -name '*.pdf'"))
+        self.assertFalse(is_scan("echo $((a<<b))"))
+        self.assertTrue(is_scan("echo $((a<<b))\ngrep -rl needle ~/Documents"))
+        self.assertFalse(is_scan("cat <<E'OF'\n$(grep -rl needle ~/Documents)\nEOF"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

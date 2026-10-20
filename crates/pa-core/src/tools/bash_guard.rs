@@ -601,6 +601,26 @@ fn mask_scan_literals(command: &str) -> String {
             i = j + 1;
             continue;
         }
+        if ch == '$' && chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') {
+            // Arithmetic expansion `$((...))` is not command text for the
+            // guard: skip it whole so a `<<` shift inside it (`$((a<<b))`)
+            // cannot read as a heredoc operator.
+            let mut depth = 0i32;
+            let mut j = i + 1;
+            while j < len {
+                if chars[j] == '(' {
+                    depth += 1;
+                } else if chars[j] == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            i = if j < len { j + 1 } else { len };
+            continue;
+        }
         if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') {
             // Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
             // `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
@@ -620,8 +640,11 @@ fn mask_scan_literals(command: &str) -> String {
                 word.push(chars[j]);
                 j += 1;
             }
-            let quoted = word.starts_with('\'') || word.starts_with('"');
-            let delim = word.trim_matches(|c| c == '\'' || c == '"').to_string();
+            // Shell quote removal across the whole delimiter word:
+            // `E'OF'` is `EOF`, and any quoting anywhere in the word
+            // disables expansion in the body.
+            let quoted = word.contains('\'') || word.contains('"');
+            let delim: String = word.chars().filter(|c| *c != '\'' && *c != '"').collect();
             let is_delimiter = !delim.is_empty()
                 && (delim.as_bytes()[0].is_ascii_alphabetic() || delim.as_bytes()[0] == b'_');
             if is_delimiter {
@@ -1230,6 +1253,33 @@ mod tests {
         ));
         assert!(is_unbounded_home_scan(
             "# cat <<EOF\ngrep -rl needle ~/Documents",
+            None
+        ));
+    }
+
+    /// Regression coverage for the fifth bot-review round: quote removal
+    /// across a heredoc delimiter word, and arithmetic shifts with named
+    /// operands.
+    #[test]
+    fn partially_quoted_delimiters_and_named_shifts_scan_correctly() {
+        // `E'OF'` is the delimiter `EOF` with expansion disabled: the body
+        // masks through the real terminator line, and later commands stay
+        // live (previously the unmatched `E'OF` masked everything after it).
+        let command = "cat <<E'OF'\nbody\nEOF\nfind \"$HOME\" -name '*.pdf'";
+        assert!(!is_unbounded_home_scan(
+            "cat <<E'OF'\ngrep -rl needle ~/Documents\nEOF",
+            None
+        ));
+        assert!(is_unbounded_home_scan(command, None));
+        // A named-operand arithmetic shift is not a heredoc.
+        assert!(!is_unbounded_home_scan("echo $((a<<b))", None));
+        assert!(is_unbounded_home_scan(
+            "echo $((a<<b))\ngrep -rl needle ~/Documents",
+            None
+        ));
+        // Quote anywhere in the delimiter disables body expansion.
+        assert!(!is_unbounded_home_scan(
+            "cat <<E'OF'\n$(grep -rl needle ~/Documents)\nEOF",
             None
         ));
     }
