@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use pa_core::kernel::rlm_runtime::create_default_rlm_subagent_session_name;
 use pa_core::session_engine::rlm_host::{
-    RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult,
-    RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentActivity, RlmSubagentEntry,
-    RlmSubagentHost,
+    RlmAgentWatch, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentActivity,
+    RlmSubagentEntry, RlmSubagentHost, RlmWatchReadPage,
 };
 use pa_core::session_engine::rlm_notices::{
     create_rlm_child_failure_message, create_rlm_child_terminal_notice, RlmChildTerminalNotice,
@@ -421,6 +421,10 @@ struct SupervisorChildSessionsInner {
     semantic_edges: std::sync::Mutex<
         Option<std::sync::Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>>,
     >,
+    /// The `rlm.watch.agent` registry: one per parent session worker,
+    /// supervisor-owned (it survives the Python kernel). Held beside the
+    /// child ledger so the poller reads the same roster it observes.
+    agent_watch: Mutex<agent_watch::AgentWatchRegistry>,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -466,6 +470,7 @@ impl SupervisorChildSessions {
                 delete_notifier: std::sync::Mutex::new(None),
                 child_update_sink: std::sync::Mutex::new(None),
                 semantic_edges: std::sync::Mutex::new(None),
+                agent_watch: Mutex::new(agent_watch::AgentWatchRegistry::default()),
             }),
         }
     }
@@ -1074,6 +1079,7 @@ impl SupervisorChildSessionsInner {
     }
 }
 
+mod agent_watch;
 mod host;
 mod lifecycle;
 mod registry;
@@ -1081,6 +1087,9 @@ mod usage;
 
 #[cfg(test)]
 mod watch_tests;
+
+#[cfg(test)]
+mod agent_watch_tests;
 
 #[cfg(test)]
 mod usage_emit_tests;

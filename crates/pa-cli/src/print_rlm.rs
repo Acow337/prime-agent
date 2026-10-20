@@ -20,9 +20,9 @@ use pa_core::session_engine::goal_boundary::custom_message_to_loop_row;
 use pa_core::session_engine::provider_adapter::model_thinking_level;
 use pa_core::session_engine::rlm_host::{
     resolve_rlm_max_depth, rlm_child_session_dir, rlm_create_session_daemonless_error,
-    rlm_depth_limit_error, spawn_name_unavailable_error, RlmChildResult, RlmCreateSessionHandle,
-    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
-    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost,
+    rlm_depth_limit_error, spawn_name_unavailable_error, RlmAgentWatch, RlmChildResult,
+    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
+    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, RlmWatchReadPage,
 };
 
 use pa_core::session_engine::rlm_notices::{
@@ -915,6 +915,30 @@ impl RlmSubagentHost for InlineHost {
             };
             rename_session(&child.node, &name).await?;
             Ok(name)
+        })
+    }
+
+    // -- rlm.watch.* (the inline host has no supervisor-owned watch
+    // registry; every watch request answers truthfully) -----------------
+
+    fn watch_agent(&self, target: String) -> RlmHostFuture<RlmAgentWatch> {
+        Box::pin(async move {
+            anyhow::bail!("No direct child matches \"{target}\" in the current parent session")
+        })
+    }
+    fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn watch_agent_cancel(&self, _id: String) -> RlmHostFuture<bool> {
+        Box::pin(async { Ok(false) })
+    }
+    fn watch_read(&self, _since_seq: u64, _limit: u64) -> RlmHostFuture<RlmWatchReadPage> {
+        Box::pin(async {
+            Ok(RlmWatchReadPage {
+                events: Vec::new(),
+                next_seq: 0,
+                dropped: 0,
+            })
         })
     }
 }

@@ -183,6 +183,9 @@ impl SupervisorChildSessionsInner {
     /// A child whose session is already gone is a completed no-op; every
     /// other close failure is kept (walk all children, rethrow the first error).
     pub(super) async fn close_children_inner(&self, reason: ChildCloseReason) -> Result<()> {
+        // The owner session is closing: its watches die with it (nano-rlm
+        // "owner termination cancels subscriptions").
+        self.shutdown_agent_watch().await;
         let usage_persisted = self.replay_retired_usage(None).await;
         let children = self.children.lock().await.clone();
         let mut close_error = (!usage_persisted)
