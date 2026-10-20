@@ -517,6 +517,40 @@ async def rename(new_name: str, *, session_id: str | RLMSpawnHandle | RLMSubagen
     return name
 
 
+async def watch_agent(target: str) -> dict[str, Any]:
+    """Subscribe to a direct child's activity (message ranges + status
+    transitions, never content). Re-registering the same child re-baselines
+    its one subscription. The registry is supervisor-owned: it survives a
+    kernel restart and dies with the parent session.
+    """
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("rlm.watch.agent requires a target child name or id")
+    return await host_request("rlm.watch.agent", {"target": target})
+
+
+async def watch_agent_list() -> dict[str, Any]:
+    """List this session's watch subscriptions (``{"watches": [...]}``)."""
+    return await host_request("rlm.watch.agent_list")
+
+
+async def watch_agent_cancel(watch_id: str) -> dict[str, Any]:
+    """Cancel one watch subscription (idempotent; ``{"cancelled": bool}``)."""
+    if not isinstance(watch_id, str) or not watch_id.strip():
+        raise ValueError("rlm.watch.agent_cancel requires an id")
+    return await host_request("rlm.watch.agent_cancel", {"id": watch_id})
+
+
+async def watch_read(since_seq: int = 0, limit: int = 100) -> dict[str, Any]:
+    """Page the bounded watch event ring: events with ``seq > since_seq``,
+    the next cursor (``next_seq``), and the ring's cumulative ``dropped``
+    count. Pass the previous page's ``next_seq`` as ``since_seq``."""
+    if not isinstance(since_seq, int) or isinstance(since_seq, bool) or since_seq < 0:
+        raise ValueError("rlm.watch.read since_seq must be a non-negative integer")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("rlm.watch.read limit must be a positive integer")
+    return await host_request("rlm.watch.read", {"since_seq": since_seq, "limit": limit})
+
+
 class _HarnessProxy:
     """Resolve the harness state against the current environment on every access.
 
@@ -564,6 +598,32 @@ class _HarnessProxy:
 
 
 _harness_state = _HarnessProxy()
+
+
+class _RLMWatchNamespace:
+    """Supervisor-owned activity subscriptions: rlm.watch.agent / agent_list /
+    agent_cancel / read (stage 1; watch.job and watch.path arrive later).
+
+    ``await rlm.watch.agent('<child>')`` subscribes to a direct child's
+    activity: message-index ranges and status transitions, never content.
+    The registry is supervisor-owned, so a subscription survives a kernel
+    restart but dies with the parent session. ``await rlm.watch.read()`` pages
+    the bounded event ring (``since_seq`` is the previous page's
+    ``next_seq``); every call is async, so always await it:
+    ``page = await rlm.watch.read()``.
+    """
+
+    async def agent(self, target: str) -> dict[str, Any]:
+        return await watch_agent(target)
+
+    async def agent_list(self) -> dict[str, Any]:
+        return await watch_agent_list()
+
+    async def agent_cancel(self, watch_id: str) -> dict[str, Any]:
+        return await watch_agent_cancel(watch_id)
+
+    async def read(self, since_seq: int = 0, limit: int = 100) -> dict[str, Any]:
+        return await watch_read(since_seq=since_seq, limit=limit)
 
 
 class _RLMFactoryNamespace:
@@ -676,6 +736,7 @@ class _RLMNamespace:
         return await collect(targets, timeout_ms=timeout_ms)
 
     factory = _RLMFactoryNamespace()
+    watch = _RLMWatchNamespace()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
@@ -727,6 +788,10 @@ __all__ = [
     "rename",
     "rlm",
     "spawn",
+    "watch_agent",
+    "watch_agent_cancel",
+    "watch_agent_list",
+    "watch_read",
 ]
 
 # Lazily re-export the MCP base class. Kept lazy so `import rlm` never requires

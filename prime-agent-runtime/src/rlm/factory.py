@@ -8,9 +8,9 @@ sugar: it compiles to machine form (each node becomes a state entered
 once; a node's full effective dependency set compiles to ONE join
 transition that waits for every predecessor, so fan-in nodes never start
 after a single parent settles with a blocked second transition). Wait
-states are specified for the communication series but gated here:
-the watch host handlers (``rlm.watch.*``) do not exist yet, so a state
-carrying a ``wait`` block is rejected at write time.
+states carry a validated ``wait`` block (``kind``/``target``/
+``timeout_ms``, the staged ``rlm.watch.*`` surface); the executor parks a
+settled wait state on the watch ring instead of completing it.
 
 This module implements the write-time dry run for both forms -- the machine
 validator, the dag-to-machine compiler, the unified entry point
@@ -255,6 +255,50 @@ def _validate_run_fields(run: Any, errors: list[str]) -> int | None:
     return run_budget
 
 
+#: The wait kinds the schema accepts (staged: `agent` is live, `job`
+#: arrives with stage 2, `path` with stage 3).
+WAIT_KINDS = ("agent", "job", "path")
+#: The wait kinds whose host handlers exist on this stack. A not-yet-
+#: landed kind is refused with its stage pointer, keeping the old "remove
+#: the wait block until then" contract honest per kind instead of
+#: certifying a block the executor cannot run.
+WAIT_KINDS_AVAILABLE = ("agent",)
+#: The wait stage pointers for the not-yet-landed kinds' refusal text.
+_WAIT_KIND_STAGES = {"job": "stage 2", "path": "stage 3"}
+
+
+def _validate_wait_block(errors: list[str], noun: str, ref: str, wait: Any) -> None:
+    """One wait block's schema, shared by dag nodes and machine states.
+
+    ``kind`` is the staged watch surface, ``target`` names the watched
+    child, and ``timeout_ms`` is bounded: the factory's non-blocking
+    discipline (no wall-clock wait inside a turn) must not be broken by
+    an unbounded wait state.
+    """
+    if not isinstance(wait, dict):
+        errors.append(f"{noun} {ref} wait must be an object")
+        return
+    kind = wait.get("kind")
+    if kind not in WAIT_KINDS:
+        errors.append(
+            f"{noun} {ref} wait kind must be one of {list(WAIT_KINDS)}, got {kind!r}"
+        )
+    elif kind not in WAIT_KINDS_AVAILABLE:
+        stage = _WAIT_KIND_STAGES[kind]
+        errors.append(
+            f"{noun} {ref} wait kind '{kind}' requires rlm.watch.{kind} (arrives with {stage})"
+        )
+    target = wait.get("target")
+    if not _is_nonempty_str(target):
+        errors.append(f"{noun} {ref} wait requires a non-empty target")
+    # WATCH_TIMEOUT_CAP_SECONDS is declared further down this module; the
+    # cap reads it at call time, not import time.
+    cap_ms = int(WATCH_TIMEOUT_CAP_SECONDS * 1000)
+    timeout_ms = wait.get("timeout_ms")
+    if not _is_int(timeout_ms) or not 0 < timeout_ms <= cap_ms:
+        errors.append(f"{noun} {ref} wait timeout_ms must be an integer between 1 and {cap_ms}")
+
+
 def _validate_state_fields(
     state: dict[str, Any],
     *,
@@ -276,16 +320,14 @@ def _validate_state_fields(
     is_resident = lifecycle == "resident"
 
     if state.get("wait") is not None:
-        # Gated: the watch host handlers (rlm.watch.*) arrive with the
-        # communication series; a wait block would silently no-op until then.
-        errors.append(
-            f"{noun} {ref}: wait states require the watch host handlers (rlm.watch.*); "
-            "they arrive with the communication series - remove the wait block until then"
-        )
+        _validate_wait_block(errors, noun, ref, state["wait"])
 
     subagent = state.get("subagent")
     if _is_nonempty_str(subagent):
         pass  # Harness subagent entry id or title; resolved at run time.
+    elif subagent is None and state.get("wait") is not None:
+        pass  # A wait-only state: a pure barrier with no subagent of its
+        # own; the wait block's own validation covers the block.
     elif isinstance(subagent, dict):
         # Runtime resolution strips these fields (_resolve_subagents /
         # _validate_spawn_settings), so whitespace-only values are rejected
@@ -493,8 +535,9 @@ def validate_factory_machine(machine: Any) -> list[str]:
     the machine is valid. Rules: states are 1..1024 with unique slug ids and
     at least one entry state; every state requires a subagent and entry
     states declare no inputs; resident states declare no outputs, foreach,
-    retries, or outgoing transitions; wait blocks are rejected (the watch host
-    handlers arrive with the communication series); transitions reference
+    retries, or outgoing transitions; wait blocks are schema-checked
+    (kind/target/timeout_ms, the staged rlm.watch.* kinds) and a state
+    with a wait block may omit its subagent (a pure barrier); transitions reference
     existing states (self-loops are legal re-entry) and may carry one guard
     over the from-state's latest settle output; a transition with a LIST of
     from-states is a join that fires once every source settled (guards are
@@ -782,7 +825,17 @@ def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
     for node in nodes:
         edges = _effective_dag_edges(node)
         state: dict[str, Any] = {"id": node["id"], "entry": not edges, "max_entries": STATE_MAX_ENTRIES_DEFAULT}
-        for key in ("subagent", "lifecycle", "budget_ms", "retries", "failure_policy", "inputs", "outputs", "foreach"):
+        for key in (
+            "subagent",
+            "lifecycle",
+            "budget_ms",
+            "retries",
+            "failure_policy",
+            "inputs",
+            "outputs",
+            "foreach",
+            "wait",
+        ):
             if key in node:
                 state[key] = copy.deepcopy(node[key])
         machine["states"].append(state)
@@ -858,9 +911,10 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
             "lifecycle": state.get("lifecycle", NODE_LIFECYCLE_DEFAULT),
             "retries": state.get("retries", NODE_RETRIES_DEFAULT),
             "failure_policy": state.get("failure_policy", run_policy),
-            "subagent": copy.deepcopy(state["subagent"]),
         }
-        for key in ("budget_ms", "inputs", "outputs", "foreach"):
+        if "subagent" in state:
+            state_out["subagent"] = copy.deepcopy(state["subagent"])
+        for key in ("budget_ms", "inputs", "outputs", "foreach", "wait"):
             if key in state:
                 state_out[key] = copy.deepcopy(state[key])
         states_out.append(state_out)
@@ -1401,7 +1455,7 @@ class _StateEntry:
     """
 
     index: int  # per-state entry index, 0-based
-    status: str = "pending"  # pending | running | done | error | cancelled
+    status: str = "pending"  # pending | running | waiting | done | error | cancelled
     instances: list[_NodeInstance] = field(default_factory=list)
     error: str | None = None
     answer: str | None = None  # joined captured answers of this entry
@@ -1409,6 +1463,10 @@ class _StateEntry:
     output_errors: dict[str, str] | None = None  # ports whose json capture failed
     is_settle: bool = False  # True once the entry settled (done or error)
     consumed: bool = False  # True once the settle's transitions were evaluated
+    wait_started_at: float | None = None  # the injected clock when the entry
+    # entered its wait state (the timeout deadline's origin)
+    wait_subscription_id: str | None = None  # the rlm.watch.agent subscription
+    wait_cursor: int = 0  # the watch ring's read cursor (the seq filter)
     needs_verify: bool = False  # a child exit carried a provisional answer
     # (the M4 oversight mark): the entry failed, but the child's last
     # assistant text is preserved as a provisional answer and the run
@@ -1974,7 +2032,7 @@ class FactoryExecutor:
                 state_id
                 for state_id in run.order
                 if any(
-                    entry.status in ("pending", "running")
+                    entry.status in ("pending", "running", "waiting")
                     or any(
                         instance.status in ("pending", "running")
                         for instance in entry.instances
@@ -2242,6 +2300,8 @@ class FactoryExecutor:
         errors: list[str] = []
         for state_spec in canonical["states"]:
             state_id = state_spec["id"]
+            if "subagent" not in state_spec:
+                continue  # a wait-only state: a pure barrier, nothing to resolve
             reference = state_spec["subagent"]
             if isinstance(reference, dict):
                 prompt = reference.get("prompt")
@@ -2636,6 +2696,12 @@ class FactoryExecutor:
                         run, "node_ready", node=state_id, entry=entry.index,
                         detail=f"{len(instances)} instance(s) prepared",
                     )
+                elif state.spec.get("wait") is not None:
+                    self._event(
+                        run, "node_ready", node=state_id, entry=entry.index,
+                        detail="wait-only entry; nothing to run",
+                    )
+                    await self._enter_wait(run, state, entry)
                 else:
                     entry.status = "done"
                     self._event(
@@ -2737,8 +2803,11 @@ class FactoryExecutor:
                 items = value
                 continue
             values[name] = json.dumps(value)
+        if state.prompt_template is None:
+            # A wait-only state (a pure barrier): nothing to render or
+            # spawn; the entry parks on its wait block.
+            return [], None
         if foreach is None:
-            assert state.prompt_template is not None
             instance = _NodeInstance(index=state.instance_counter, prompt=_render_prompt(state.prompt_template, values))
             state.instance_counter += 1
             return [instance], None
@@ -2984,8 +3053,151 @@ class FactoryExecutor:
                     run, state, entry, instance, capture_failure, retry=True
                 )
                 return
+            if state.spec.get("wait") is not None:
+                # A wait state parks after its own instances settle: the
+                # entry completes only on the watched child's activity.
+                await self._enter_wait(run, state, entry)
+                return
             entry.status = "done"
             self._queue_settle(run, state, entry)
+
+    # -- wait states (the rlm.watch.agent lane) ------------------------------
+
+    async def _enter_wait(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
+        """Enter the entry's wait: subscribe once, arm the read cursor,
+        and mark the entry ``waiting`` (the control loop's wait pass polls
+        the ring). A failed subscribe settles the entry as an error
+        through the same settle machinery a timeout uses — never a silent
+        no-op."""
+        wait = state.spec.get("wait") or {}
+        target = wait.get("target") or ""
+        entry.status = "waiting"
+        entry.wait_started_at = self._now_fn()
+        entry.wait_subscription_id = None
+        entry.wait_cursor = 0
+        self._event(
+            run,
+            "wait_started",
+            node=state.state_id,
+            entry=entry.index,
+            target=target,
+            timeout_ms=wait.get("timeout_ms"),
+            detail=f"waiting on {target!r}",
+        )
+        from . import watch_agent, watch_read
+
+        try:
+            handle = await watch_agent(target)
+            # Arm the cursor from the ring's current tail: the wait reacts
+            # to activity AFTER the subscribe, never to replayed events
+            # (a same-child re-register reuses the subscription id).
+            page = await watch_read(since_seq=0, limit=1)
+        except Exception as exc:
+            await self._settle_wait_error(
+                run, state, entry, f"wait subscribe on {target!r} failed: {exc}"
+            )
+            return
+        entry.wait_subscription_id = handle.get("id")
+        entry.wait_cursor = int(page.get("next_seq") or 0)
+
+    async def _settle_wait_error(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry, reason: str
+    ) -> None:
+        """End a waiting entry as an error settle (subscribe failure or
+        timeout): the entry's instances are already done, so the normal
+        failure machinery has nothing to retry — the settle propagates
+        through transitions like any error settle."""
+        await self._cancel_wait_subscription(entry)
+        entry.status = "error"
+        entry.error = reason
+        entry.is_settle = True
+        self._event(run, "wait_timeout", node=state.state_id, entry=entry.index, detail=reason)
+        self._queue_settle(run, state, entry)
+
+    async def _cancel_wait_subscription(self, entry: _StateEntry) -> None:
+        """Best-effort cancel of the entry's subscription (a run that
+        dies does not leak one; the registry dies with the session
+        anyway)."""
+        subscription_id = entry.wait_subscription_id
+        entry.wait_subscription_id = None
+        if not subscription_id:
+            return
+        from . import watch_agent_cancel
+
+        try:
+            await watch_agent_cancel(subscription_id)
+        except Exception:
+            pass  # the session teardown cancels the registry regardless
+
+    def _waiting_entries(self, run: FactoryRun) -> list[tuple[_StateRun, _StateEntry]]:
+        return [
+            (run.states[state_id], entry)
+            for state_id in run.order
+            for entry in run.states[state_id].entries
+            if entry.status == "waiting"
+        ]
+
+    async def _service_waits(self, run: FactoryRun) -> float:
+        """One wait pass over every waiting entry: read the watch ring,
+        fire on the entry's subscription, time out past the deadline.
+        Returns the bounded park (seconds) the loop should sleep while
+        waits remain pending (0.0 when none do)."""
+        from . import watch_read
+
+        waiting = self._waiting_entries(run)
+        if not waiting:
+            return 0.0
+        now = self._now_fn()
+        park = POLL_TIMEOUT_MS / 1000
+        for state, entry in waiting:
+            wait = state.spec.get("wait") or {}
+            timeout_s = (wait.get("timeout_ms") or 0) / 1000
+            remaining = (entry.wait_started_at or now) + timeout_s - now
+            if remaining <= 0:
+                await self._settle_wait_error(
+                    run,
+                    state,
+                    entry,
+                    f"wait timeout_ms {wait.get('timeout_ms')} exceeded for target {wait.get('target')!r}",
+                )
+                continue
+            try:
+                page = await watch_read(since_seq=entry.wait_cursor, limit=50)
+            except Exception:
+                # A transient host miss skips this poll round; the timeout
+                # still bounds the wait.
+                park = min(park, remaining)
+                continue
+            entry.wait_cursor = int(page.get("next_seq") or entry.wait_cursor)
+            match = next(
+                (
+                    event
+                    for event in page.get("events") or []
+                    if event.get("subscription_id") == entry.wait_subscription_id
+                ),
+                None,
+            )
+            if match is not None:
+                content = match.get("content") or {}
+                status = content.get("status")
+                self._event(
+                    run,
+                    "wait_fired",
+                    node=state.state_id,
+                    entry=entry.index,
+                    subscription_id=entry.wait_subscription_id,
+                    start=content.get("start"),
+                    end=content.get("end"),
+                    **({"status": status} if status else {}),
+                )
+                entry.status = "done"
+                # The wait consumed its subscription: no leak across
+                # repeated entries of the same watch.
+                await self._cancel_wait_subscription(entry)
+                self._queue_settle(run, state, entry)
+                continue
+            park = min(park, remaining)
+        return max(park, 0.01) if self._waiting_entries(run) else 0.0
 
     async def _recheck_infra_death(self, instance: _NodeInstance, result: Any) -> Any:
         """Liveness-verify one infra-flavoured error settle before it is
@@ -3391,16 +3603,26 @@ class FactoryExecutor:
         stopped = [
             state_id
             for state_id in run.order
-            if any(entry.status in ("pending", "running") for entry in run.states[state_id].entries)
+            if any(
+                entry.status in ("pending", "running", "waiting")
+                for entry in run.states[state_id].entries
+            )
             or (not run.states[state_id].entries and run.states[state_id].status == "pending")
         ]
         await self._cancel_running(run)
         for state_id in stopped:
             state = run.states[state_id]
-            if any(entry.status in ("pending", "running") for entry in state.entries) or not state.entries:
+            if (
+                any(entry.status in ("pending", "running", "waiting") for entry in state.entries)
+                or not state.entries
+            ):
                 state.cancelled = True
                 for entry in state.entries:
-                    if entry.status in ("pending", "running"):
+                    if entry.status in ("pending", "running", "waiting"):
+                        if entry.status == "waiting":
+                            # A stopped wait releases its subscription: a
+                            # dead run must not leak one.
+                            await self._cancel_wait_subscription(entry)
                         entry.status = "cancelled"
                         self._event(run, "node_cancelled", node=state_id, entry=entry.index, detail=reason)
                         for instance in entry.instances:
@@ -3502,7 +3724,7 @@ class FactoryExecutor:
         for state in run.states.values():
             resident = state.lifecycle == "resident"
             for entry in state.entries:
-                if entry.status in ("pending", "running"):
+                if entry.status in ("pending", "running", "waiting"):
                     if not (resident and entry.status == "running"):
                         return False
                 for instance in entry.instances:
@@ -3615,6 +3837,13 @@ class FactoryExecutor:
             await self._evaluate_settles(run)
             if not self._loop_alive(run, generation):
                 return
+            # Wait pass: a waiting entry parks on the watch ring until its
+            # watched child grows, times out, or the run stops.
+            wait_park = 0.0
+            if self._waiting_entries(run):
+                wait_park = await self._service_waits(run)
+                if not self._loop_alive(run, generation):
+                    return
             if self._run_complete(run):
                 await self._finalize(run)
                 return
@@ -3660,6 +3889,7 @@ class FactoryExecutor:
                 and not started
                 and not self._has_pending_instance(run)
                 and not run.pending_evaluations
+                and not self._waiting_entries(run)
             ):
                 # Defensive: nothing in flight, nothing admitted, nothing
                 # pending -- or only resident instances in flight, which
@@ -3692,7 +3922,13 @@ class FactoryExecutor:
             # Yield once per iteration. A real collect already waits up to
             # POLL_TIMEOUT_MS, but an instantly-settling host (tests, a fast
             # supervisor) must not hot-spin the loop and starve other tasks.
-            await asyncio.sleep(0)
+            # A pending wait parks one bounded slice instead: the next read
+            # poll is due no sooner than the slice, and the park is capped by
+            # the nearest wait deadline.
+            if wait_park > 0:
+                await self._sleep_fn(wait_park)
+            else:
+                await asyncio.sleep(0)
 
     # -- small helpers --------------------------------------------------------
 
@@ -3735,7 +3971,11 @@ class FactoryExecutor:
         )
 
     def _pending_state_ids(self, run: FactoryRun) -> list[str]:
-        return [state_id for state_id in run.order if run.states[state_id].status == "pending"]
+        return [
+            state_id
+            for state_id in run.order
+            if run.states[state_id].status in ("pending", "waiting")
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -5068,6 +5308,19 @@ the cap, fails to capture, and fails the producing state through its
   foreach, no retries, and no outgoing transitions, nothing reads from
   them, and their instance stays alive under the parent session after the
   run completes (stop the run to retire it).
+- **Wait states**: `"wait": {"kind": "agent", "target": "...",
+  "timeout_ms": 5000}` parks the entry on a direct child's activity. The
+  state runs its own subagent (or, with no `subagent` at all, is a pure
+  barrier), and after its instances settle it subscribes once with
+  `rlm.watch.agent(target)` — the target is any direct child of the
+  session, typically a resident's child or a prior state's spawn — and
+  completes only when that child's message count grows (`wait_fired`
+  carries the observed `start`/`end` range; the message indexes are
+  ranges, never content) or `timeout_ms` (1..60000) elapses (the entry
+  settles as an error with a `wait_timeout` event). A stopped run
+  cancels the subscription. `kind` is staged: `"agent"` is live;
+  `"job"` (stage 2) and `"path"` (stage 3) are refused at write time
+  until their handlers land.
 - **Bounds and policies**: `run.max_parallel` (1..64, default 8) is the
   run's global budget of simultaneously running instances — not a
   per-node limit. `run.max_children` (default 10,000, capped at

@@ -1346,34 +1346,79 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         }
         self.assertEqual(validate_factory_machine(no_shadow), [])
 
-    def test_wait_states_are_gated_until_the_communication_series(self) -> None:
-        # The rlm.watch.* host handlers do not exist on this stack, so wait
-        # blocks are rejected outright (machine form and dag form alike).
-        machine = {
+    def test_wait_state_schema_validates(self) -> None:
+        # Stage 1 ungating: a well-formed agent wait validates in both
+        # forms (a wait state may omit its subagent — a pure barrier).
+        ok = {
             "states": [
-                {"id": "watch", "entry": True, "subagent": "w", "wait": {"kind": "path", "target": "/tmp/x", "timeout_ms": 5}},
+                {"id": "watch", "entry": True, "subagent": "w", "wait": {"kind": "agent", "target": "worker", "timeout_ms": 5_000}},
+                {"id": "barrier", "wait": {"kind": "agent", "target": "worker", "timeout_ms": 5_000}},
                 state("act"),
             ],
             "transitions": [{"from": "watch", "to": "act"}],
         }
-        errors = validate_factory_machine(machine)
-        self.assertEqual(
-            errors,
-            [
-                "state watch: wait states require the watch host handlers (rlm.watch.*); "
-                "they arrive with the communication series - remove the wait block until then"
-            ],
-        )
-        self.assertEqual(validate_factory_spec(machine), errors)
+        self.assertEqual(validate_factory_machine(ok), [])
+        self.assertEqual(validate_factory_spec(ok), [])
 
-        dag_wait = {"nodes": [node("a", wait={"kind": "path", "target": "t", "timeout_ms": 5})]}
-        errors = validate_factory_spec(dag_wait)
+        def errors_for(wait: Any, ref: str = "watch") -> list[str]:
+            machine = {
+                "states": [
+                    {"id": ref, "entry": True, "subagent": "w", "wait": wait},
+                    state("act"),
+                ],
+                "transitions": [{"from": ref, "to": "act"}],
+            }
+            return validate_factory_machine(machine)
+
+        # A non-object wait.
         self.assertEqual(
-            errors,
-            [
-                "node a: wait states require the watch host handlers (rlm.watch.*); "
-                "they arrive with the communication series - remove the wait block until then"
+            errors_for("agent"),
+            ["state watch wait must be an object"],
+        )
+        # Each field's own error, one sentence each.
+        self.assertEqual(
+            errors_for({"target": "worker", "timeout_ms": 5}),
+            ["state watch wait kind must be one of ['agent', 'job', 'path'], got None"],
+        )
+        self.assertEqual(
+            errors_for({"kind": "agent", "timeout_ms": 5}),
+            ["state watch wait requires a non-empty target"],
+        )
+        for bad_timeout in (0, -1, 60_001, "soon", None):
+            self.assertEqual(
+                errors_for({"kind": "agent", "target": "worker", "timeout_ms": bad_timeout}),
+                ["state watch wait timeout_ms must be an integer between 1 and 60000"],
+            )
+        # The dag form shares the field check.
+        dag_bad = {"nodes": [node("a", wait={"kind": "agent", "timeout_ms": 5})]}
+        self.assertEqual(
+            validate_factory_spec(dag_bad),
+            ["node a wait requires a non-empty target"],
+        )
+
+    def test_wait_kinds_are_gated_per_stage(self) -> None:
+        # Stage 1 ships rlm.watch.agent only: job and path still refuse,
+        # with the stage pointer instead of the old blanket rejection.
+        machine = {
+            "states": [
+                {"id": "watch", "entry": True, "subagent": "w", "wait": {"kind": "job", "target": "w", "timeout_ms": 5}},
+                state("act"),
             ],
+            "transitions": [{"from": "watch", "to": "act"}],
+        }
+        self.assertEqual(
+            validate_factory_machine(machine),
+            ["state watch wait kind 'job' requires rlm.watch.job (arrives with stage 2)"],
+        )
+        dag_wait = {"nodes": [node("a", wait={"kind": "path", "target": "t", "timeout_ms": 5})]}
+        self.assertEqual(
+            validate_factory_spec(dag_wait),
+            ["node a wait kind 'path' requires rlm.watch.path (arrives with stage 3)"],
+        )
+        # A missing kind is the vocabulary error, not the stage pointer.
+        self.assertEqual(
+            validate_factory_spec({"nodes": [node("a", wait={"target": "t", "timeout_ms": 5})]}),
+            ["node a wait kind must be one of ['agent', 'job', 'path'], got None"],
         )
 
     def test_resident_states(self) -> None:
@@ -2775,6 +2820,9 @@ class FakeHost:
         self.gates: dict[tuple[str, int], asyncio.Event] = {}
         self.gate_entries: dict[tuple[str, int], asyncio.Event] = {}
         self._call_indices: dict[str, int] = {}
+        # The watch ring: scripted `rlm.watch.read` events, appended by
+        # the test between polls; `next_seq` follows the highest scripted seq.
+        self.watch_events: list[dict[str, Any]] = []
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -2931,6 +2979,27 @@ class FakeHost:
         if request_type == "factory.progress":
             self.notices.append(payload)
             return {}
+        if request_type == "rlm.watch.agent":
+            target = payload["target"]
+            return {
+                "id": f"watch-agent-{target}",
+                "child_id": target,
+                "child_name": target,
+                "messages": 0,
+                "status": "active",
+                "total_events": 0,
+                "created_at_ms": 1,
+            }
+        if request_type == "rlm.watch.agent_list":
+            return {"watches": []}
+        if request_type == "rlm.watch.agent_cancel":
+            return {"cancelled": True}
+        if request_type == "rlm.watch.read":
+            since = int(payload.get("since_seq") or 0)
+            limit = int(payload.get("limit") or 100)
+            events = [event for event in self.watch_events if event["seq"] > since][:limit]
+            next_seq = max((event["seq"] for event in self.watch_events), default=0)
+            return {"events": events, "next_seq": next_seq, "dropped": 0}
         raise AssertionError(f"unexpected host request type {request_type!r}")
 
 
@@ -6746,6 +6815,124 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # both states ran to completion: neither admission failed
         self.assertEqual(self.node_status(status, "collect-findings-pass-one")["status"], "done")
         self.assertEqual(self.node_status(status, "collect-findings-pass-two")["status"], "done")
+
+    # -- wait states (the rlm.watch.agent lane) --------------------------------
+
+    @async_test
+    async def test_wait_state_fires_on_watch_event(self) -> None:
+        # A wait state parks after its own subagent settles and completes
+        # only on the watched child's growth: the entry reports
+        # ``waiting`` mid-run, the event's range rides the ``wait_fired``
+        # ledger event, and the subscription is cancelled once consumed.
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                    {"id": "act", "subagent": "worker"},
+                ],
+                "transitions": [{"from": "w1", "to": "act"}],
+            }
+        )
+        # The wait parks between read polls; a real slice sleep keeps the
+        # injected clock from burning the whole timeout inside the first
+        # loop tick (the timeout test below uses the clock-advancing
+        # sleep on purpose).
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        # The child settles, the entry enters waiting: wait for the
+        # subscription before scripting the growth event (the cursor is
+        # armed at subscribe time and must not see the event as replay).
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(self.node_status(status, "w1")["entries"][0]["status"], "waiting")
+        self.host.watch_events.append(
+            {
+                "id": "watch-abc",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 3, "end": 5, "status": None},
+                "at_ms": 1,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        fired = self.all_events_of(result, "wait_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["start"], 3)
+        self.assertEqual(fired[0]["end"], 5)
+        self.assertEqual(fired[0]["subscription_id"], "watch-agent-watched")
+        started = self.all_events_of(result, "wait_started")
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["target"], "watched")
+        # The wait consumed its subscription: no leak to later entries.
+        cancels = self.host.calls_of("rlm.watch.agent_cancel")
+        self.assertEqual([c["id"] for c in cancels], ["watch-agent-watched"])
+        # The downstream transition ran after the wait fired.
+        self.assertEqual(self.node_status(status, "act")["status"], "done")
+
+    @async_test
+    async def test_wait_state_times_out(self) -> None:
+        # No growth inside ``timeout_ms`` settles the entry as an error
+        # with a ``wait_timeout`` event — the run never hangs on a wait.
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("timeout_ms 500 exceeded", timeouts[0]["detail"])
+        entry = self.node_status(status, "w1")["entries"][0]
+        self.assertEqual(entry["status"], "error")
+        # The timed-out wait released its subscription too.
+        self.assertEqual([c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")], ["watch-agent-watched"])
+
+    @async_test
+    async def test_wait_only_state_and_stop_cancel_the_subscription(self) -> None:
+        # A pure barrier (no subagent of its own) waits immediately, and a
+        # stopped run cancels its subscription with the entry.
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "barrier",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(self.node_status(status, "barrier")["entries"][0]["status"], "waiting")
+        self.assertEqual(self.node_status(status, "barrier")["status"], "waiting")
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual([c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")], ["watch-agent-watched"])
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(self.node_status(status, "barrier")["entries"][0]["status"], "cancelled")
 
 
 # ---------------------------------------------------------------------------
