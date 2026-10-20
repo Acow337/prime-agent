@@ -369,7 +369,7 @@ impl SupervisorChildSessionsInner {
 
     /// The record whose child id is exactly `child_id` (the watch
     /// poller's target): a sibling whose session NAME happens to equal a
-    /// watched child's id must not shadow the child — find_record is a
+    /// watched child's id must not shadow the child - `find_record` is a
     /// first-match scan, so name matches there can win over the id.
     pub(super) async fn find_record_by_child_id(
         &self,
