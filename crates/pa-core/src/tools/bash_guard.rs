@@ -563,6 +563,17 @@ fn is_find_depth_bound(token: &str, next: Option<&str>) -> bool {
     token == "-maxdepth" && next.is_some_and(is_number)
 }
 
+/// Redirection operators: the token after one is a target file, not a scan
+/// root, so a project-local scan writing to ~ must not warn. Mirrors the
+/// Python kernel helper.
+fn is_redirect_operator(token: &str) -> bool {
+    let op = token.trim_start_matches(|c: char| c.is_ascii_digit());
+    matches!(
+        op,
+        ">" | ">>" | "<" | "<>" | ">|" | ">&" | "<&" | "&>" | "&>>"
+    )
+}
+
 /// Masked quoted arguments leave this placeholder token behind: bash saw an
 /// argument, and the scanner's positional pattern-skip skips the placeholder
 /// instead of a scan root that follows it.
@@ -1123,6 +1134,45 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
         if bounded {
             continue;
         }
+        if *first == "find" {
+            // find's syntax is `find [path...] [expression]`: a `-`-led
+            // token starts the expression, and everything after it (-exec
+            // bodies, -newer operands, ...) is operands, not scan roots —
+            // so `find . -exec cp {} ~/backup/ \;` stays quiet. BSD's
+            // `-f path` names the hierarchy itself. A redirection's target
+            // is a file to write, never a scan root.
+            let mut root_tokens: Vec<&str> = Vec::new();
+            let mut expression = false;
+            let mut i = 0;
+            while i < rest.len() {
+                let t = rest[i];
+                if is_redirect_operator(t) {
+                    i += 2; // the operator and its target
+                    continue;
+                }
+                if expression {
+                    i += 1;
+                    continue;
+                }
+                if t == "-f" {
+                    if let Some(hierarchy) = rest.get(i + 1).copied() {
+                        root_tokens.push(hierarchy);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if t.starts_with('-') {
+                    expression = true;
+                } else {
+                    root_tokens.push(t);
+                }
+                i += 1;
+            }
+            if !root_tokens.iter().any(|t| is_home_scale_root(t)) {
+                continue;
+            }
+            return true;
+        }
         // grep-family and rg take their pattern as the first non-option
         // argument — it is pattern text, not a scan root, and a quoted
         // pattern containing $HOME (`grep -rl "$HOME/needle" src/`) must
@@ -1151,6 +1201,10 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
         for t in rest {
             if skip_next {
                 skip_next = false; // the operand of a pattern option
+                continue;
+            }
+            if is_redirect_operator(t) {
+                skip_next = true; // its target is a file to write, not a root
                 continue;
             }
             if !seen_ddash && *t == "--" {
@@ -1222,6 +1276,48 @@ mod tests {
     /// The incident command (session 01a15735): a recursive grep over six
     /// home-scale trees piped to `head`, held a turn for 13 minutes.
     const INCIDENT: &str = r"grep -rli -e 'training metrics' -e 'advanced dashboard' ~/Documents ~/Desktop ~/Claude ~/environments ~/outputs ~/Downloads 2>/dev/null | grep -viE '\.(pdf|jsonl|log|txt)$' | head -10; echo done";
+
+    #[test]
+    fn home_redirect_targets_and_find_expression_operands_do_not_warn() {
+        // A redirection target or a find expression operand is not a scan
+        // root (Cursor Bugbot round on the merge head): a project-local
+        // scan writing to ~ must not warn or get the env auto-timeout.
+        assert!(!is_unbounded_home_scan(
+            "grep -rl needle . > ~/out.txt",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "grep -rl needle src/ 2>> ~/err.log",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "rg pattern . >> ~/results.txt",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "cat < ~/in.txt | grep -rl needle . > ~/out.txt",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            r"find . -name '*.log' -exec cp {} ~/backup/ \;",
+            None
+        ));
+        assert!(!is_unbounded_home_scan("find . -newer ~/stamp", None));
+        // Real home roots still warn, redirects and all.
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle ~/Documents > ~/out.txt",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "grep -rl needle ~/Documents 2> ~/err.log",
+            None
+        ));
+        assert!(is_unbounded_home_scan(
+            "find ~/Documents -name '*.pdf' > ~/out.txt",
+            None
+        ));
+        assert!(is_unbounded_home_scan("find -f ~/Documents", None));
+    }
 
     #[test]
     fn the_incident_scan_shape_warns() {

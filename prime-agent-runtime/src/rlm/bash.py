@@ -152,6 +152,19 @@ def _is_find_depth_bound(tokens: list[str]) -> bool:
     return False
 
 
+# Redirection operators: the token after one is a target file, not a scan
+# root, so a project-local scan writing to ~ must not warn.
+_REDIRECT_OPERATORS = frozenset(
+    {">", ">>", "<", "<>", ">|", ">&", "<&", "&>", "&>>"}
+)
+
+
+def _is_redirect_operator(token: str) -> bool:
+    """A redirection operator token, with its optional fd prefix (`2>`).
+    Mirrors the Rust bash_guard."""
+    return token.lstrip("0123456789") in _REDIRECT_OPERATORS
+
+
 # Masked quoted arguments leave this placeholder token behind: bash saw an
 # argument here, and the scanner's positional pattern-skip must skip the
 # placeholder, not a scan root that follows it.
@@ -513,6 +526,37 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         # no pattern at all, so every positional is a path.
         # Pattern options belong to grep-family and rg only: BSD find's
         # `-f` supplies the hierarchy to walk, not a pattern file.
+        if tokens[0] == "find":
+            # find's syntax is `find [path...] [expression]`: a `-`-led
+            # token starts the expression, and everything after it (-exec
+            # bodies, -newer operands, ...) is operands, not scan roots —
+            # so `find . -exec cp {} ~/backup/ \;` stays quiet. BSD's
+            # `-f path` names the hierarchy itself. A redirection's target
+            # is a file to write, never a scan root.
+            root_tokens = []
+            expression = False
+            i = 0
+            while i < len(rest):
+                t = rest[i]
+                if _is_redirect_operator(t):
+                    i += 2  # the operator and its target
+                    continue
+                if expression:
+                    i += 1
+                    continue
+                if t == "-f":
+                    if i + 1 < len(rest):
+                        root_tokens.append(rest[i + 1])
+                    i += 2
+                    continue
+                if t.startswith("-"):
+                    expression = True
+                else:
+                    root_tokens.append(t)
+                i += 1
+            if not any(_is_home_scale_root(t) for t in root_tokens):
+                continue
+            return True
         takes_pattern_options = tokens[0] in ("grep", "egrep", "fgrep", "rg")
         rg_files_mode = tokens[0] == "rg" and "--files" in rest
         pattern_from_option = takes_pattern_options and any(
@@ -527,6 +571,9 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         for t in rest:
             if skip_next:
                 skip_next = False  # the operand of a pattern option
+                continue
+            if _is_redirect_operator(t):
+                skip_next = True  # its target is a file to write, not a root
                 continue
             if not seen_ddash and t == "--":
                 # `--` ends option parsing: the next positional is the

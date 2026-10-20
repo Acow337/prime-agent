@@ -1618,6 +1618,18 @@ class ScanCostGuardTest(unittest.TestCase):
         # A quoted multi-home pattern stays one token (round 14).
         self.assertFalse(is_scan('grep -rl "$HOME/a|$HOME/b" src/'))
         self.assertTrue(is_scan('grep -rl needle "$HOME/docs with spaces"'))
+        # A redirection target or a find expression operand is not a scan
+        # root (bot round on the merge head); real home roots still warn.
+        self.assertFalse(is_scan("grep -rl needle . > ~/out.txt"))
+        self.assertFalse(is_scan("grep -rl needle src/ 2>> ~/err.log"))
+        self.assertFalse(is_scan("rg pattern . >> ~/results.txt"))
+        self.assertFalse(is_scan("cat < ~/in.txt | grep -rl needle . > ~/out.txt"))
+        self.assertFalse(is_scan("find . -name '*.log' -exec cp {} ~/backup/ \;"))
+        self.assertFalse(is_scan("find . -newer ~/stamp"))
+        self.assertTrue(is_scan("grep -rl needle ~/Documents > ~/out.txt"))
+        self.assertTrue(is_scan("grep -rl needle ~/Documents 2> ~/err.log"))
+        self.assertTrue(is_scan("find ~/Documents -name '*.pdf' > ~/out.txt"))
+        self.assertTrue(is_scan("find -f ~/Documents"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (
