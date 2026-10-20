@@ -38,6 +38,10 @@ The following programmatic tools are available in the REPL for subagent manageme
 - `rlm.rename(new_name: str, *, session_id=None) -> str`: rename the calling session (omit `session_id`) or a direct child (spawn handle, `list_subagents()` row, or session id; never the child's name); names must be unique among siblings, and the renamed session sees a transcript line for the change
 - `rlm.collect(targets=None, *, timeout_ms: int = 0) -> list[RLMChildResult]`: typed snapshots of direct children (status, settled flag, answer preview, error) without steering anyone; `timeout_ms=0` returns a non-blocking snapshot; a positive timeout blocks only this call until the children settle or the deadline passes
 - `rlm.progress_note(message: str) -> dict`: report brief in-flight progress to the parent orchestrator (at most 512 characters, throttled to about one note per 10 seconds); the parent sees notes without needing a reply
+- `rlm.watch.agent(target: str) -> dict`: subscribe to a direct child's activity (message-index ranges and status transitions, never content); the subscription registry is supervisor-owned, so it survives a kernel restart and dies with the parent session; registering the same child again re-baselines its one subscription
+- `rlm.watch.agent_list() -> dict`: this session's watch subscriptions
+- `rlm.watch.agent_cancel(watch_id: str) -> dict`: cancel one watch subscription (idempotent; unknown ids answer `false`, never an error)
+- `rlm.watch.read(since_seq: int = 0, limit: int = 100) -> dict`: page the bounded watch event ring; returns the events with `seq > since_seq`, the cursor to pass next (`next_seq`), and the ring's dropped-event count (`dropped`)
 - `RLMSpawnHandle`
   - `rlm_child_id: str`
   - `name: str`
