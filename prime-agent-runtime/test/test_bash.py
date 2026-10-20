@@ -1599,6 +1599,12 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertFalse(is_scan("echo ok;# example | grep -rl needle ~/Documents"))
         self.assertTrue(is_scan("rg --files ~/Documents"))
         self.assertFalse(is_scan('grep -rl -e "$HOME/needle" src/'))
+        # Quoted separators inside home-prefixed spans; `--` (round 11).
+        self.assertFalse(
+            is_scan("printf '%s\\n' \"$HOME/example;grep -rl needle ~/Documents\"; sleep 120")
+        )
+        self.assertTrue(is_scan("grep -rl -- -needle ~/Documents"))
+        self.assertFalse(is_scan('grep -rl -- "$HOME" src/'))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

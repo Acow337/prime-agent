@@ -381,8 +381,13 @@ def _mask_scan_literals(command: str) -> str:
             # its own token (the positional pattern-skip in the segment
             # scanner keeps quoted patterns from counting as roots).
             if _starts_with_home_expansion(chars, i + 1):
+                # Mask separator characters inside the span: quoted
+                # separators are data and must not split the command into
+                # segments.
                 j = i + 1
                 while j < n and chars[j] != '"':
+                    if chars[j] in (";", "&", "|", "\n"):
+                        chars[j] = " "
                     j += 1
                 chars[i] = " "
                 if j < n:
@@ -486,11 +491,17 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         root_tokens = []
         skip_next = False
         pattern_skipped = rg_files_mode or pattern_from_option
+        seen_ddash = False
         for t in rest:
             if skip_next:
                 skip_next = False  # the operand of a pattern option
                 continue
-            if t in ("-e", "--regexp", "-f", "--file"):
+            if not seen_ddash and t == "--":
+                # `--` ends option parsing: the next positional is the
+                # pattern even when it starts with `-`.
+                seen_ddash = True
+                continue
+            if not seen_ddash and t in ("-e", "--regexp", "-f", "--file"):
                 skip_next = True
                 continue
             if t.startswith(("--regexp=", "--file=")):
@@ -500,7 +511,7 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
                 "egrep",
                 "fgrep",
                 "rg",
-            ) and not t.startswith("-"):
+            ) and (seen_ddash or not t.startswith("-")):
                 pattern_skipped = True  # the positional pattern
                 continue
             root_tokens.append(t)

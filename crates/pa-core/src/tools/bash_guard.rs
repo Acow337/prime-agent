@@ -811,10 +811,15 @@ fn mask_scan_literals(command: &str) -> String {
             // A span that starts with a home expansion is a path argument:
             // keep the whole span live so the expansion is never split into
             // its own token (`grep -rl "$HOME/needle" src/` keeps the
-            // pattern whole for the positional pattern-skip in the scanner).
+            // pattern whole for the positional pattern-skip in the scanner),
+            // but mask separator characters inside it — quoted separators are
+            // data and must not split the command into segments.
             if starts_with_home_expansion(&chars, i + 1) {
                 let mut j = i + 1;
                 while j < len && chars[j] != '"' {
+                    if matches!(chars[j], ';' | '&' | '|' | '\n') {
+                        chars[j] = ' ';
+                    }
                     j += 1;
                 }
                 chars[i] = ' ';
@@ -1084,12 +1089,19 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
         let mut root_tokens: Vec<&str> = Vec::new();
         let mut skip_next = false;
         let mut pattern_skipped = rg_files_mode || pattern_from_option;
+        let mut seen_ddash = false;
         for t in rest {
             if skip_next {
                 skip_next = false; // the operand of a pattern option
                 continue;
             }
-            if *t == "-e" || *t == "--regexp" || *t == "-f" || *t == "--file" {
+            if !seen_ddash && *t == "--" {
+                // `--` ends option parsing: the next positional is the
+                // pattern even when it starts with `-`.
+                seen_ddash = true;
+                continue;
+            }
+            if !seen_ddash && (*t == "-e" || *t == "--regexp" || *t == "-f" || *t == "--file") {
                 skip_next = true;
                 continue;
             }
@@ -1098,7 +1110,7 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
             }
             if !pattern_skipped
                 && matches!(*first, "grep" | "egrep" | "fgrep" | "rg")
-                && !t.starts_with('-')
+                && (seen_ddash || !t.starts_with('-'))
             {
                 pattern_skipped = true; // the positional pattern
                 continue;
@@ -1617,6 +1629,26 @@ mod tests {
             "grep -rl -e \"$HOME/needle\" src/",
             None
         ));
+    }
+
+    /// Regression coverage for the eleventh bot-review round: separators
+    /// inside a home-prefixed quoted span are data, and `--` ends option
+    /// parsing.
+    #[test]
+    fn quoted_separators_and_ddash_scan_correctly() {
+        // A quoted semicolon inside a home-prefixed span never splits the
+        // command into segments.
+        assert!(!is_unbounded_home_scan(
+            "printf '%s\\n' \"$HOME/example;grep -rl needle ~/Documents\"; sleep 120",
+            None
+        ));
+        // `--` ends option parsing: `-needle` is the pattern, the home
+        // directory is the root.
+        assert!(is_unbounded_home_scan(
+            "grep -rl -- -needle ~/Documents",
+            None
+        ));
+        assert!(!is_unbounded_home_scan("grep -rl -- \"$HOME\" src/", None));
     }
 
     #[test]
