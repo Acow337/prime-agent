@@ -174,6 +174,12 @@ def _starts_with_home_expansion(chars: list[str], at: int) -> bool:
     return nxt is None or not (nxt.isascii() and (nxt.isalnum() or nxt == "_"))
 
 
+# Heredoc bodies masked per command: each one scans forward for its
+# terminator line, so a malformed command full of `<<` operators must not
+# turn the preflight scan quadratic.
+_HEREDOC_MASK_CAP = 8
+
+
 def _mask_scan_literals(command: str) -> str:
     """Mirror of the Rust bash_guard masker: one linear scan masking
     single-quoted spans, double-quoted literal data, comments, and heredoc
@@ -187,6 +193,7 @@ def _mask_scan_literals(command: str) -> str:
     """
     chars = list(command)
     n = len(chars)
+    heredocs_masked = 0
     i = 0
     while i < n:
         ch = chars[i]
@@ -232,7 +239,9 @@ def _mask_scan_literals(command: str) -> str:
             and chars[i + 1] == "<"
             and not (i + 2 < n and chars[i + 2] == "<")
             and (i == 0 or chars[i - 1] != "<")
+            and heredocs_masked < _HEREDOC_MASK_CAP
         ):
+            heredocs_masked += 1
             # Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
             # `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
             # line is input text, never executed, so mask it. A digit-first
@@ -421,7 +430,11 @@ def _mask_scan_literals(command: str) -> str:
                 chars[i] = " "  # closing quote
             i += 1
             continue
-        if ch == "#" and (i == 0 or chars[i - 1].isspace()):
+        if ch == "#" and (
+            i == 0
+            or chars[i - 1].isspace()
+            or chars[i - 1] in ";&|()<>"
+        ):
             while i < n and chars[i] != "\n":
                 chars[i] = " "
                 i += 1
@@ -461,18 +474,36 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         # leaves a placeholder in its position). When the pattern came from
         # a pattern option (-e/--regexp/-f/--file), every non-option
         # argument is a root and none is skipped.
+        # Pattern options (-e/--regexp/-f/--file) supply the pattern: their
+        # operands are skipped, not roots. rg's --files listing mode takes
+        # no pattern at all, so every positional is a path.
+        rg_files_mode = tokens[0] == "rg" and "--files" in rest
         pattern_from_option = any(
             t in ("-e", "--regexp", "-f", "--file")
             or t.startswith(("--regexp=", "--file="))
             for t in rest
         )
-        root_tokens = rest
-        if tokens[0] in ("grep", "egrep", "fgrep", "rg") and not pattern_from_option:
-            non_option = [k for k, t in enumerate(root_tokens) if not t.startswith("-")]
-            if non_option:
-                root_tokens = (
-                    root_tokens[: non_option[0]] + root_tokens[non_option[0] + 1 :]
-                )
+        root_tokens = []
+        skip_next = False
+        pattern_skipped = rg_files_mode or pattern_from_option
+        for t in rest:
+            if skip_next:
+                skip_next = False  # the operand of a pattern option
+                continue
+            if t in ("-e", "--regexp", "-f", "--file"):
+                skip_next = True
+                continue
+            if t.startswith(("--regexp=", "--file=")):
+                continue
+            if not pattern_skipped and tokens[0] in (
+                "grep",
+                "egrep",
+                "fgrep",
+                "rg",
+            ) and not t.startswith("-"):
+                pattern_skipped = True  # the positional pattern
+                continue
+            root_tokens.append(t)
         if not any(_is_home_scale_root(t) for t in root_tokens):
             continue
         return True
@@ -482,10 +513,25 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
 def _substitution_bodies(masked: str) -> list[str]:
     """Bodies of $(...) spans (paren-depth matched) and backticks: these
     execute, so their text is command text."""
+    def _is_escaped(at: int) -> bool:
+        # A backslash-escaped `\$(` or backtick is literal data, not a
+        # substitution opener.
+        run = 0
+        k = at - 1
+        while k >= 0 and masked[k] == "\\":
+            run += 1
+            k -= 1
+        return run % 2 == 1
+
     bodies: list[str] = []
     i = 0
     while i < len(masked):
-        if masked[i] == "$" and i + 1 < len(masked) and masked[i + 1] == "(":
+        if (
+            masked[i] == "$"
+            and i + 1 < len(masked)
+            and masked[i + 1] == "("
+            and not _is_escaped(i)
+        ):
             depth = 0
             quote = None
             j = i + 1
@@ -513,7 +559,7 @@ def _substitution_bodies(masked: str) -> list[str]:
                 # its unclosed body, so stop scanning there instead of
                 # rescanning it for every later `$(` (quadratic).
                 break
-        elif masked[i] == "`":
+        elif masked[i] == "`" and not _is_escaped(i):
             j = masked.find("`", i + 1)
             if j != -1:
                 bodies.append(masked[i + 1 : j])

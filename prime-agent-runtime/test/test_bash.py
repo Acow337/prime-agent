@@ -1591,6 +1591,14 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertFalse(is_scan('grep -rl "$HOME"'))
         self.assertTrue(is_scan("echo \"$(echo '(')\" $(grep -rl needle ~/Documents)"))
         self.assertFalse(is_scan("$((" * 25000 + "))" * 25000))
+        # Heredoc-count bound, escaped backticks, operator-adjacent comments,
+        # rg --files, and pattern-option operands (round 10).
+        many = "cat " + "<<A " * 20000
+        self.assertFalse(is_scan(many))
+        self.assertFalse(is_scan("printf '%s\\n' \\`grep -rl needle ~/Documents\\`; sleep 120"))
+        self.assertFalse(is_scan("echo ok;# example | grep -rl needle ~/Documents"))
+        self.assertTrue(is_scan("rg --files ~/Documents"))
+        self.assertFalse(is_scan('grep -rl -e "$HOME/needle" src/'))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

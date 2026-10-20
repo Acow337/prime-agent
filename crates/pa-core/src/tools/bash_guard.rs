@@ -578,9 +578,15 @@ const MASK_PLACEHOLDER: char = '\u{1}';
 /// data). Heredoc bodies are input text, never executed, so the whole body
 /// through the delimiter line is masked — except that an unquoted delimiter
 /// still expands, so `$(...)` and backticks in its body stay live.
+/// Heredoc bodies masked per command: each one scans forward for its
+/// terminator line, so a malformed command full of `<<` operators must not
+/// turn the preflight scan quadratic.
+const HEREDOC_MASK_CAP: usize = 8;
+
 fn mask_scan_literals(command: &str) -> String {
     let mut chars: Vec<char> = command.chars().collect();
     let len = chars.len();
+    let mut heredocs_masked = 0usize;
     let mut i = 0usize;
     while i < len {
         let ch = chars[i];
@@ -636,7 +642,9 @@ fn mask_scan_literals(command: &str) -> String {
             && chars.get(i + 1) == Some(&'<')
             && chars.get(i + 2) != Some(&'<')
             && (i == 0 || chars[i - 1] != '<')
+            && heredocs_masked < HEREDOC_MASK_CAP
         {
+            heredocs_masked += 1;
             // Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
             // `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
             // line is input text, never executed, so mask it. Any nonempty
@@ -869,7 +877,13 @@ fn mask_scan_literals(command: &str) -> String {
             i += 1;
             continue;
         }
-        if ch == '#' && (i == 0 || chars[i - 1].is_whitespace()) {
+        if ch == '#'
+            && (i == 0
+                || chars[i - 1].is_whitespace()
+                || matches!(chars[i - 1], ';' | '&' | '|' | '(' | ')' | '<' | '>'))
+        {
+            // `#` starts a comment at a word boundary, including right
+            // after a shell operator (`echo ok;# comment`).
             while i < len && chars[i] != '\n' {
                 chars[i] = ' ';
                 i += 1;
@@ -945,8 +959,12 @@ fn substitution_bodies(masked: &str) -> Vec<String> {
     let len = chars.len();
     let mut bodies = Vec::new();
     let mut i = 0usize;
+    // A backslash-escaped `\$(` or `` \` `` is literal data, not a
+    // substitution opener.
+    let is_escaped =
+        |at: usize| chars[..at].iter().rev().take_while(|&&c| c == '\\').count() % 2 == 1;
     while i < len {
-        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') && !is_escaped(i) {
             let mut depth = 0i32;
             let mut quote: Option<char> = None;
             let mut j = i + 1;
@@ -986,7 +1004,7 @@ fn substitution_bodies(masked: &str) -> Vec<String> {
             if j >= len {
                 break;
             }
-        } else if chars[i] == '`' {
+        } else if chars[i] == '`' && !is_escaped(i) {
             if let Some(j) = chars[i + 1..].iter().position(|&c| c == '`') {
                 let end = i + 1 + j;
                 let body: String = chars[i + 1..end].iter().collect();
@@ -1050,9 +1068,11 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
         // argument — it is pattern text, not a scan root, and a quoted
         // pattern containing $HOME (`grep -rl "$HOME/needle" src/`) must
         // not count as a home root (a masked pattern leaves a placeholder
-        // in its position). When the pattern came from a pattern option
-        // (`-e`, `--regexp`, `-f`, `--file`), every non-option argument is
-        // a root and none is skipped.
+        // in its position). Pattern options (`-e`, `--regexp`, `-f`,
+        // `--file`) supply the pattern instead: their operands are skipped,
+        // not roots. rg's `--files` listing mode takes no pattern at all, so
+        // every positional is a path.
+        let rg_files_mode = *first == "rg" && rest.contains(&"--files");
         let pattern_from_option = rest.iter().any(|t| {
             *t == "-e"
                 || *t == "--regexp"
@@ -1061,11 +1081,29 @@ fn segments_contain_unbounded_scan(masked: &str) -> bool {
                 || t.starts_with("--regexp=")
                 || t.starts_with("--file=")
         });
-        let mut root_tokens: Vec<&str> = rest.to_vec();
-        if matches!(*first, "grep" | "egrep" | "fgrep" | "rg") && !pattern_from_option {
-            if let Some(pos) = root_tokens.iter().position(|t| !t.starts_with('-')) {
-                root_tokens.remove(pos);
+        let mut root_tokens: Vec<&str> = Vec::new();
+        let mut skip_next = false;
+        let mut pattern_skipped = rg_files_mode || pattern_from_option;
+        for t in rest {
+            if skip_next {
+                skip_next = false; // the operand of a pattern option
+                continue;
             }
+            if *t == "-e" || *t == "--regexp" || *t == "-f" || *t == "--file" {
+                skip_next = true;
+                continue;
+            }
+            if t.starts_with("--regexp=") || t.starts_with("--file=") {
+                continue;
+            }
+            if !pattern_skipped
+                && matches!(*first, "grep" | "egrep" | "fgrep" | "rg")
+                && !t.starts_with('-')
+            {
+                pattern_skipped = true; // the positional pattern
+                continue;
+            }
+            root_tokens.push(t);
         }
         if !root_tokens.iter().any(|t| is_home_scale_root(t)) {
             continue; // project-local scans are bounded by the tree size
@@ -1545,6 +1583,40 @@ mod tests {
             elapsed.as_secs() < 10,
             "nested scan took {elapsed:?} on a 100k-char command"
         );
+    }
+
+    /// Regression coverage for the tenth bot-review round: heredoc-count
+    /// work bound, escaped backticks, operator-adjacent comments, rg
+    /// --files, and pattern-option operands.
+    #[test]
+    fn heredoc_bounds_escapes_comments_and_files_mode_scan_correctly() {
+        // A line full of `<<` operators stays cheap: each body scan is
+        // forward-only and capped.
+        let many = format!("cat {}", "<<A ".repeat(20_000));
+        let start = std::time::Instant::now();
+        assert!(!is_unbounded_home_scan(&many, None));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 10,
+            "heredoc preflight took {elapsed:?} on a many-heredoc command"
+        );
+        // Escaped backticks are literal data, not substitutions.
+        assert!(!is_unbounded_home_scan(
+            "printf '%s\\n' \\`grep -rl needle ~/Documents\\`; sleep 120",
+            None
+        ));
+        // `#` right after a shell operator starts a comment.
+        assert!(!is_unbounded_home_scan(
+            "echo ok;# example | grep -rl needle ~/Documents",
+            None
+        ));
+        // rg --files lists files with no pattern: every positional is a path.
+        assert!(is_unbounded_home_scan("rg --files ~/Documents", None));
+        // A pattern-option operand is not a scan root.
+        assert!(!is_unbounded_home_scan(
+            "grep -rl -e \"$HOME/needle\" src/",
+            None
+        ));
     }
 
     #[test]
