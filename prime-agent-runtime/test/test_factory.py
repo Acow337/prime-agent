@@ -6982,19 +6982,25 @@ class FactoryExecutorTest(_ExecutorTestCase):
     async def test_stop_during_subscribe_cancels_the_fresh_subscription(self) -> None:
         # A stop racing the subscribe must not leak the fresh
         # subscription: the id is stored the moment it exists, and the
-        # post-await status check releases it.
+        # post-await status check releases it. The wait is entered through
+        # the settle path (an entry parks after its own subagent settles)
+        # so the gated subscribe is in flight in a loop task while stop()
+        # lands: a wait-only entry's subscribe is awaited by run() itself,
+        # so the wait-only path cannot race a stop from the same task.
         self.store_machine(
             {
                 "states": [
                     {
                         "id": "barrier",
                         "entry": True,
+                        "subagent": "worker",
                         "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
                     },
                 ],
                 "transitions": [],
             }
         )
+        self.executor._sleep_fn = turn_sleep
         gate = self.host.gate("rlm.watch.agent", 1)
         entered = self.host.gate_entered("rlm.watch.agent", 1)
         result = await self.start()
@@ -7179,8 +7185,14 @@ class FactoryExecutorTest(_ExecutorTestCase):
                 "transitions": [],
             }
         )
+        # Park the loop in real slices (no injected-clock advance): the
+        # clock-advancing sleep free-runs the loop, burning the sibling's
+        # 60s deadline in fake time before the pin below can observe the
+        # shared-feed state. The short wait's deadline passes by hand.
+        self.executor._sleep_fn = turn_sleep
         result = await self.start()
         await self.wait_until(lambda: len(self.host.calls_of("rlm.watch.agent")) >= 2)
+        self.clock.advance(0.25)
         # Both waits share the child; the short one times out first and
         # must NOT issue the host cancel.
         await self.wait_until(lambda: self.all_events_of(result, "wait_timeout"))
