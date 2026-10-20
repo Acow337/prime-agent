@@ -650,6 +650,14 @@ impl SettingsManager {
         self.merged.recent_models.clone().unwrap_or_default()
     }
 
+    /// The inline-bash promotion window in milliseconds (`0` disables).
+    #[must_use]
+    pub fn get_auto_background_after_ms(&self) -> u64 {
+        self.merged
+            .auto_background_after_ms
+            .unwrap_or(pa_agent::auto_background::DEFAULT_AUTO_BACKGROUND_AFTER_MS)
+    }
+
     /// The steering queue's delivery mode: `all` co-delivers every queued message at
     /// the next turn boundary; `one-at-a-time` delivers one per turn.
     #[must_use]

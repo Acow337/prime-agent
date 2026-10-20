@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::tools::bash::{self, BashToolOptions};
+use crate::tools::bash;
 use crate::tools::edit::{create_edit_tool_definition, execute_edit, LocalEditOperations};
 use crate::tools::ipython::{
     self, ExecuteResult, ExecuteStatus, IpythonKernelProvisioner, IpythonToolOptions,
@@ -179,6 +179,15 @@ async fn golden_edit_group_matches_ts() {
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
 
+/// TS-parity harness options: promotion is a Rust-native behavior, so the
+/// replay keeps inline execution for the recorded cases.
+fn golden_bash_options() -> bash::BashToolOptions {
+    bash::BashToolOptions {
+        auto_background_after: Some(std::time::Duration::ZERO),
+        ..bash::BashToolOptions::default()
+    }
+}
+
 #[tokio::test]
 async fn golden_bash_group_matches_ts() {
     let corpus = corpus("bash");
@@ -193,8 +202,9 @@ async fn golden_bash_group_matches_ts() {
             drop(dir);
             std::fs::remove_dir_all(&dir_path).ok();
             let result = bash::execute_bash(
+                "golden-replay",
                 &dir_path,
-                &BashToolOptions::default(),
+                &golden_bash_options(),
                 case["command"].as_str().expect("command"),
                 case.get("timeout").and_then(serde_json::Value::as_f64),
                 case.get("allowDestructiveGit")
@@ -223,8 +233,9 @@ async fn golden_bash_group_matches_ts() {
             std::env::set_var("PI_BASH_ALLOW_DESTRUCTIVE_GIT", "1");
         }
         let result = bash::execute_bash(
+            "golden-replay",
             &dir_path,
-            &BashToolOptions::default(),
+            &golden_bash_options(),
             case["command"].as_str().expect("command"),
             case.get("timeout").and_then(serde_json::Value::as_f64),
             case.get("allowDestructiveGit")

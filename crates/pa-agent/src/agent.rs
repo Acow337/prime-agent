@@ -102,6 +102,15 @@ pub struct AgentOptions {
     pub follow_up_mode: Option<QueueMode>,
     pub session_id: Option<String>,
     pub tool_execution: Option<ToolExecutionMode>,
+    /// The inline-bash promotion window in milliseconds: an inline `bash`
+    /// tool call still running after this long is promoted to a background
+    /// job (the command keeps running; a synthetic tool result returns).
+    /// `None` uses [`crate::auto_background::DEFAULT_AUTO_BACKGROUND_AFTER_MS`];
+    /// `Some(0)` disables promotion.
+    pub auto_background_after: Option<u64>,
+    /// The completion notice for promoted bash jobs; `None` keeps
+    /// completions silent (no wake lane).
+    pub auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
 }
 
 struct MutableAgentState {
@@ -333,6 +342,9 @@ struct AgentInner {
     model_override: Mutex<Option<AgentModelOverride>>,
     session_id: Option<String>,
     tool_execution: ToolExecutionMode,
+    /// The resolved inline-bash promotion window (zero disables).
+    auto_background_after: std::time::Duration,
+    auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
 }
 
 impl AgentInner {
@@ -546,6 +558,10 @@ impl AgentInner {
         config.get_follow_up_messages = Some(follow_up);
         config.get_continuation_messages = continuation;
         config.tool_execution = self.tool_execution;
+        config.auto_background_after = self.auto_background_after;
+        config
+            .auto_background_notice
+            .clone_from(&self.auto_background_notice);
         config.before_tool_call.clone_from(&self.before_tool_call);
         config.after_tool_call.clone_from(&self.after_tool_call);
         config
@@ -774,6 +790,12 @@ impl Agent {
             tool_execution: options
                 .tool_execution
                 .unwrap_or(ToolExecutionMode::Parallel),
+            auto_background_after: std::time::Duration::from_millis(
+                options
+                    .auto_background_after
+                    .unwrap_or(crate::auto_background::DEFAULT_AUTO_BACKGROUND_AFTER_MS),
+            ),
+            auto_background_notice: options.auto_background_notice,
         });
         Agent { inner }
     }

@@ -82,6 +82,21 @@ impl AgentSessionEngine {
     }
 }
 
+/// Map one promoted inline bash job's completion onto the kernel notice
+/// lane's shape (`[bash-done pid:N exit:M]`): the same `BashCompletionNotice`
+/// the `bash.completed` host handler validates and admits. `None` when the
+/// promoted job has no pid (the operations backend did not report one).
+pub(crate) fn auto_background_to_bash_completion(
+    completion: &pa_agent::auto_background::AutoBackgroundCompletion,
+) -> Option<BashCompletionNotice> {
+    let pid = completion.pid?;
+    Some(BashCompletionNotice {
+        pid,
+        command: completion.command.clone(),
+        exit_code: i64::from(completion.exit_code.unwrap_or(-1)),
+    })
+}
+
 /// TS `createAsyncBashCompletionHostHandler` validation: a positive
 /// integer pid, a non-empty string command, an integer exit code.
 fn validate_completion(data: &Value) -> anyhow::Result<BashCompletionNotice> {
@@ -118,6 +133,40 @@ fn validate_consumed(data: &Value) -> anyhow::Result<BashConsumedNotice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn promoted_completions_map_onto_the_bash_done_lane() {
+        let completion = pa_agent::auto_background::AutoBackgroundCompletion {
+            pid: Some(4321),
+            exit_code: Some(0),
+            command: "sleep 61".to_string(),
+            output: String::new(),
+            full_output_path: None,
+        };
+        let notice = auto_background_to_bash_completion(&completion).expect("pid known");
+        // The promoted job rides the exact existing bash-done shape: the
+        // row the worker admits for kernel background completions.
+        let row = pa_core::session_engine::messages::create_async_bash_completion_message(
+            notice.pid,
+            &notice.command,
+            notice.exit_code,
+            1_000,
+        );
+        assert_eq!(
+            row.content.text().as_str(),
+            "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 61\""
+        );
+        assert!(auto_background_to_bash_completion(
+            &pa_agent::auto_background::AutoBackgroundCompletion {
+                pid: None,
+                exit_code: None,
+                command: String::new(),
+                output: String::new(),
+                full_output_path: None,
+            }
+        )
+        .is_none());
+    }
 
     #[test]
     fn completion_validation_matches_the_ts_contract() {
