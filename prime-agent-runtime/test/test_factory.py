@@ -3018,6 +3018,33 @@ class FakeHost:
         raise AssertionError(f"unexpected host request type {request_type!r}")
 
 
+class LateChildHost(FakeHost):
+    """A host whose watch target is not a direct child until it appears:
+    `rlm.watch.agent` raises the roster miss until `child_exists` is
+    set (a wait-only entry arms before the run admits the sibling)."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock=clock)
+        self.child_exists = asyncio.Event()
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if request_type == "rlm.watch.agent" and not self.child_exists.is_set():
+            raise RuntimeError(
+                f"No direct child matches \"{(payload or {}).get('target')}\""
+            )
+        return await super().__call__(request_type, payload)
+
+
+class WatchCapHost(FakeHost):
+    """A host whose watch subscribe always hits the daemon's active cap
+    (a hard subscribe error, never a roster miss)."""
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if request_type == "rlm.watch.agent":
+            raise RuntimeError("Agent watch limit reached (64 active)")
+        return await super().__call__(request_type, payload)
+
+
 class DeleteFailsHost(FakeHost):
     """FakeHost whose rlm.delete_subagent always raises."""
 
@@ -7328,6 +7355,305 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(
             [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
             ["watch-agent-watched"],
+        )
+
+    @async_test
+    async def test_wait_timeout_with_a_clock_at_zero_still_fires(self) -> None:
+        # A wait_started_at of exactly 0.0 must not re-base the deadline
+        # to `now` on every pass: `or now` swallowed the falsy zero and a
+        # quiet wait never timed out. (Mutating the explicit is-None
+        # check back to `or now` fails this pin: the run never leaves the
+        # running state.)
+        self.clock.now = 0.0
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("timeout_ms 500 exceeded", timeouts[0]["detail"])
+
+    @async_test
+    async def test_a_pre_deadline_event_fires_instead_of_timing_out(self) -> None:
+        # The wait pass drains the ring BEFORE the deadline check: an
+        # event that arrived inside the deadline but after the last poll
+        # fires the wait — the timeout settle only happens on a drained,
+        # match-free pass. (Mutating the order back — deadline check
+        # first, no read — fails this pin: the third read never happens
+        # and the wait times out.)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+
+        class ParkOnce:
+            """Hold the first park sleep; yield on every later call."""
+
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def __call__(self, seconds: float) -> None:
+                if not self.entered.is_set():
+                    self.entered.set()
+                    await self.release.wait()
+                else:
+                    await asyncio.sleep(0)
+
+        park = ParkOnce()
+        self.executor._sleep_fn = park
+        result = await self.start()
+        await park.entered.wait()  # the loop parked after the first empty pass
+        # The growth event arrives while the loop is parked, and the clock
+        # runs past the 500ms deadline before the next pass starts.
+        self.host.watch_events.append(
+            {
+                "id": "watch-abc",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 3, "end": 5, "status": None},
+                "at_ms": 1,
+            }
+        )
+        self.clock.advance(0.6)
+        park.release.set()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        fired = self.all_events_of(result, "wait_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["end"], 5)
+        self.assertEqual(self.all_events_of(result, "wait_timeout"), [])
+        self.assertGreaterEqual(len(self.host.calls_of("rlm.watch.read")), 3)
+
+    @async_test
+    async def test_a_roster_miss_retries_until_the_target_appears(self) -> None:
+        # A wait-only entry arms during the readiness pass, before the
+        # run admits the sibling it watches: the roster miss parks the
+        # entry unsubscribed (never an error settle) and the wait pass
+        # retries the subscribe until the target appears or the deadline
+        # passes. (Mutating the miss back to an immediate error settle
+        # fails this pin: the run fails instead of firing on growth.)
+        late = LateChildHost(clock=self.clock)
+        patcher = patch.object(rlm_module, "host_request", late)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "late-child", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        # The miss parked the entry; the pass retries the subscribe.
+        await self.wait_until(lambda: len(self.host.calls_of("rlm.watch.agent")) >= 2)
+        run = self.executor._runs[result["run_id"]]
+        self.assertEqual(run.states["w1"].entries[0].status, "waiting")
+        self.assertEqual(self.all_events_of(result, "wait_timeout"), [])
+        # The target appears: the next retry subscribes.
+        late.child_exists.set()
+        await self.wait_until(
+            lambda: run.states["w1"].entries[0].wait_subscription_id == "watch-agent-late-child"
+        )
+        self.host.watch_events.append(
+            {
+                "id": "watch-late",
+                "seq": 1,
+                "subscription_id": "watch-agent-late-child",
+                "kind": "watch.agent",
+                "content": {"target": "late-child", "start": 0, "end": 2, "status": None},
+                "at_ms": 1,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        fired = self.all_events_of(result, "wait_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(
+            [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-late-child"],
+        )
+
+    @async_test
+    async def test_a_target_that_never_appears_times_out_naming_the_miss(self) -> None:
+        # A target that never joins the roster burns its full timeout and
+        # the timeout names the subscribe miss that kept the wait
+        # unsubscribed.
+        late = LateChildHost(clock=self.clock)
+        patcher = patch.object(rlm_module, "host_request", late)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "ghost", "timeout_ms": 300},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("timeout_ms 300 exceeded", timeouts[0]["detail"])
+        self.assertIn("No direct child matches", timeouts[0]["detail"])
+        # The subscribe was retried across passes, not failed on the first.
+        self.assertGreaterEqual(len(self.host.calls_of("rlm.watch.agent")), 2)
+
+    @async_test
+    async def test_a_hard_subscribe_failure_stops_the_prepare_walk(self) -> None:
+        # A wait-only entry's subscribe can fail the run through the
+        # failure policy mid-prepare-walk: the walk must stop there like
+        # the binding-failure arm, or later entries would be marked
+        # running and armed after the run should have stopped. (Mutating
+        # the stop guard back out fails this pin: the sibling entry is
+        # marked running while the run is paused.)
+        capped = WatchCapHost(clock=self.clock)
+        patcher = patch.object(rlm_module, "host_request", capped)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "barrier",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                    {"id": "act", "entry": True, "subagent": "worker"},
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(self.node_status(status, "barrier")["entries"][0]["status"], "error")
+        # The walk stopped at the paused barrier: the sibling was never
+        # prepared or admitted.
+        self.assertEqual(self.node_status(status, "act")["status"], "pending")
+        self.assertEqual(
+            [p for kind, p in self.host.calls if kind == "rlm.run"],
+            [],
+            "no child spawns after the pause",
+        )
+
+    @async_test
+    async def test_an_optional_input_waits_for_a_parked_source(self) -> None:
+        # A source whose latest entry is `waiting` has not settled: an
+        # optional input over it must wait like a pending/running source,
+        # not bind the null sentinel and spawn the dependent prematurely.
+        # (Mutating `waiting` back out of the live-source statuses fails
+        # this pin: the dependent spawns while the source still parks.)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                        "outputs": [{"name": "out", "type": "text"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": "worker",
+                        "inputs": [
+                            {
+                                "name": "rep",
+                                "type": "text",
+                                "from": "src.out",
+                                "optional": True,
+                            }
+                        ],
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "src"},
+                    {"from": "seed", "to": "dep"},
+                ],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        self.host.outcomes["src"] = {"status": "done", "answer": "REPORT"}
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        # The seed settled and entered both lanes; the source's worker
+        # finished, so the source parks on its wait.
+        await self.wait_until(
+            lambda: run.states["src"].entries
+            and run.states["src"].entries[0].status == "waiting"
+        )
+        # A few prepare passes run while the source parks: the dependent
+        # must not bind the sentinel and spawn.
+        await self.wait_until(lambda: len(self.host.calls_of("rlm.watch.read")) >= 4)
+        self.assertEqual(run.states["dep"].entries[0].status, "pending")
+        self.assertEqual(
+            [p for kind, p in self.host.calls if kind == "rlm.run" and "dep" in p["kwargs"]["name"]],
+            [],
+            "no premature dependent spawn while the source waits",
+        )
+        # The source's growth fires its wait; only then does the dependent
+        # bind its optional input and run.
+        self.host.watch_events.append(
+            {
+                "id": "watch-abc",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 0, "end": 3, "status": None},
+                "at_ms": 1,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(
+            len(
+                [
+                    p
+                    for kind, p in self.host.calls
+                    if kind == "rlm.run" and "dep" in p["kwargs"]["name"]
+                ]
+            ),
+            1,
         )
 
     def test_explicit_null_subagent_with_wait_is_rejected(self) -> None:

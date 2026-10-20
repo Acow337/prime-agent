@@ -1469,6 +1469,7 @@ class _StateEntry:
     wait_started_at: float | None = None  # the injected clock when the entry
     # entered its wait state (the timeout deadline's origin)
     wait_subscription_id: str | None = None  # the rlm.watch.agent subscription
+    wait_error: str | None = None  # the subscribe miss that parked it unsubscribed
     wait_cursor: int = 0  # the watch ring's read cursor (the seq filter)
     needs_verify: bool = False  # a child exit carried a provisional answer
     # (the M4 oversight mark): the entry failed, but the child's last
@@ -1863,6 +1864,7 @@ class FactoryExecutor:
                 else:
                     entry.status = "running" if entry.instances else "pending"
                 entry.error = None
+                entry.wait_error = None
                 entry.needs_verify = False
                 state.error = None
                 for instance in entry.instances:
@@ -2725,6 +2727,13 @@ class FactoryExecutor:
                         detail="wait-only entry; nothing to run",
                     )
                     await self._enter_wait(run, state, entry)
+                    if run.state != "running":
+                        # The wait's subscribe failed through the failure
+                        # policy (a pause or a fail-fast halt): stop the
+                        # walk like the binding-failure arm above, or
+                        # later entries would arm more watches and mark
+                        # running after the run should have stopped.
+                        return
                 else:
                     entry.status = "done"
                     self._event(
@@ -2775,17 +2784,19 @@ class FactoryExecutor:
             if latest is None or failure is not None:
                 if inp.get("optional"):
                     # An optional input over a DIFFERENT state that has a
-                    # live entry (pending or running) waits: the source is
-                    # about to settle, and a sentinel here would spawn the
-                    # dependent while its upstream is still running (the
-                    # M3 premature-spawn class -- the children exited
+                    # live entry (pending, running, or waiting) waits: the
+                    # source is about to settle, and a sentinel here would
+                    # spawn the dependent while its upstream is still
+                    # running or still parked on its watch (the M3
+                    # premature-spawn class -- the children exited
                     # "waiting" and the bookkeeping counted them). The
                     # sentinel still binds for the self-input loop form and
                     # for a source with no live entry, so loop states keep
                     # re-entering before their upstream partner has RUN.
                     if latest is None and src_id != state.state_id:
                         source_state_live = source_state is not None and any(
-                            other.status in ("pending", "running") for other in source_state.entries
+                            other.status in ("pending", "running", "waiting")
+                            for other in source_state.entries
                         )
                         if source_state_live:
                             return None, None  # wait for the in-flight source's settle
@@ -3093,12 +3104,16 @@ class FactoryExecutor:
         armed for), arm the read cursor, and mark the entry ``waiting``
         (the control loop's wait pass polls the ring). A failed subscribe
         settles the entry as an error through the same failure-policy
-        path a timeout uses — never a silent no-op."""
+        path a timeout uses — never a silent no-op — except a roster
+        miss (`No direct child matches`), which parks the entry
+        unsubscribed for the wait pass to retry until the target appears
+        or the deadline passes."""
         wait = state.spec.get("wait") or {}
         target = wait.get("target") or ""
         entry.status = "waiting"
         entry.wait_started_at = self._now_fn()
         entry.wait_subscription_id = None
+        entry.wait_error = None
         entry.wait_cursor = 0
         self._event(
             run,
@@ -3129,42 +3144,64 @@ class FactoryExecutor:
                 if len(page.get("events") or []) < arm_limit:
                     break
                 cursor = int(page.get("next_seq") or cursor)
-            # A sibling already parked on the same target holds the one
-            # shared subscription live: re-registering would re-baseline
-            # it (fresh snapshot as the new baseline plus an epoch bump),
-            # so growth observed after this entry armed would be discarded
-            # as a stale observation and the earlier wait would miss the
-            # very activity it armed for and time out. Reuse the sibling's
-            # feed instead: every wait fires on the events its own armed
-            # cursor admits, and the cancel ownership rules below keep
-            # holding.
-            sibling_id = next(
-                (
-                    other.wait_subscription_id
-                    for sibling_state, other in self._waiting_entries(run)
-                    if other is not entry
-                    and (sibling_state.spec.get("wait") or {}).get("target") == target
-                    and other.wait_subscription_id
-                ),
-                None,
-            )
-            handle = {"id": sibling_id} if sibling_id else await watch_agent(target)
+            await self._subscribe_wait(run, state, entry, target)
         except Exception as exc:
+            if "No direct child matches" in str(exc) and entry.status == "waiting":
+                # The target is not a direct child YET: a wait-only entry
+                # arms during the readiness pass, before this run admits
+                # the sibling whose activity it watches (the legal way to
+                # wait on a resident is both-as-entry-states). Park
+                # unsubscribed and retry the subscribe on every wait
+                # pass: the timeout still bounds the wait, and a target
+                # that never appears times out naming the miss. Any other
+                # subscribe failure (a dead host, the watch caps) is a
+                # real error and settles through the failure policy.
+                entry.wait_error = f"wait subscribe on {target!r} failed: {exc}"
+                return
             await self._settle_wait_error(
                 run, state, entry, f"wait subscribe on {target!r} failed: {exc}"
             )
             return
-        # Store the id the moment the subscription exists: a stop that
-        # raced the subscribe (or a later failure) can then release it.
+        if entry.status != "waiting":
+            # A stop claimed the entry while the subscribe was in flight:
+            # the helper already released the fresh subscription.
+            return
+        entry.wait_cursor = int(page.get("next_seq") or 0)
+
+    async def _subscribe_wait(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry, target: str
+    ) -> None:
+        """Subscribe the entry's wait, or reuse a sibling wait's live
+        subscription on the same target, and store the id the moment the
+        subscription exists (a stop that raced the subscribe can then
+        release it). Re-registering an already-watched target would
+        re-baseline the shared feed (fresh baseline, new epoch), so growth
+        observed after this entry armed would be discarded as a stale
+        observation — the sibling's feed is reused instead; every wait
+        fires on the events its own armed cursor admits. A stop that
+        claimed the entry mid-subscribe releases the fresh subscription;
+        a failed subscribe raises."""
+        from . import watch_agent
+
+        sibling_id = next(
+            (
+                other.wait_subscription_id
+                for sibling_state, other in self._waiting_entries(run)
+                if other is not entry
+                and (sibling_state.spec.get("wait") or {}).get("target") == target
+                and other.wait_subscription_id
+            ),
+            None,
+        )
+        handle = {"id": sibling_id} if sibling_id else await watch_agent(target)
         entry.wait_subscription_id = handle.get("id")
+        entry.wait_error = None
         if entry.wait_subscription_id:
             run.watch_subscription_ids[target] = entry.wait_subscription_id
         if entry.status != "waiting":
             # The run stopped while the subscribe was in flight: the
             # fresh subscription must not outlive the entry.
             await self._cancel_wait_subscription(run, state, entry)
-            return
-        entry.wait_cursor = int(page.get("next_seq") or 0)
 
     async def _settle_wait_error(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, reason: str
@@ -3224,8 +3261,11 @@ class FactoryExecutor:
         ]
 
     async def _service_waits(self, run: FactoryRun) -> float:
-        """One wait pass over every waiting entry: read the watch ring,
-        fire on the entry's subscription, time out past the deadline.
+        """One wait pass over every waiting entry: retry a parked
+        subscribe (a roster miss), read the watch ring, fire on the
+        entry's subscription, and time out past the deadline only after
+        the pass drained the ring — an event that arrived inside the
+        deadline but after the last poll fires the wait instead.
         Returns the bounded park (seconds) the loop should sleep while
         waits remain pending (0.0 when none do)."""
         from . import watch_read
@@ -3238,25 +3278,45 @@ class FactoryExecutor:
         for state, entry in waiting:
             wait = state.spec.get("wait") or {}
             timeout_s = (wait.get("timeout_ms") or 0) / 1000
-            remaining = (entry.wait_started_at or now) + timeout_s - now
+            # An explicit is-None check: a clock that reads exactly 0.0
+            # (FakeClock(start=0)) must not re-base the deadline to `now`
+            # on every pass — a quiet wait would then never time out.
+            started = entry.wait_started_at or now
+            remaining = started + timeout_s - now
             if entry.status != "waiting":
                 # stop() (or a policy pass) landed during an earlier
                 # entry's awaited read and cancelled this entry after the
                 # snapshot was taken: its cancellation stands.
                 continue
-            if remaining <= 0:
-                await self._settle_wait_error(
-                    run,
-                    state,
-                    entry,
-                    f"wait timeout_ms {wait.get('timeout_ms')} exceeded for target {wait.get('target')!r}",
-                )
-                continue
+            if entry.wait_subscription_id is None:
+                # A roster miss parked this entry unsubscribed (the target
+                # is not a direct child yet): retry the subscribe on every
+                # pass until the target appears or the deadline passes.
+                try:
+                    await self._subscribe_wait(run, state, entry, wait.get("target") or "")
+                except Exception as exc:
+                    if remaining <= 0 or "No direct child matches" not in str(exc):
+                        await self._settle_wait_error(
+                            run,
+                            state,
+                            entry,
+                            f"wait subscribe on {wait.get('target')!r} failed: {exc}",
+                        )
+                        continue
+                    park = min(park, remaining)
+                    continue
+                if entry.status != "waiting":
+                    continue  # a stop claimed the entry mid-retry
             try:
                 page = await watch_read(since_seq=entry.wait_cursor, limit=50)
             except Exception:
-                # A transient host miss skips this poll round; the timeout
-                # still bounds the wait.
+                # A transient host miss skips this poll round; the
+                # deadline still bounds the wait.
+                if remaining <= 0:
+                    await self._settle_wait_error(
+                        run, state, entry, self._wait_timeout_reason(wait, entry)
+                    )
+                    continue
                 park = min(park, remaining)
                 continue
             if entry.status != "waiting":
@@ -3305,8 +3365,27 @@ class FactoryExecutor:
                 await self._cancel_wait_subscription(run, state, entry)
                 self._queue_settle(run, state, entry)
                 continue
+            # The pass DRAINED the ring before the deadline check: an
+            # event that arrived inside the deadline but after the last
+            # poll fires the wait instead of timing out (a 6s wait
+            # polled at 0/2/4s must not miss the event published at 5s).
+            if remaining <= 0:
+                await self._settle_wait_error(
+                    run, state, entry, self._wait_timeout_reason(wait, entry)
+                )
+                continue
             park = min(park, remaining)
         return max(park, 0.01) if self._waiting_entries(run) else 0.0
+
+    def _wait_timeout_reason(self, wait: dict[str, Any], entry: _StateEntry) -> str:
+        reason = (
+            f"wait timeout_ms {wait.get('timeout_ms')} exceeded for target {wait.get('target')!r}"
+        )
+        if entry.wait_subscription_id is None and entry.wait_error:
+            # The target never matched the roster: the timeout names the
+            # subscribe miss that kept the wait unsubscribed.
+            reason += f" ({entry.wait_error})"
+        return reason
 
     async def _recheck_infra_death(self, instance: _NodeInstance, result: Any) -> Any:
         """Liveness-verify one infra-flavoured error settle before it is
@@ -5425,15 +5504,20 @@ the cap, fails to capture, and fails the producing state through its
   session, typically a resident's child or a prior state's spawn — and
   completes only when that child's message count grows (`wait_fired`
   carries the observed `start`/`end` range; the message indexes are
-  ranges, never content). A sibling wait already parked on the same
-  target shares its live subscription without re-registering (a second
-  register would re-baseline the shared feed and discard growth the
-  first wait armed for). A run past `timeout_ms` (1..60000), a failed
-  subscribe, or the child's terminal `-> unreachable` event settles the
-  entry as an error (with a `wait_timeout` event) through the state's
-  `failure_policy` — under the default `escalate` the run pauses before
-  the failed settle propagates, exactly like any entry failure. A
-  stopped run cancels the subscription. `kind` is staged: `"agent"` is live;
+  ranges, never content). A target that is not a direct child yet
+  (a co-started resident) parks the entry unsubscribed and retries the
+  subscribe on every wait pass until it appears or the deadline passes;
+  any other failed subscribe settles immediately. A sibling wait
+  already parked on the same target shares its live subscription without
+  re-registering (a second register would re-baseline the shared feed
+  and discard growth the first wait armed for). A run past `timeout_ms`
+  (1..60000) — after draining any event that arrived inside the
+  deadline — a hard subscribe failure, or the child's terminal
+  `-> unreachable` event settles the entry as an error (with a
+  `wait_timeout` event) through the state's `failure_policy` — under
+  the default `escalate` the run pauses before the failed settle
+  propagates, exactly like any entry failure. A stopped run cancels the
+  subscription. `kind` is staged: `"agent"` is live;
   `"job"` (stage 2) and `"path"` (stage 3) are refused at write time
   until their handlers land.
 - **Bounds and policies**: `run.max_parallel` (1..64, default 8) is the
