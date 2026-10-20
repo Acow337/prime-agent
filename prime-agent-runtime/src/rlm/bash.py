@@ -555,9 +555,13 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
     return False
 
 
-def _substitution_bodies(masked: str) -> list[str]:
-    """Bodies of $(...) spans (paren-depth matched) and backticks: these
-    execute, so their text is command text."""
+def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
+    """Replace every $(...) span (paren-depth matched, quote-aware) and
+    backtick span with a placeholder, returning the parent text with bodies
+    blanked plus the bodies themselves: the bodies execute, so they are
+    command text — but they are scanned separately, so a quoted separator
+    inside one must never split the parent command."""
+
     def _is_escaped(at: int) -> bool:
         # A backslash-escaped `\$(` or backtick is literal data, not a
         # substitution opener.
@@ -568,20 +572,22 @@ def _substitution_bodies(masked: str) -> list[str]:
             k -= 1
         return run % 2 == 1
 
+    chars = list(masked)
+    n = len(chars)
     bodies: list[str] = []
     i = 0
     while i < len(masked):
         if (
-            masked[i] == "$"
-            and i + 1 < len(masked)
-            and masked[i + 1] == "("
+            chars[i] == "$"
+            and i + 1 < n
+            and chars[i + 1] == "("
             and not _is_escaped(i)
         ):
             depth = 0
             quote = None
             j = i + 1
-            while j < len(masked):
-                c = masked[j]
+            while j < n:
+                c = chars[j]
                 if quote is not None:
                     # Quoted parens do not count toward the depth; the
                     # substitution still closes at its real `)`.
@@ -596,21 +602,35 @@ def _substitution_bodies(masked: str) -> list[str]:
                     if depth == 0:
                         break
                 j += 1
-            if j < len(masked):
-                bodies.append(masked[i + 2 : j])
+            if j < n:
+                body = "".join(chars[i + 2 : j])
+                if body.strip():
+                    bodies.append(body)
+                # Blank the whole span in the parent: the body is scanned
+                # on its own.
+                for k in range(i, j + 1):
+                    chars[k] = " "
+                chars[i] = MASK_PLACEHOLDER
                 i = j
             else:
                 # An unmatched `$(` has no closing paren ahead: the suffix is
                 # its unclosed body, so stop scanning there instead of
                 # rescanning it for every later `$(` (quadratic).
                 break
-        elif masked[i] == "`" and not _is_escaped(i):
-            j = masked.find("`", i + 1)
-            if j != -1:
-                bodies.append(masked[i + 1 : j])
+        elif chars[i] == "`" and not _is_escaped(i):
+            j = i + 1
+            while j < n and chars[j] != "`":
+                j += 1
+            if j < n:
+                body = "".join(chars[i + 1 : j])
+                if body.strip():
+                    bodies.append(body)
+                for k in range(i, j + 1):
+                    chars[k] = " "
+                chars[i] = MASK_PLACEHOLDER
                 i = j
         i += 1
-    return bodies
+    return "".join(chars), bodies
 
 
 def _is_unbounded_home_scan(command: str) -> bool:
@@ -631,10 +651,11 @@ def _is_unbounded_home_scan(command: str) -> bool:
     while worklist:
         text, depth = worklist.pop()
         masked = _mask_scan_literals(text)
-        if _segments_contain_unbounded_scan(masked):
+        parent, bodies = _extract_substitutions(masked)
+        if _segments_contain_unbounded_scan(parent):
             return True
         if depth + 1 < _SUBSTITUTION_DEPTH_CAP:
-            worklist.extend((b, depth + 1) for b in _substitution_bodies(masked))
+            worklist.extend((b, depth + 1) for b in bodies)
     return False
 
 

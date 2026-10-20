@@ -1610,6 +1610,9 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("find -f ~/Documents"))
         self.assertFalse(is_scan("cat <<''\ngrep -rl needle ~/Documents\n\n"))
         self.assertTrue(is_scan('"$HOME/x; $(echo a; grep -rl needle ~/Documents)"'))
+        # Substitution bodies are masked in the parent (round 13).
+        self.assertFalse(is_scan("echo \"$(printf '%s' 'x; find ~/Documents')\"; sleep 120"))
+        self.assertTrue(is_scan("echo \"$(grep -rl 'needle' ~/Documents)\""))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (

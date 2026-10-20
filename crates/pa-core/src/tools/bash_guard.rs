@@ -979,11 +979,12 @@ fn scan_command_text(command: &str) -> bool {
     let mut worklist: Vec<(String, usize)> = vec![(command.to_string(), 0)];
     while let Some((text, depth)) = worklist.pop() {
         let masked = mask_scan_literals(&text);
-        if segments_contain_unbounded_scan(&masked) {
+        let (parent, bodies) = extract_substitutions(&masked);
+        if segments_contain_unbounded_scan(&parent) {
             return true;
         }
         if depth + 1 < SUBSTITUTION_DEPTH_CAP {
-            for body in substitution_bodies(&masked) {
+            for body in bodies {
                 worklist.push((body, depth + 1));
             }
         }
@@ -991,19 +992,24 @@ fn scan_command_text(command: &str) -> bool {
     false
 }
 
-/// Bodies of `$(...)` spans (paren-depth matched, quote-aware) and backticks
-/// in a masked command: these execute, so their text is command text.
-fn substitution_bodies(masked: &str) -> Vec<String> {
-    let chars: Vec<char> = masked.chars().collect();
+/// Replace every `$(...)` span (paren-depth matched, quote-aware) and
+/// backtick span in a masked command with a placeholder, returning the
+/// parent text with bodies blanked plus the bodies themselves: the bodies
+/// execute, so they are command text — but they are scanned separately, so
+/// a quoted separator inside one must never split the parent command.
+/// A backslash-escaped `\$(` or `` \` `` is literal data, not a
+/// substitution opener.
+fn is_escaped_at(chars: &[char], at: usize) -> bool {
+    chars[..at].iter().rev().take_while(|&&c| c == '\\').count() % 2 == 1
+}
+
+fn extract_substitutions(masked: &str) -> (String, Vec<String>) {
+    let mut chars: Vec<char> = masked.chars().collect();
     let len = chars.len();
     let mut bodies = Vec::new();
     let mut i = 0usize;
-    // A backslash-escaped `\$(` or `` \` `` is literal data, not a
-    // substitution opener.
-    let is_escaped =
-        |at: usize| chars[..at].iter().rev().take_while(|&&c| c == '\\').count() % 2 == 1;
     while i < len {
-        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') && !is_escaped(i) {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') && !is_escaped_at(&chars, i) {
             let mut depth = 0i32;
             let mut quote: Option<char> = None;
             let mut j = i + 1;
@@ -1029,6 +1035,12 @@ fn substitution_bodies(masked: &str) -> Vec<String> {
                                 if !body.trim().is_empty() {
                                     bodies.push(body);
                                 }
+                                // Blank the whole span in the parent: the
+                                // body is scanned on its own.
+                                for c in &mut chars[i..=j] {
+                                    *c = ' ';
+                                }
+                                chars[i] = MASK_PLACEHOLDER;
                                 i = j;
                                 break;
                             }
@@ -1043,19 +1055,23 @@ fn substitution_bodies(masked: &str) -> Vec<String> {
             if j >= len {
                 break;
             }
-        } else if chars[i] == '`' && !is_escaped(i) {
+        } else if chars[i] == '`' && !is_escaped_at(&chars, i) {
             if let Some(j) = chars[i + 1..].iter().position(|&c| c == '`') {
                 let end = i + 1 + j;
                 let body: String = chars[i + 1..end].iter().collect();
                 if !body.trim().is_empty() {
                     bodies.push(body);
                 }
+                for c in &mut chars[i..=end] {
+                    *c = ' ';
+                }
+                chars[i] = MASK_PLACEHOLDER;
                 i = end;
             }
         }
         i += 1;
     }
-    bodies
+    (chars.into_iter().collect(), bodies)
 }
 
 fn segments_contain_unbounded_scan(masked: &str) -> bool {
@@ -1385,7 +1401,7 @@ mod tests {
         // An unmatched substitution must not rescan its suffix either.
         let malformed = "$(".repeat(50_000);
         let start = std::time::Instant::now();
-        assert!(substitution_bodies(&malformed).is_empty());
+        assert!(extract_substitutions(&malformed).1.is_empty());
         let elapsed = start.elapsed();
         assert!(
             elapsed.as_secs() < 10,
@@ -1702,6 +1718,21 @@ mod tests {
         // intact: the nested scan still warns.
         assert!(is_unbounded_home_scan(
             "\"$HOME/x; $(echo a; grep -rl needle ~/Documents)\"",
+            None
+        ));
+    }
+
+    /// Regression coverage for the thirteenth bot-review round: a quoted
+    /// separator inside a substitution argument never splits the parent.
+    #[test]
+    fn substitution_bodies_are_masked_in_the_parent() {
+        assert!(!is_unbounded_home_scan(
+            "echo \"$(printf '%s' 'x; find ~/Documents')\"; sleep 120",
+            None
+        ));
+        // The body itself is still scanned with its own masking.
+        assert!(is_unbounded_home_scan(
+            "echo \"$(grep -rl 'needle' ~/Documents)\"",
             None
         ));
     }
