@@ -501,6 +501,13 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
     """True when any segment of the masked command is an unbounded scan."""
     for segment in re.split(r"&&|\|\||;|\||\n", masked):
         tokens = segment.split()
+        # Leading grouping operators: `(find ...)` and `{ ...; }` run the
+        # same command, so the shape must survive grouping.
+        while tokens and tokens[0][:1] in ("(", "{"):
+            if len(tokens[0]) > 1:
+                tokens[0] = tokens[0][1:]
+            else:
+                tokens.pop(0)
         if not tokens or tokens[0] == "timeout":
             continue
         if tokens[0] in ("grep", "egrep", "fgrep"):

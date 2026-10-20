@@ -1099,7 +1099,18 @@ fn extract_substitutions(masked: &str) -> (String, Vec<String>) {
 
 fn segments_contain_unbounded_scan(masked: &str) -> bool {
     for segment in split_on_separators(masked) {
-        let tokens = split_ws(segment.trim());
+        let mut tokens = split_ws(segment.trim());
+        // Leading grouping operators: `(find ...)` and `{ ...; }` run the
+        // same command, so the shape must survive grouping.
+        while let Some(first) = tokens.first().copied() {
+            match first.strip_prefix('(').or_else(|| first.strip_prefix('{')) {
+                Some("") => {
+                    tokens.remove(0);
+                }
+                Some(rest) => tokens[0] = rest,
+                None => break,
+            }
+        }
         let Some((first, rest)) = tokens.split_first() else {
             continue;
         };
@@ -1347,6 +1358,29 @@ mod tests {
             r"find -L . -name '*.log' -exec cp {} ~/backup/ \;",
             None
         ));
+    }
+
+    #[test]
+    fn grouped_scans_warn_like_their_ungrouped_forms() {
+        // A grouping operator before the command must not hide the shape
+        // (Macroscope round on the fix head).
+        assert!(is_unbounded_home_scan(
+            "(find ~/Documents) | head -10",
+            None
+        ));
+        assert!(is_unbounded_home_scan("{ find ~/Documents; }", None));
+        assert!(is_unbounded_home_scan("((find ~/Documents))", None));
+        assert!(is_unbounded_home_scan(
+            "(grep -rl needle ~/Documents)",
+            None
+        ));
+        assert!(!is_unbounded_home_scan(
+            "(timeout 60 find ~/Documents)",
+            None
+        ));
+        assert!(is_unbounded_home_scan("{ rg pattern ~/Documents; }", None));
+        assert!(!is_unbounded_home_scan("(grep -rl needle .)", None));
+        assert!(!is_unbounded_home_scan(r"{ find . -name '*.log'; }", None));
     }
 
     #[test]

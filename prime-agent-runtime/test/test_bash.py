@@ -1641,6 +1641,16 @@ class ScanCostGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("find -O 3 ~/Documents"))
         self.assertFalse(is_scan("find -L . -newer ~/stamp"))
         self.assertFalse(is_scan("find -L . -name '*.log' -exec cp {} ~/backup/ \;"))
+        # Grouping operators do not hide the command: a grouped scan warns
+        # like its ungrouped form (Macroscope round on the fix head).
+        self.assertTrue(is_scan("(find ~/Documents) | head -10"))
+        self.assertTrue(is_scan("{ find ~/Documents; }"))
+        self.assertTrue(is_scan("((find ~/Documents))"))
+        self.assertTrue(is_scan("(grep -rl needle ~/Documents)"))
+        self.assertFalse(is_scan("(timeout 60 find ~/Documents)"))
+        self.assertTrue(is_scan("{ rg pattern ~/Documents; }"))
+        self.assertFalse(is_scan("(grep -rl needle .)"))
+        self.assertFalse(is_scan("{ find . -name '*.log'; }"))
 
     def test_dispatch_hint_is_budgeted_and_names_the_fix(self):
         with (
