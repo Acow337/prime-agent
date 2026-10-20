@@ -65,11 +65,13 @@ pub(crate) fn auto_background_to_bash_completion(
     completion: &pa_agent::auto_background::AutoBackgroundCompletion,
 ) -> Option<pa_core::session_engine::bash_notices::BashCompletionNotice> {
     let pid = completion.pid?;
-    Some(pa_core::session_engine::bash_notices::BashCompletionNotice {
-        pid,
-        command: completion.command.clone(),
-        exit_code: i64::from(completion.exit_code.unwrap_or(-1)),
-    })
+    Some(
+        pa_core::session_engine::bash_notices::BashCompletionNotice {
+            pid,
+            command: completion.command.clone(),
+            exit_code: i64::from(completion.exit_code.unwrap_or(-1)),
+        },
+    )
 }
 
 #[cfg(test)]
