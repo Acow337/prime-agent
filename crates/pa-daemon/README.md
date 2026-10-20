@@ -2,6 +2,9 @@
 
 Session supervision and wire serving.
 
+The control-plane `set_prompt_guidelines` command stages appended prompt sources
+for the next compaction and persists them in the worker's create descriptor.
+
 ## Scope
 ACP stdio transport (`acp`): the JSON-RPC serve surface for Agent
 Client Protocol clients, served over a daemon session (initialize, session/new, session/prompt, session/close,

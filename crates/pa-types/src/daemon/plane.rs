@@ -196,6 +196,7 @@ mod tests {
             "kill",
             "rename",
             "set_session_name",
+            "set_prompt_guidelines",
             "shutdown",
             "restart",
             "retry_worker",

@@ -520,6 +520,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "mark_anthropic_warning_shown",
         r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
     ),
+    (
+        "set_prompt_guidelines",
+        r#"{"type": "set_prompt_guidelines", "activeSessionId": "sess", "appendSystemPrompt": []}"#,
+    ),
 ];
 
 /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
@@ -548,6 +552,7 @@ fn known_command_types_match_the_ts_list() {
                     | "tail_kernel_bash"
                     | "kill_kernel_bash"
                     | "mark_anthropic_warning_shown"
+                    | "set_prompt_guidelines"
             ),
             "unexpected non-TS command type: {extra}"
         );
