@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 pub(super) struct ActivityRead {
     pub(super) active_session_id: String,
     pub(super) shells: Option<ShellCounts>,
-    pub(super) factory_runs: Option<usize>,
+    pub(super) factory_runs: Option<crate::factory_view::FactoryRunCounts>,
 }
 
 /// One fetch cycle over the live sessions, off the key loop: each session's kernel answers its
@@ -45,7 +45,7 @@ pub(super) fn spawn_session_activity_fetch(
                 };
                 let factory_runs = async {
                     if !factory_supported {
-                        return Some(0);
+                        return Some(crate::factory_view::FactoryRunCounts::default());
                     }
                     let reply = client
                         .request_ok(DaemonCommand::FactoryActivity {
@@ -59,8 +59,11 @@ pub(super) fn spawn_session_activity_fetch(
                         })
                         .await;
                     count(reply, |data| {
-                        crate::factory_view::factory_reply_lists_runs(data)
-                            .then(|| crate::factory_view::live_run_count(data))
+                        crate::factory_view::factory_reply_lists_runs(data).then(|| {
+                            crate::factory_view::FactoryRunCounts::of(
+                                &crate::factory_view::parse_factory_runs(data),
+                            )
+                        })
                     })
                 };
                 let (shells, factory_runs) = tokio::join!(shells, factory_runs);

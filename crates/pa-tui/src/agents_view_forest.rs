@@ -127,7 +127,7 @@ pub struct SelectionKey {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionActivity {
     pub shells: crate::bash_view::ShellCounts,
-    pub factory_runs: usize,
+    pub factory_runs: crate::factory_view::FactoryRunCounts,
 }
 
 /// The activity poll's counts: each live session's by its `activeSessionId`, and the live
