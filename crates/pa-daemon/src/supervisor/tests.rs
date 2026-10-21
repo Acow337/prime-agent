@@ -913,6 +913,12 @@ async fn a_saved_session_listing_reads_each_sessions_harness_store_once() {
             &pa_core::refinement::get_harness_state_path(&harness),
         ));
     }
+    std::fs::create_dir_all(root.join("agent")).unwrap();
+    std::fs::write(
+        root.join("agent/settings.json"),
+        json!({ "factory": { "enabled": true } }).to_string(),
+    )
+    .unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
             socket_path: root.join("daemon.sock"),
@@ -958,6 +964,49 @@ async fn a_saved_session_listing_reads_each_sessions_harness_store_once() {
         .collect();
     specs.sort_unstable();
     assert_eq!(specs, [1, 2]);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// While the factory stays off (the opt-in gate), the catalog reads no stored factory specs: a
+/// session holding specs carries no `factorySpecs`.
+#[tokio::test]
+async fn a_saved_session_listing_skips_stored_factory_specs_while_the_factory_is_off() {
+    let root = std::env::temp_dir().join(format!("pa-saved-off-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    let path = sessions.join(format!("{}.jsonl", session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    let harness = pa_core::refinement::get_local_harness_state_dir(
+        crate::scheduled_jobs::session_artifact_dir(&path, session.session_id()).as_deref(),
+    )
+    .unwrap();
+    crate::test_support::write_factory_specs(&harness, &["a"]);
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: root.join("daemon.sock"),
+            agent_dir: root.join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let command = DaemonCommand::ListSavedSessions {
+        id: None,
+        active_session_id: None,
+        cwd: Some("/tmp".to_string()),
+        session_dir: Some(sessions.to_string_lossy().to_string()),
+        scope: Value::Null,
+        limit: None,
+        cursor: None,
+        rest: Map::new(),
+    };
+    let (stream, _frames) = mpsc::channel(64);
+    let lines = supervisor
+        .handle_saved_session_list(&command, "list", &stream)
+        .await;
+    let rows = lines[0]["data"]["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].get("factorySpecs").is_none(), "{rows:?}");
     std::fs::remove_dir_all(&root).unwrap();
 }
 

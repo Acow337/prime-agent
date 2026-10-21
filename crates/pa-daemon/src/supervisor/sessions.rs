@@ -219,6 +219,8 @@ impl Supervisor {
         let scan = tokio::task::spawn_blocking(move || {
             let persistent_shells =
                 crate::persistent_shells::live_shell_rows_by_session(&agent_dir);
+            // The factory is opt-in: while it stays off, no row counts stored specs.
+            let factory_lane = crate::factory_activity::factory_lane_enabled(&agent_dir);
             let mut factory_specs = std::collections::HashMap::new();
             let mut file_total = 0usize;
             let page = list_sessions_with(&dir, cursor.as_deref(), limit, |index, total, info| {
@@ -227,7 +229,9 @@ impl Supervisor {
                     // The row is out of scope, but the scan itself goes on.
                     return true;
                 }
-                count_factory_specs(info, &mut factory_specs);
+                if factory_lane {
+                    count_factory_specs(info, &mut factory_specs);
+                }
                 let row = saved_session_row(info, &persistent_shells, &factory_specs);
                 let mut item = json!({
                     "id": scan_command_id,
@@ -267,19 +271,26 @@ impl Supervisor {
                     }
                 }
             });
-            (page, file_total, persistent_shells, factory_specs)
+            (
+                page,
+                file_total,
+                persistent_shells,
+                factory_specs,
+                factory_lane,
+            )
         });
-        let (page, file_total, persistent_shells, mut factory_specs) = match scan.await {
-            Ok(scanned) => scanned,
-            Err(error) => {
-                return vec![response_line(&response_failure(
-                    Some(command_id),
-                    "list_saved_sessions",
-                    &format!("the saved-session scan failed: {error}"),
-                    None,
-                ))];
-            }
-        };
+        let (page, file_total, persistent_shells, mut factory_specs, factory_lane) =
+            match scan.await {
+                Ok(scanned) => scanned,
+                Err(error) => {
+                    return vec![response_line(&response_failure(
+                        Some(command_id),
+                        "list_saved_sessions",
+                        &format!("the saved-session scan failed: {error}"),
+                        None,
+                    ))];
+                }
+            };
         // The scan's parse trees folded and freed inside the blocking task; return their
         // arena high-water to the OS at the phase boundary (live cache untouched).
         pa_types::memory_release::trim_freed_heap();
@@ -339,15 +350,17 @@ impl Supervisor {
             .map(crate::rlm_roster::passive_child_info)
             .filter(|info| !scope_current || info.cwd == cwd)
             .collect();
-        match stored_factory_specs(merged.clone()).await {
-            Ok(specs) => factory_specs.extend(specs),
-            Err(error) => {
-                return vec![response_line(&response_failure(
-                    Some(command_id),
-                    "list_saved_sessions",
-                    &format!("{error:#}"),
-                    None,
-                ))]
+        if factory_lane {
+            match stored_factory_specs(merged.clone()).await {
+                Ok(specs) => factory_specs.extend(specs),
+                Err(error) => {
+                    return vec![response_line(&response_failure(
+                        Some(command_id),
+                        "list_saved_sessions",
+                        &format!("{error:#}"),
+                        None,
+                    ))]
+                }
             }
         }
         for info in &merged {
