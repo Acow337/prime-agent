@@ -179,13 +179,11 @@ async fn golden_edit_group_matches_ts() {
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
 
-/// TS-parity harness options: promotion is a Rust-native behavior, so the
-/// replay keeps inline execution for the recorded cases.
+/// TS-parity harness options: promotion is a Rust-native behavior, and the
+/// golden harness registers no arm registry, so the replay keeps inline
+/// execution for the recorded cases by construction.
 fn golden_bash_options() -> bash::BashToolOptions {
-    bash::BashToolOptions {
-        auto_background_after: Some(std::time::Duration::ZERO),
-        ..bash::BashToolOptions::default()
-    }
+    bash::BashToolOptions::default()
 }
 
 #[tokio::test]

@@ -57,19 +57,24 @@ impl AgentSessionEngine {
 }
 
 /// Map one promoted inline bash job's completion onto the kernel notice
-/// lane's shape (`[bash-done pid:N exit:M]`): the same `BashCompletionNotice`
-/// the `bash.completed` host handler validates and admits. `None` when the
-/// promoted job has no pid (the operations backend did not report one).
+/// lane's shape (`[bash-done pid:N exit:M]`): the same
+/// `KernelNotice::bash_completion` the `bash.completed` host handler
+/// validates and admits. The promoted job's spill path rides along: the
+/// model cannot re-read the process (it lived in the dispatch task), so
+/// the spill file is the only durable output and the row must name it.
+/// `None` when the promoted job has no pid (the operations backend did
+/// not report one — such jobs never detach; see the bash tool).
 pub(crate) fn auto_background_to_bash_completion(
     completion: &pa_agent::auto_background::AutoBackgroundCompletion,
-) -> Option<pa_core::session_engine::bash_notices::BashCompletionNotice> {
+) -> Option<pa_core::session_engine::bash_notices::KernelNotice> {
     let pid = completion.pid?;
     Some(
-        pa_core::session_engine::bash_notices::BashCompletionNotice {
+        pa_core::session_engine::bash_notices::KernelNotice::bash_completion(
             pid,
-            command: completion.command.clone(),
-            exit_code: i64::from(completion.exit_code.unwrap_or(-1)),
-        },
+            &completion.command,
+            i64::from(completion.exit_code.unwrap_or(-1)),
+            completion.full_output_path.as_deref(),
+        ),
     )
 }
 
@@ -84,20 +89,14 @@ mod tests {
             exit_code: Some(0),
             command: "sleep 61".to_string(),
             output: String::new(),
-            full_output_path: None,
+            full_output_path: Some("/tmp/spill/bash-4321.out".to_string()),
         };
         let notice = auto_background_to_bash_completion(&completion).expect("pid known");
-        // The promoted job rides the exact existing bash-done shape: the
-        // row the worker admits for kernel background completions.
-        let row = pa_core::session_engine::messages::create_async_bash_completion_message(
-            notice.pid,
-            &notice.command,
-            notice.exit_code,
-            1_000,
-        );
+        // The promoted job rides the existing bash-done shape PLUS the
+        // spill pointer (the process is gone; the spill is the output).
         assert_eq!(
-            row.content.text().as_str(),
-            "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 61\""
+            notice.row.content.text().as_str(),
+            "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 61\"\n\nOutput: /tmp/spill/bash-4321.out"
         );
         assert!(auto_background_to_bash_completion(
             &pa_agent::auto_background::AutoBackgroundCompletion {

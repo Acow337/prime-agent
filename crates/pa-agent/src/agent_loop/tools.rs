@@ -121,8 +121,14 @@ async fn execute_tool_calls_sequential(
                     notice: config.auto_background_notice.clone(),
                     registry: std::sync::Arc::clone(&config.auto_background_registry),
                 };
-                let executed =
-                    execute_prepared_tool_call(&prepared, config.tool_progress, signal, emit, &auto_background).await;
+                let executed = execute_prepared_tool_call(
+                    &prepared,
+                    config.tool_progress,
+                    signal,
+                    emit,
+                    &auto_background,
+                )
+                .await;
                 finalize_executed_tool_call(
                     current_context,
                     assistant_message,
