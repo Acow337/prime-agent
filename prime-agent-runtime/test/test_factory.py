@@ -7357,6 +7357,344 @@ class FactoryExecutorTest(_ExecutorTestCase):
         )
 
     @async_test
+    async def test_vanished_watch_event_fails_the_wait(self) -> None:
+        # The terminal `-> vanished` event (the watched child was deleted
+        # from the roster) settles the wait as an error through the
+        # failure policy, exactly like the unreachable give-up: a deleted
+        # target must not park the wait until a silent timeout.
+        # (Mutating the vanished arm out of the terminal guard fails this
+        # pin: the wait fires on the vanished event as growth.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        self.host.watch_events.append(
+            {
+                "id": "watch-gone",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {
+                    "target": "watched",
+                    "start": 0,
+                    "end": 0,
+                    "status": {"from": "idle", "to": "vanished"},
+                },
+                "at_ms": 1,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(self.all_events_of(result, "wait_fired"), [])
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("went vanished", timeouts[0]["detail"])
+        self.assertEqual(
+            [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-watched"],
+        )
+
+    @async_test
+    async def test_factory_waits_subscribe_non_waking(self) -> None:
+        # The factory reads the watch ring itself, so its wait
+        # subscriptions carry wake=False: their events never spend a
+        # parent LLM turn on a wake row, and a subscription stranded by
+        # a kernel restart stays silent. (Mutating the factory back to a
+        # bare watch_agent(target) fails this pin: wake defaults to
+        # True on the subscribe payload.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        payloads = self.host.calls_of("rlm.watch.agent")
+        self.assertTrue(payloads)
+        self.assertTrue(
+            all(payload.get("wake") is False for payload in payloads),
+            f"every factory wait subscribes non-waking: {payloads}",
+        )
+        await rlm_module.rlm.factory.stop(result["run_id"])
+
+    @async_test
+    async def test_daemonless_watch_refusal_fails_the_wait_fast(self) -> None:
+        # A session with no RLM child runtime refuses the watch with a
+        # message distinct from the daemon's roster miss: the factory
+        # parks (and retries every pass) only on the daemon form, so the
+        # daemonless refusal settles the wait as an error AT the
+        # subscribe, never a parked run that stalls until its deadline.
+        # (Mutating the host refusal back to the shared "No direct child
+        # matches ... in the current parent session" text fails this pin:
+        # the substring park catches it, the run parks with sleeps, and
+        # the subscribe retries.)
+
+        class DaemonlessHost(FakeHost):
+            async def __call__(self, request_type, payload=None):
+                payload = payload or {}
+                if request_type == "rlm.watch.agent":
+                    self.calls.append((request_type, payload))
+                    raise RuntimeError(
+                        f"cannot watch \"{payload.get('target')}\": this session has no "
+                        "RLM child runtime (a daemon-backed parent session is required)"
+                    )
+                return await super().__call__(request_type, payload)
+
+        daemonless = DaemonlessHost(clock=self.clock)
+        patcher = patch.object(rlm_module, "host_request", daemonless)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(
+            len(daemonless.calls_of("rlm.watch.agent")),
+            1,
+            "the daemonless refusal is terminal: no park, no retry",
+        )
+        self.assertEqual(self.sleeps.sleeps, [], "the wait never parked against the deadline")
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("wait subscribe on 'watched' failed", timeouts[0]["detail"])
+        self.assertIn("daemon-backed parent session", timeouts[0]["detail"])
+
+    @async_test
+    async def test_executor_error_releases_pending_wait_subscriptions(self) -> None:
+        # A run that dies through an executor error must not leak its
+        # wait subscriptions: the registry is supervisor-owned and
+        # survives the run's kernel-side state, so a pending wait's feed
+        # is released on the failure path. A dead collect lane raises
+        # inside the control loop (the wait pass's reads are transient,
+        # the collect's is not), and the executor-error arm cancels the
+        # still-waiting w1's subscription. (Mutating the failure-path
+        # cancel out fails this pin: the cancel list is empty and the
+        # feed leaks.)
+
+        class DeadCollectHost(FakeHost):
+            def __init__(self, clock: FakeClock) -> None:
+                super().__init__(clock=clock)
+                self.collects_attempted = 0
+
+            async def __call__(self, request_type, payload=None):
+                payload = payload or {}
+                if request_type == "rlm.collect" and self.collects_attempted > 0:
+                    # The first collect (the admission pass's spawn) is
+                    # healthy; the control loop's collect dies.
+                    self.calls.append((request_type, payload))
+                    raise RuntimeError("collect lane dead")
+                if request_type == "rlm.collect":
+                    self.collects_attempted += 1
+                return await super().__call__(request_type, payload)
+
+        failing = DeadCollectHost(clock=self.clock)
+        failing.outcomes["a"] = {"status": "running"}  # stays in flight: the loop keeps collecting
+        patcher = patch.object(rlm_module, "host_request", failing)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(len(self.events_of(status, "executor_error")), 1)
+        self.assertIn("collect lane dead", self.events_of(status, "executor_error")[0]["error"])
+        # The waiting entry never fired or timed out; its feed is the
+        # one thing the dying loop still owes the registry.
+        self.assertEqual(self.all_events_of(result, "wait_fired"), [])
+        self.assertEqual(self.all_events_of(result, "wait_timeout"), [])
+        self.assertEqual(
+            [c["id"] for c in failing.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-watched"],
+            "the dying loop released the pending wait's subscription",
+        )
+
+    @async_test
+    async def test_resident_starved_failure_releases_wait_subscriptions(self) -> None:
+        # The resident-starved stall ends the run as failed; a pending
+        # wait on a third state must release its feed on that failure
+        # path too, not strand a supervisor-owned subscription against a
+        # dead run. (Mutating the failure-path cancel out fails this
+        # pin: the cancel list is empty.)
+        self.host.outcomes["r1"] = {"status": "running"}  # residents never settle
+        self.host.outcomes["r2"] = {"status": "running"}
+        self.store_machine(
+            {
+                "run": {"max_parallel": 1},
+                "states": [
+                    {"id": "r1", "entry": True, "subagent": "worker", "lifecycle": "resident"},
+                    {"id": "r2", "entry": True, "subagent": "worker", "lifecycle": "resident"},
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        errors = self.events_of(status, "executor_error")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("resident instances hold every max_parallel 1 slot", errors[0]["error"])
+        self.assertEqual(
+            [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-watched"],
+            "the resident-starved failure released the pending wait's subscription",
+        )
+
+    @async_test
+    async def test_resume_re_arms_a_failed_wait_without_re_spending_the_subagent(self) -> None:
+        # A wait failure holds an entry whose subagent instances are all
+        # DONE: on resume the wait re-arms on the settled instances
+        # instead of re-rendering a fresh attempt — a wait timeout must
+        # not re-spend the subagent's tokens. (Mutating the re-arm branch
+        # out fails this pin: _prepare_entry renders a second attempt and
+        # the spawn count reaches 2.)
+
+        class TurnClockSleep:
+            """Yield to the loop AND advance the fake clock: the wait's
+            deadline progresses while the test interleaves mid-run."""
+
+            def __init__(self, clock: FakeClock) -> None:
+                self.clock = clock
+
+            async def __call__(self, seconds: float) -> None:
+                await asyncio.sleep(0.01)
+                self.clock.advance(seconds)
+
+        self.executor._sleep_fn = TurnClockSleep(self.clock)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")  # the wait timed out: escalate
+        self.assertEqual(len(self.all_events_of(result, "wait_started")), 1)
+        self.assertEqual(len(self.host.spawn_calls("w1")), 1)
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        await self.wait_until(
+            lambda: len(self.all_events_of(result, "wait_started")) == 2
+        )
+        # The re-admission re-armed ONLY the wait: no second spawn.
+        self.assertEqual(
+            len(self.host.spawn_calls("w1")),
+            1,
+            "resume must not re-spend the settled subagent on a wait failure",
+        )
+        # A post-re-arm growth event fires the re-armed wait and the run
+        # completes on the SAME settled instances.
+        self.host.watch_events.append(
+            {
+                "id": "watch-resume",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 0, "end": 3, "status": None},
+                "at_ms": 1,
+            }
+        )
+        final = await self.settle(result)
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(len(self.all_events_of(result, "wait_fired")), 1)
+        self.assertEqual(len(self.host.spawn_calls("w1")), 1)
+
+    @async_test
+    async def test_wait_park_folds_into_the_collect_timeout(self) -> None:
+        # While a wait is pending and children are in flight, the park
+        # rides the NEXT collect's timeout instead of a separate sleep:
+        # a child that settles during the park is collected within the
+        # park window, not one park later, and no park sleep is taken at
+        # all. (Mutating the fold back — the bare sleep(wait_park) tail —
+        # fails this pin: the sleeps list is non-empty and the collect
+        # timeout never shrinks below the 2s poll.)
+        self.clock.advance_per_collect = 0.5
+        self.host.outcomes["a"] = {"status": "running"}  # never settles
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 4_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        await self.wait_until(lambda: self.all_events_of(result, "wait_timeout"))
+        collects = self.host.calls_of("rlm.collect")
+        self.assertTrue(
+            any(collect.get("timeout_ms", 0) < POLL_TIMEOUT_MS for collect in collects),
+            f"the pending wait bounded some collect below the poll timeout: {collects}",
+        )
+        self.assertEqual(
+            self.sleeps.sleeps,
+            [],
+            "the park rode the collect timeout: no separate park sleep",
+        )
+        await rlm_module.rlm.factory.stop(result["run_id"])
+
+    @async_test
     async def test_wait_timeout_with_a_clock_at_zero_still_fires(self) -> None:
         # A wait_started_at of exactly 0.0 must not re-base the deadline
         # to `now` on every pass: `or now` swallowed the falsy zero and a

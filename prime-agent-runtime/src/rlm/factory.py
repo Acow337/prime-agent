@@ -2710,6 +2710,27 @@ class FactoryExecutor:
             for entry in state.entries:
                 if entry.status != "pending":
                     continue
+                if (
+                    state.spec.get("wait") is not None
+                    and entry.instances
+                    and all(instance.status == "done" for instance in entry.instances)
+                ):
+                    # A wait failure's resume re-arms ONLY the wait: the
+                    # subagent's settle is kept (re-rendering would
+                    # re-spend its tokens for a wait that timed out),
+                    # so the entry parks on its watch again instead of
+                    # preparing a fresh attempt.
+                    self._event(
+                        run,
+                        "node_ready",
+                        node=state_id,
+                        entry=entry.index,
+                        detail="re-entering the wait with the settled instances",
+                    )
+                    await self._enter_wait(run, state, entry)
+                    if run.state != "running":
+                        return
+                    continue
                 instances, reason = self._prepare_entry(run, state, entry)
                 if reason is not None:
                     await self._apply_entry_failure_policy(run, state, entry, reason)
@@ -3197,7 +3218,9 @@ class FactoryExecutor:
             ),
             None,
         )
-        handle = {"id": sibling_id} if sibling_id else await watch_agent(target)
+        # wake=False: the factory reads the ring itself, so its
+        # subscriptions never spend a parent LLM turn on wake rows.
+        handle = {"id": sibling_id} if sibling_id else await watch_agent(target, wake=False)
         entry.wait_subscription_id = handle.get("id")
         entry.wait_error = None
         if entry.wait_subscription_id:
@@ -3227,9 +3250,12 @@ class FactoryExecutor:
         await self._apply_entry_failure_policy(run, state, entry, reason)
 
     async def _cancel_wait_subscription(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
-        """Best-effort cancel of the entry's subscription (a run that
-        dies does not leak one; the registry dies with the session
-        anyway). The subscription id is deterministic per child, so waits
+        """Best-effort cancel of the entry's subscription (the run's
+        normal end paths release feeds; the failure paths go through
+        ``_cancel_all_wait_subscriptions``, and a kernel restart that
+        swallows the run entirely still strands its feeds — the factory
+        subscribes non-waking so such a leak stays silent, and the
+        session teardown cancels the registry regardless). The subscription id is deterministic per child, so waits
         on the same target share one feed: only the last waiting entry on
         the target issues the host cancel, or a surviving wait would lose
         its feed. Sibling waits are matched by TARGET, not by stored id —
@@ -3263,6 +3289,34 @@ class FactoryExecutor:
             for entry in run.states[state_id].entries
             if entry.status == "waiting"
         ]
+
+    async def _cancel_all_wait_subscriptions(self, run: FactoryRun) -> None:
+        """Release EVERY waiting entry's watch feed on a run that dies
+        without its normal teardown (an executor error, a
+        resident-starved failure): the registry is supervisor-owned and
+        survives the run's kernel-side executor state, so an unreleased
+        feed keeps polling (and would wake the parent, were it not for
+        the factory's non-waking subscribes) until the watched child
+        settles or the session closes. The sibling guard of
+        ``_cancel_wait_subscription`` does not apply: no wait survives
+        the ending run. Best-effort per feed; a dead host is often the
+        reason the run is ending, and the session teardown cancels the
+        registry regardless."""
+        from . import watch_agent_cancel
+
+        for state, entry in self._waiting_entries(run):
+            target = (state.spec.get("wait") or {}).get("target") or ""
+            subscription_id = entry.wait_subscription_id
+            entry.wait_subscription_id = None
+            if not subscription_id:
+                subscription_id = run.watch_subscription_ids.get(target) or ""
+            if not subscription_id:
+                continue
+            run.watch_subscription_ids.pop(target, None)
+            try:
+                await watch_agent_cancel(subscription_id)
+            except Exception:
+                pass  # the session teardown cancels the registry regardless
 
     async def _service_waits(self, run: FactoryRun) -> float:
         """One wait pass over every waiting entry: retry a parked
@@ -3383,17 +3437,19 @@ class FactoryExecutor:
             if match is not None:
                 content = match.get("content") or {}
                 status = content.get("status")
-                if isinstance(status, dict) and status.get("to") == "unreachable":
-                    # The terminal `-> unreachable` event is not growth:
-                    # the watched child is dead, and completing the wait
-                    # as done would run downstream transitions on a
-                    # broken dependency. The wait settles as an error
-                    # through the failure policy, exactly like a timeout.
+                if isinstance(status, dict) and status.get("to") in ("unreachable", "vanished"):
+                    # The terminal `-> unreachable` / `-> vanished`
+                    # events are not growth: the watched child is dead
+                    # (unresponsive past the give-up bound, or deleted
+                    # from the roster), and completing the wait as done
+                    # would run downstream transitions on a broken
+                    # dependency. The wait settles as an error through
+                    # the failure policy, exactly like a timeout.
                     await self._settle_wait_error(
                         run,
                         state,
                         entry,
-                        f"watch target {wait.get('target')!r} went unreachable",
+                        f"watch target {wait.get('target')!r} went {status.get('to')}",
                     )
                     continue
                 self._event(
@@ -4021,6 +4077,10 @@ class FactoryExecutor:
             # children stay alive under the supervisor either way. A stop()
             # that landed concurrently keeps ownership of the final state.
             self._event(run, "executor_error", error=f"{type(exc).__name__}: {exc}")
+            try:
+                await self._cancel_all_wait_subscriptions(run)
+            except Exception:
+                pass  # the session teardown cancels the registry regardless
             if run.state == "running":
                 run.state = "failed"
                 try:
@@ -4038,6 +4098,12 @@ class FactoryExecutor:
         # await (an in-flight collect or milestone) bumps the generation,
         # so this task exits at its next check instead of continuing as a
         # second concurrent control loop.
+        # A pending wait's park bounds the NEXT collect too (the loop's
+        # tail folds it in): children settles and the wait's poll pass
+        # share one bounded window instead of collect(2s) plus a
+        # separate park sleep, which delayed other children's settles
+        # by up to the park on every iteration.
+        next_collect_park = 0.0
         while self._loop_alive(run, generation):
             in_flight = [
                 (run.states[state_id], entry, instance)
@@ -4047,8 +4113,12 @@ class FactoryExecutor:
                 if instance.status == "running" and instance.child_id is not None
             ]
             if in_flight:
+                collect_timeout_ms = POLL_TIMEOUT_MS
+                if 0 < next_collect_park < POLL_TIMEOUT_MS / 1000:
+                    collect_timeout_ms = int(next_collect_park * 1000)
                 results = await collect(
-                    [instance.child_id for _, _, instance in in_flight], timeout_ms=POLL_TIMEOUT_MS
+                    [instance.child_id for _, _, instance in in_flight],
+                    timeout_ms=collect_timeout_ms,
                 )
                 settled = {entry.rlm_child_id: entry for entry in results if entry.settled}
                 for state, entry, instance in in_flight:
@@ -4111,6 +4181,10 @@ class FactoryExecutor:
                     "queued instances can never be admitted"
                 )
                 self._event(run, "executor_error", error=reason)
+                try:
+                    await self._cancel_all_wait_subscriptions(run)
+                except Exception:
+                    pass  # the session teardown cancels the registry regardless
                 run.state = "failed"
                 try:
                     await self._milestone(run, "failed", reason)
@@ -4158,13 +4232,20 @@ class FactoryExecutor:
             # Yield once per iteration. A real collect already waits up to
             # POLL_TIMEOUT_MS, but an instantly-settling host (tests, a fast
             # supervisor) must not hot-spin the loop and starve other tasks.
-            # A pending wait parks one bounded slice instead: the next read
-            # poll is due no sooner than the slice, and the park is capped by
-            # the nearest wait deadline.
+            # A pending wait parks one bounded slice: the next read poll is
+            # due no sooner than the slice, and the park is capped by the
+            # nearest wait deadline. With children in flight the park rides
+            # the next collect's timeout instead of a separate sleep — a
+            # child that settles during the park is collected within the
+            # park, not a full park later.
             if wait_park > 0:
-                await self._sleep_fn(wait_park)
+                if in_flight:
+                    await asyncio.sleep(0)
+                else:
+                    await self._sleep_fn(wait_park)
             else:
                 await asyncio.sleep(0)
+            next_collect_park = wait_park if (wait_park > 0 and in_flight) else 0.0
 
     # -- small helpers --------------------------------------------------------
 

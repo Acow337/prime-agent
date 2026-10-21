@@ -444,6 +444,9 @@ async def collect(
 
 
 RLM_PROGRESS_NOTE_MAX_LENGTH = 512
+RLM_WATCH_READ_LIMIT_MAX = 500
+"""The host-side page cap for one ``rlm.watch.read`` (mirrors the
+``AGENT_WATCH_READ_LIMIT_MAX`` bound the pa-core handler pins)."""
 
 
 async def progress_note(message: str) -> RLMProgressNoteResult:
@@ -517,15 +520,20 @@ async def rename(new_name: str, *, session_id: str | RLMSpawnHandle | RLMSubagen
     return name
 
 
-async def watch_agent(target: str) -> dict[str, Any]:
+async def watch_agent(target: str, wake: bool = True) -> dict[str, Any]:
     """Subscribe to a direct child's activity (message ranges + status
     transitions, never content). Re-registering the same child re-baselines
     its one subscription. The registry is supervisor-owned: it survives a
-    kernel restart and dies with the parent session.
+    kernel restart and dies with the parent session. ``wake=True`` (the
+    default) also delivers one quiet wake row per poll batch with events;
+    ``wake=False`` pages the ring only (the factory's own waits: they read
+    the ring themselves and never spend a parent turn on their events).
     """
     if not isinstance(target, str) or not target.strip():
         raise ValueError("rlm.watch.agent requires a target child name or id")
-    return await host_request("rlm.watch.agent", {"target": target})
+    if not isinstance(wake, bool):
+        raise ValueError("rlm.watch.agent wake must be a boolean")
+    return await host_request("rlm.watch.agent", {"target": target, "wake": wake})
 
 
 async def watch_agent_list() -> dict[str, Any]:
@@ -548,6 +556,8 @@ async def watch_read(since_seq: int = 0, limit: int = 100) -> dict[str, Any]:
         raise ValueError("rlm.watch.read since_seq must be a non-negative integer")
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         raise ValueError("rlm.watch.read limit must be a positive integer")
+    if limit > RLM_WATCH_READ_LIMIT_MAX:
+        raise ValueError(f"rlm.watch.read limit must be at most {RLM_WATCH_READ_LIMIT_MAX}")
     return await host_request("rlm.watch.read", {"since_seq": since_seq, "limit": limit})
 
 
@@ -607,14 +617,16 @@ class _RLMWatchNamespace:
     ``await rlm.watch.agent('<child>')`` subscribes to a direct child's
     activity: message-index ranges and status transitions, never content.
     The registry is supervisor-owned, so a subscription survives a kernel
-    restart but dies with the parent session. ``await rlm.watch.read()`` pages
-    the bounded event ring (``since_seq`` is the previous page's
-    ``next_seq``); every call is async, so always await it:
-    ``page = await rlm.watch.read()``.
+    restart but dies with the parent session. A ``wake=True`` subscription
+    (the default) also gets one quiet wake row per poll batch with events;
+    ``wake=False`` (the factory's own waits) pages the ring only.
+    ``await rlm.watch.read()`` pages the bounded event ring (``since_seq``
+    is the previous page's ``next_seq``); every call is async, so always
+    await it: ``page = await rlm.watch.read()``.
     """
 
-    async def agent(self, target: str) -> dict[str, Any]:
-        return await watch_agent(target)
+    async def agent(self, target: str, wake: bool = True) -> dict[str, Any]:
+        return await watch_agent(target, wake=wake)
 
     async def agent_list(self) -> dict[str, Any]:
         return await watch_agent_list()

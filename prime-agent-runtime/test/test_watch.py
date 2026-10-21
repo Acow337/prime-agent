@@ -79,10 +79,30 @@ class WatchAgentTest(unittest.TestCase):
         self.assertEqual(reply["child_id"], "sub-1")
         kind, payload = self.host.calls[-1]
         self.assertEqual(kind, "rlm.watch.agent")
-        self.assertEqual(payload, {"target": "worker", "type": "rlm.watch.agent"})
+        self.assertEqual(
+            payload, {"target": "worker", "wake": True, "type": "rlm.watch.agent"}
+        )
         # The namespace surface forwards to the same module function.
         reply = asyncio.run(rlm_module.rlm.watch.agent("worker"))
         self.assertEqual(reply["child_id"], "sub-1")
+
+    def test_watch_agent_wake_flag_forwards_and_validates(self) -> None:
+        # wake=False (the factory's own waits) rides the subscribe payload,
+        # so the registry can keep those subscriptions out of the quiet
+        # wake rows. (Mutating the kernel back to a bare target forward
+        # fails this pin: the wake key disappears.)
+        asyncio.run(rlm_module.watch_agent("worker", wake=False))
+        self.assertEqual(
+            self.host.calls[-1][1],
+            {"target": "worker", "wake": False, "type": "rlm.watch.agent"},
+        )
+        asyncio.run(rlm_module.rlm.watch.agent("worker", wake=False))
+        self.assertEqual(self.host.calls[-1][1]["wake"], False)
+        with self.assertRaises(ValueError):
+            asyncio.run(rlm_module.watch_agent("worker", wake="yes"))
+        with self.assertRaises(ValueError):
+            asyncio.run(rlm_module.watch_agent("worker", wake=None))
+        self.assertEqual(len(self.host.calls), 2, "no host call may leave the invalid surface")
 
     def test_watch_agent_requires_nonempty_target(self) -> None:
         for bad in ("", "   ", None, 7):
@@ -120,6 +140,11 @@ class WatchAgentTest(unittest.TestCase):
             asyncio.run(rlm_module.watch_read(since_seq=-1))
         with self.assertRaises(ValueError):
             asyncio.run(rlm_module.watch_read(limit=0))
+        # The host caps one page at 500 events; the kernel rejects a
+        # larger ask locally instead of surfacing the host refusal.
+        with self.assertRaises(ValueError):
+            asyncio.run(rlm_module.watch_read(limit=501))
+        self.assertEqual(len(self.host.calls), 2, "the capped limit never reached the host")
 
 
 if __name__ == "__main__":
