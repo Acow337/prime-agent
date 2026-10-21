@@ -419,7 +419,7 @@ fn the_expanded_group_renders_each_agent_once() {
 #[test]
 fn selection_pins_a_stale_activity_identity_to_its_kind() {
     let roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
-    let counts = activity(&[("p-live", 2, 1)]);
+    let counts = activity(&[("p-live", 2, 1, 0)]);
     let rows = rows_with_activity(&roster, None, &[], &counts);
     let key = SelectionKey {
         session_id: Some("p".to_string()),
@@ -1257,20 +1257,21 @@ fn a_ledger_child_nests_across_the_windows_path_forms() {
     );
 }
 
-fn activity(entries: &[(&str, usize, usize)]) -> HashMap<String, SessionActivity> {
+/// Each entry is `(active session, shells, running factory runs, paused factory runs)`.
+fn activity(entries: &[(&str, usize, usize, usize)]) -> HashMap<String, SessionActivity> {
     entries
         .iter()
-        .map(|(active, shells, factory_runs)| {
+        .map(|&(active, shells, running, paused)| {
             (
-                (*active).to_string(),
+                active.to_string(),
                 SessionActivity {
                     shells: ShellCounts {
-                        running: *shells,
+                        running: shells,
                         persistent: 0,
                     },
                     factory: FactoryCounts {
                         specs: 0,
-                        runs: *factory_runs,
+                        runs: running + paused,
                     },
                 },
             )
@@ -1291,7 +1292,11 @@ fn activity_lines_follow_each_nodes_subagents_block() {
         roster_entry("c2", "idle", &child_summary("c2", "p", "second child")),
         roster_entry("gc", "idle", &grandchild),
     ];
-    let counts = activity(&[("p-live", 2, 1), ("c1-live", 1, 0), ("c2-live", 0, 0)]);
+    let counts = activity(&[
+        ("p-live", 2, 1, 0),
+        ("c1-live", 1, 0, 0),
+        ("c2-live", 0, 0, 0),
+    ]);
     let rows = rows_with_activity(&roster, None, &["file:/x/p.jsonl"], &counts);
     let first_child = rows
         .iter()
@@ -1463,4 +1468,26 @@ fn an_inactive_node_shows_its_stored_factory_specs() {
             "\u{2699} 2 factories \u{b7} 0 running"
         )]
     );
+}
+
+/// Paused factory runs never read as running: the line counts the running runs and names the
+/// paused ones apart, like the dock's paused cluster.
+#[test]
+fn the_factory_line_counts_paused_runs_apart_from_running_ones() {
+    let roster = vec![roster_entry("a", "idle", &parent_summary("a"))];
+    let line = |running, paused| {
+        rows_with_activity(
+            &roster,
+            None,
+            &[],
+            &activity(&[("a-live", 0, running, paused)]),
+        )
+        .into_iter()
+        .filter(|row| row.kind == RowKind::FactoryRuns)
+        .map(|row| row.title)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(line(0, 1), vec!["\u{2699} 0 factory runs \u{b7} 1 paused"]);
+    assert_eq!(line(2, 1), vec!["\u{2699} 2 factory runs \u{b7} 1 paused"]);
+    assert_eq!(line(1, 0), vec!["\u{2699} 1 factory run"]);
 }

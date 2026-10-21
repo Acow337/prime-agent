@@ -118,9 +118,8 @@ impl SessionUi {
         // run whose resident children still run keeps its entry like its panel and its stop
         // control). Fully terminal runs stay as panels inside the factory page, never in the
         // dock — the shells group's running-only scoping, one lane over.
-        let factory_runs = crate::factory_view::dock_factory_items(
-            &crate::factory_view::parse_factory_runs(&self.factory_graph),
-        );
+        let runs = crate::factory_view::parse_factory_runs(&self.factory_graph);
+        let factory_runs = crate::factory_view::dock_factory_items(&runs);
         // The dock's subagent count is the live running count only:
         // idle and dead registry rows (passivated children the ledger
         // still seeds) never bloat the collapsed indicator — the expanded
@@ -140,6 +139,7 @@ impl SessionUi {
             shells_persistent: crate::bash_view::ShellCounts::of(&shell_rows).persistent,
             factory_specs: crate::factory_view::stored_spec_count(&self.factory_graph),
             factory_runs,
+            factory_counts: crate::factory_view::FactoryRunCounts::of(&runs),
             // The group renders exactly while the daemon advertises the
             // lane: the factory's opt-in gate (a daemon without the
             // factory lane never mounts the group).
