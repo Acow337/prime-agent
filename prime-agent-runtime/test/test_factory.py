@@ -3029,6 +3029,9 @@ class LateChildHost(FakeHost):
 
     async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if request_type == "rlm.watch.agent" and not self.child_exists.is_set():
+            # Record the missed subscribe before raising: the retry-cadence
+            # tests count these calls (every pass retried the miss).
+            self.calls.append((request_type, payload or {}))
             raise RuntimeError(
                 f"No direct child matches \"{(payload or {}).get('target')}\""
             )
@@ -7457,6 +7460,8 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # passes. (Mutating the miss back to an immediate error settle
         # fails this pin: the run fails instead of firing on growth.)
         late = LateChildHost(clock=self.clock)
+        # Observe through the patched seam: the setUp host receives nothing.
+        self.host = late
         patcher = patch.object(rlm_module, "host_request", late)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -7510,6 +7515,8 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # the timeout names the subscribe miss that kept the wait
         # unsubscribed.
         late = LateChildHost(clock=self.clock)
+        # Observe through the patched seam: the setUp host receives nothing.
+        self.host = late
         patcher = patch.object(rlm_module, "host_request", late)
         patcher.start()
         self.addCleanup(patcher.stop)

@@ -3281,7 +3281,7 @@ class FactoryExecutor:
             # An explicit is-None check: a clock that reads exactly 0.0
             # (FakeClock(start=0)) must not re-base the deadline to `now`
             # on every pass — a quiet wait would then never time out.
-            started = entry.wait_started_at or now
+            started = now if entry.wait_started_at is None else entry.wait_started_at
             remaining = started + timeout_s - now
             if entry.status != "waiting":
                 # stop() (or a policy pass) landed during an earlier
@@ -3295,16 +3295,30 @@ class FactoryExecutor:
                 try:
                     await self._subscribe_wait(run, state, entry, wait.get("target") or "")
                 except Exception as exc:
-                    if remaining <= 0 or "No direct child matches" not in str(exc):
-                        await self._settle_wait_error(
-                            run,
-                            state,
-                            entry,
-                            f"wait subscribe on {wait.get('target')!r} failed: {exc}",
+                    if "No direct child matches" in str(exc):
+                        # The miss parked until the deadline: at expiry the
+                        # TIMEOUT reason names the miss (the wait_timeout
+                        # event the audit expects), not the raw error.
+                        entry.wait_error = (
+                            f"wait subscribe on {wait.get('target')!r} failed: {exc}"
                         )
+                        if remaining <= 0:
+                            await self._settle_wait_error(
+                                run, state, entry, self._wait_timeout_reason(wait, entry)
+                            )
+                        else:
+                            # Wake the loop AT the deadline, not a full
+                            # poll later: the retry cadence is one subscribe
+                            # per pass and the expiry must settle on the
+                            # pass that lands on (or past) the deadline.
+                            park = min(park, remaining)
                         continue
-                    park = min(park, remaining)
-                    continue
+                    await self._settle_wait_error(
+                        run,
+                        state,
+                        entry,
+                        f"wait subscribe on {wait.get('target')!r} failed: {exc}",
+                    )
                 if entry.status != "waiting":
                     continue  # a stop claimed the entry mid-retry
             try:
@@ -3332,6 +3346,27 @@ class FactoryExecutor:
                 ),
                 None,
             )
+            # A FULL page means the ring may hold more events since the
+            # cursor than one 50-event page carries: keep draining pages
+            # (bounded by the deadline) instead of missing a match that
+            # sits past the first page until the next poll round.
+            while (
+                match is None
+                and len(page.get("events") or []) >= 50
+                and started + timeout_s - self._now_fn() > 0
+            ):
+                page = await watch_read(since_seq=entry.wait_cursor, limit=50)
+                if entry.status != "waiting":
+                    break
+                entry.wait_cursor = int(page.get("next_seq") or entry.wait_cursor)
+                match = next(
+                    (
+                        event
+                        for event in page.get("events") or []
+                        if event.get("subscription_id") == entry.wait_subscription_id
+                    ),
+                    None,
+                )
             if match is not None:
                 content = match.get("content") or {}
                 status = content.get("status")
