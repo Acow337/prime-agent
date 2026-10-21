@@ -327,7 +327,13 @@ fn agent_watch_enforces_active_and_total_limits() {
     for index in 0..AGENT_WATCH_MAX_ACTIVE {
         let child = format!("sub-{index}");
         registry
-            .register(&child, "worker", Some((0, "idle")), 1_000 + index as u64, true)
+            .register(
+                &child,
+                "worker",
+                Some((0, "idle")),
+                1_000 + index as u64,
+                true,
+            )
             .unwrap_or_else(|_| panic!("register {index} must fit the active cap"));
     }
     let error = registry
@@ -354,7 +360,13 @@ fn agent_watch_enforces_active_and_total_limits() {
         registered += 1;
     }
     let error = registry
-        .register("sub-total-overflow", "worker", Some((0, "idle")), 4_000, true)
+        .register(
+            "sub-total-overflow",
+            "worker",
+            Some((0, "idle")),
+            4_000,
+            true,
+        )
         .expect_err("the 1025th registration must refuse");
     assert_eq!(error, AgentWatchRegisterError::TotalLimit);
     assert_eq!(error.message(), "Agent watch total limit reached (1024)");
@@ -523,7 +535,13 @@ fn agent_watch_rebaseline_at_the_active_cap_burns_nothing() {
     let mut registry = AgentWatchRegistry::default();
     for index in 0..AGENT_WATCH_MAX_ACTIVE {
         registry
-            .register(&format!("sub-{index}"), "worker", Some((0, "idle")), 1_000, true)
+            .register(
+                &format!("sub-{index}"),
+                "worker",
+                Some((0, "idle")),
+                1_000,
+                true,
+            )
             .unwrap_or_else(|_| panic!("register {index} must fit the active cap"));
     }
     for _ in 0..100 {
@@ -982,7 +1000,10 @@ async fn agent_watch_vanished_child_emits_one_terminal_vanished_event() {
     // subscription is Stopped: a poll after the vanish observes nothing.
     let page = sessions.watch_read(0, 100).await.expect("read the ring");
     assert_eq!(page.events.len(), 1);
-    assert_eq!(page.events[0].content.status.as_ref().map(|c| c.to), Some("vanished"));
+    assert_eq!(
+        page.events[0].content.status.as_ref().map(|c| c.to),
+        Some("vanished")
+    );
     let rows = sessions.watch_agent_list().await.expect("list");
     assert_eq!(rows[0].status, "stopped");
     // The registry-level arm answers the same event: a direct
@@ -999,7 +1020,11 @@ async fn agent_watch_vanished_child_emits_one_terminal_vanished_event() {
     assert_eq!(event.content.start, 3);
     assert_eq!(event.content.end, 3);
     assert_eq!(
-        event.content.status.as_ref().map(|change| (change.from, change.to)),
+        event
+            .content
+            .status
+            .as_ref()
+            .map(|change| (change.from, change.to)),
         Some(("idle", "vanished"))
     );
     // A stale epoch (a re-baseline raced the vanish) stays quiet.
@@ -1065,7 +1090,10 @@ async fn agent_watch_unadmitted_child_registers_without_a_baseline() {
         .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["childId"], "sub-1");
-    assert_eq!(events[0]["fromIndex"], 2, "armed at the post-admission count");
+    assert_eq!(
+        events[0]["fromIndex"], 2,
+        "armed at the post-admission count"
+    );
     assert_eq!(events[0]["toIndex"], 7);
 }
 
@@ -1093,7 +1121,11 @@ async fn agent_watch_non_waking_subscription_grows_the_ring_without_a_wake_row()
         "a non-waking subscription delivers no wake row"
     );
     let page = sessions.watch_read(0, 100).await.expect("read the ring");
-    assert_eq!(page.events.len(), 1, "the event is readable through the ring");
+    assert_eq!(
+        page.events.len(),
+        1,
+        "the event is readable through the ring"
+    );
     assert_eq!(page.events[0].content.end, 5);
     let rows = sessions.watch_agent_list().await.expect("list");
     assert_eq!(rows[0].status, "active");

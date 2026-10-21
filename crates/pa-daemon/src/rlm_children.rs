@@ -727,9 +727,7 @@ impl SupervisorChildSessions {
                 victims.push(Arc::clone(record));
             }
         }
-        children.retain(|record| {
-            !victims.iter().any(|victim| Arc::ptr_eq(victim, record))
-        });
+        children.retain(|record| !victims.iter().any(|victim| Arc::ptr_eq(victim, record)));
     }
 
     /// Test seam: flip one child record's prompt admission (the watch
