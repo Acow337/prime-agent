@@ -56,6 +56,22 @@ fn a_saved_anchor_beyond_the_first_page_remains_pending_until_it_arrives() {
     );
 }
 
+/// A subagents panel anchored on its own root (never listed in its scope) arms no wait, so a
+/// partial catalog is not paged for it.
+#[test]
+fn a_panel_anchored_on_its_scope_root_does_not_page_the_catalog() {
+    let mut mode = scoped_mode(
+        Some("p"),
+        vec![
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        ],
+    );
+    mode.finish_saved_page(more());
+    assert!(!mode.anchor_selection_pending);
+    assert_eq!(mode.next_saved_fetch(), None);
+}
+
 #[test]
 fn a_carried_partial_catalog_keeps_waiting_for_a_missing_anchor() {
     let mut mode = mode_with_anchor(Some("older"), Vec::new());

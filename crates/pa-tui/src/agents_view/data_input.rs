@@ -77,7 +77,8 @@ impl AgentsViewMode {
             self.options.anchor_session_id.as_deref(),
         );
         // The entry anchor's row may be nested: arm the same ancestor expansion below so this
-        // pass reveals it (a scoped view never lists the anchor).
+        // pass reveals it (a scoped view's child anchor is revealed by the expansion its open
+        // carried).
         if let (true, Some(anchor)) = (
             self.anchor_selection_pending
                 && self.options.scope.is_none()
@@ -136,16 +137,33 @@ impl AgentsViewMode {
             identity.as_deref().or(self.selected_identity.as_deref()),
             self.selected_key.as_ref(),
         );
-        // The entry anchor lands the selection on its row once it appears; the sync below pins it,
-        // so later rebuilds restore onto it through the carried identity/key alone.
+        // The entry anchor lands the selection on its session's row once it appears. A carried row
+        // whose key names the anchor session stays (a persistent shell row, an unattachable child
+        // opened through its root); the sync below pins the landing, so later rebuilds restore
+        // onto it through the carried identity/key alone.
         if let (true, Some(anchor)) = (
             self.anchor_selection_pending,
             self.options.anchor_session_id.as_deref(),
         ) {
-            if let Some(index) = rows.iter().position(|row| {
+            let on_anchor = |row: &AgentsViewRow| {
                 row.selectable()
                     && row.summary.get("sessionId").and_then(Value::as_str) == Some(anchor)
-            }) {
+            };
+            let carried_on_anchor = self
+                .selected_key
+                .as_ref()
+                .and_then(|key| key.session_id.as_deref())
+                == Some(anchor);
+            let is_carried = |row: &AgentsViewRow| {
+                self.selected_identity.as_deref() == Some(row.identity.as_str())
+            };
+            let landed = match rows.get(self.selected) {
+                Some(row) if on_anchor(row) || (carried_on_anchor && is_carried(row)) => {
+                    Some(self.selected)
+                }
+                _ => rows.iter().position(on_anchor),
+            };
+            if let Some(index) = landed {
                 self.selected = index;
                 self.end_anchor_wait();
             }
