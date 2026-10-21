@@ -74,6 +74,7 @@ pub(crate) fn auto_background_to_bash_completion(
             &completion.command,
             i64::from(completion.exit_code.unwrap_or(-1)),
             completion.full_output_path.as_deref(),
+            completion.status.as_deref(),
         ),
     )
 }
@@ -90,6 +91,7 @@ mod tests {
             command: "sleep 61".to_string(),
             output: String::new(),
             full_output_path: Some("/tmp/spill/bash-4321.out".to_string()),
+            status: None,
         };
         let notice = auto_background_to_bash_completion(&completion).expect("pid known");
         // The promoted job rides the existing bash-done shape PLUS the
@@ -105,6 +107,7 @@ mod tests {
                 command: String::new(),
                 output: String::new(),
                 full_output_path: None,
+                status: None,
             }
         )
         .is_none());
