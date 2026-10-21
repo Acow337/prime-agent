@@ -12,11 +12,18 @@
 //!
 //! Events are half-open message-index ranges plus activity transitions —
 //! never child transcript content (enforced by construction: the child
-//! snapshot is a count and a status label). Two sinks see one event: the
-//! bounded readable ring (`rlm.watch.read`) and one coalesced
+//! snapshot is a count and a status label). Two sinks see one event:
+//! the bounded readable ring (`rlm.watch.read`) and one coalesced
 //! `display: false` wake row per poll batch
 //! ([`AGENT_WATCH_NOTICE_CUSTOM_TYPE`], routed like the terminal
-//! notices).
+//! notices) — the wake row only for `wake: true` subscriptions; a
+//! factory-owned wait pages the ring itself and never spends a parent
+//! turn on its events. The registry is supervisor-owned (kernel
+//! restarts never cross it: the kernel is a child process of the
+//! worker that holds the registry), so a post-restart host call simply
+//! re-lists it; a kernel restart mid-wait can strand a subscription
+//! until its child settles or the session closes — the factory's
+//! non-waking subscribes keep that leak silent.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -56,7 +63,7 @@ const WATCH_SUB_MAX_UNREACHABLE_POLLS: u32 = 12;
 /// The readable event ring: bounded by entries and serialized bytes,
 /// drop-oldest, and every drop is counted at the read surface.
 const AGENT_WATCH_EVENT_RING_MAX: usize = 1024;
-const AGENT_AGENT_WATCH_EVENT_RING_MAX_BYTES: usize = 256 * 1024;
+const AGENT_WATCH_EVENT_RING_MAX_BYTES: usize = 256 * 1024;
 /// Server-side page cap for one `rlm.watch.read` (the pa-core handler
 /// pins the same bound before the host sees the request).
 const AGENT_WATCH_READ_LIMIT_MAX: u64 = 500;
@@ -64,7 +71,7 @@ const AGENT_WATCH_READ_LIMIT_MAX: u64 = 500;
 /// One subscription's lifecycle (the registry row's `status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchStatus {
-    /// Elegible for the poller.
+    /// Eligible for the poller.
     Active,
     /// Cancelled by the owner (an idempotent cancel, teardown).
     Cancelled,
@@ -107,6 +114,11 @@ struct AgentWatchSubscription {
     /// was taken under, so one taken before a re-baseline is discarded
     /// instead of emitting a backwards range against the new baseline.
     epoch: u64,
+    /// Whether this subscription's events also deliver the coalesced
+    /// wake row (`false` for factory-owned waits: the factory reads the
+    /// ring itself, and a leaked or parked subscription must not spend a
+    /// parent LLM turn per poll batch).
+    wake: bool,
 }
 
 /// The registry caps' refusals (TS text).
@@ -227,6 +239,7 @@ impl AgentWatchRegistry {
         child_name: &str,
         baseline: Option<(u64, &'static str)>,
         at_ms: u64,
+        wake: bool,
     ) -> Result<RlmAgentWatch, AgentWatchRegisterError> {
         let id = format!("watch-agent-{child_id}");
         let arming_baseline = baseline.map(|(count, _)| count);
@@ -247,6 +260,7 @@ impl AgentWatchRegistry {
             subscription.created_at_ms = at_ms;
             subscription.unreachable_polls = 0;
             subscription.epoch = epoch;
+            subscription.wake = wake;
             return Ok(self.row(&id));
         }
         if self.active_count() >= AGENT_WATCH_MAX_ACTIVE {
@@ -270,6 +284,7 @@ impl AgentWatchRegistry {
                 total_events: 0,
                 unreachable_polls: 0,
                 epoch,
+                wake,
             },
         );
         Ok(self.row(&id))
@@ -281,20 +296,33 @@ impl AgentWatchRegistry {
         self.flip(id, WatchStatus::Cancelled)
     }
 
-    /// A vanished child ends its subscription without an event (TS: "a
-    /// vanished child stops emitting; the registry keeps the baseline").
-    /// An observation from before a re-baseline is stale: its child was
-    /// resolved under the old registration and must not stop the new
-    /// one.
-    pub(crate) fn mark_vanished(&mut self, id: &str, epoch: u64) {
-        match self.subscriptions.get_mut(id) {
-            Some(subscription)
-                if subscription.status == WatchStatus::Active && subscription.epoch == epoch =>
-            {
-                subscription.status = WatchStatus::Stopped;
-            }
-            _ => {}
+    /// A vanished child (deleted from the roster, or a roster that lost
+    /// it) ends its subscription with ONE terminal `-> vanished` status
+    /// event, zero-width like the unreachable give-up: a consumer parked
+    /// on the feed learns the target is gone instead of timing out
+    /// against a dead subscription (the factory settles a wait on a
+    /// vanished target through its failure policy instead of a silent
+    /// timeout). An observation from before a re-baseline is stale: its
+    /// child was resolved under the old registration and must not stop
+    /// the new one.
+    pub(crate) fn mark_vanished(
+        &mut self,
+        id: &str,
+        epoch: u64,
+        at_ms: u64,
+    ) -> Option<RlmWatchEvent> {
+        let subscription = self.subscriptions.get_mut(id)?;
+        if subscription.status != WatchStatus::Active || subscription.epoch != epoch {
+            return None;
         }
+        subscription.status = WatchStatus::Stopped;
+        Some(Self::build_event(
+            subscription,
+            subscription.baseline.unwrap_or_default(),
+            subscription.baseline.unwrap_or_default(),
+            Some((subscription.last_status, "vanished")),
+            at_ms,
+        ))
     }
 
     /// Owner teardown: every subscription ends cancelled.
@@ -409,7 +437,7 @@ impl AgentWatchRegistry {
         self.events_bytes += event_wire_size(&event);
         self.events.push_back(event.clone());
         while self.events.len() > AGENT_WATCH_EVENT_RING_MAX
-            || self.events_bytes > AGENT_AGENT_WATCH_EVENT_RING_MAX_BYTES
+            || self.events_bytes > AGENT_WATCH_EVENT_RING_MAX_BYTES
         {
             match self.events.pop_front() {
                 Some(dropped) => {
@@ -477,6 +505,13 @@ impl AgentWatchRegistry {
         }
     }
 
+    /// Test seam: whether a poller handle is parked (the emptied-poller
+    /// exit-clear pin reads it from the sibling test module).
+    #[cfg(test)]
+    pub(crate) fn has_parked_poller(&self) -> bool {
+        self.poll.is_some()
+    }
+
     /// Test knob: shorten the poll cadence (the 5s default is TS parity).
     #[cfg(test)]
     pub(crate) fn set_poll_interval_ms(&mut self, interval_ms: u64) {
@@ -498,48 +533,68 @@ fn event_wire_size(event: &RlmWatchEvent) -> usize {
         .unwrap_or_default()
 }
 
-/// One poll observation: a snapshot result, or the vanished-child arm.
-/// Both carry the registration epoch the observation was taken under, so
+/// One poll observation: a snapshot result, the vanished-child arm, or
+/// an unadmitted child (its task prompt has not landed: observe nothing
+/// this tick, so the parent's own kickoff never fabricates growth).
+/// All carry the registration epoch the observation was taken under, so
 /// a re-baseline discards one taken before it.
 enum WatchObservation {
     Snapshot(String, u64, Result<(u64, &'static str)>),
     Vanished(String, u64),
+    /// An unadmitted child: no snapshot this tick (the skip is keyed by
+    /// the subscription row the poll stage already resolved).
+    Unadmitted,
 }
 
 impl SupervisorChildSessionsInner {
     /// `rlm.watch.agent`: resolve the target against the live roster
     /// (child id first, then session name — the roster selector order),
     /// baseline off one child snapshot, and register. An unmatched
-    /// target is a hard error, never an empty watch.
-    pub(super) async fn watch_agent_register(&self, target: &str) -> Result<RlmAgentWatch> {
+    /// target is a hard error, never an empty watch. A child whose task
+    /// prompt has not landed yet (`rlm.spawn` returns before the
+    /// detached prompt reaches the worker) registers WITHOUT a baseline:
+    /// the first snapshot after admission arms it, so the parent's own
+    /// kickoff prompt landing never fabricates a growth event that a
+    /// same-tick short run then reads as activity.
+    pub(super) async fn watch_agent_register(
+        &self,
+        target: &str,
+        wake: bool,
+    ) -> Result<RlmAgentWatch> {
         let Some(record) = self.find_record_ordered(target).await else {
             bail!("No direct child matches \"{target}\"");
         };
-        let (child_id, child_name, active_session_id) = {
+        let (child_id, child_name, active_session_id, prompt_admitted) = {
             let record = record.lock().await;
             (
                 record.rlm_child_id.clone(),
                 record.session_name.clone(),
                 record.active_session_id.clone(),
+                record.prompt_admitted,
             )
         };
-        // The register-time baseline snapshot is a link round trip on the
-        // same lane the poller snapshots: bound it by the registry's
-        // snapshot timeout, not the 30s `STATE_TIMEOUT_MS` — a dead link
-        // must not park the kernel's `rlm.watch.agent` call (a wait-only
-        // entry state does this inside `run()`).
-        let snapshot_timeout_ms = self.agent_watch.lock().await.snapshot_timeout();
-        let baseline = tokio::time::timeout(
-            Duration::from_millis(snapshot_timeout_ms),
-            self.child_watch_snapshot(&active_session_id),
-        )
-        .await
-        .unwrap_or_else(|_| Err(anyhow!("agent watch snapshot timed out")))
-        .ok();
+        let baseline = if prompt_admitted {
+            // The register-time baseline snapshot is a link round trip on
+            // the same lane the poller snapshots: bound it by the
+            // registry's snapshot timeout, not the 30s
+            // `STATE_TIMEOUT_MS` — a dead link must not park the
+            // kernel's `rlm.watch.agent` call (a wait-only entry state
+            // does this inside `run()`).
+            let snapshot_timeout_ms = self.agent_watch.lock().await.snapshot_timeout();
+            tokio::time::timeout(
+                Duration::from_millis(snapshot_timeout_ms),
+                self.child_watch_snapshot(&active_session_id),
+            )
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("agent watch snapshot timed out")))
+            .ok()
+        } else {
+            None // unarmed until the prompt lands (the poller's arming read)
+        };
         let at_ms = now_ms();
         let mut registry = self.agent_watch.lock().await;
         registry
-            .register(&child_id, &child_name, baseline, at_ms)
+            .register(&child_id, &child_name, baseline, at_ms, wake)
             .map_err(|error| anyhow!(error.message()))
     }
 
@@ -592,8 +647,18 @@ async fn agent_watch_poll_loop(inner: Arc<SupervisorChildSessionsInner>, generat
         let interval_ms = inner.agent_watch.lock().await.poll_interval();
         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
         let targets: Vec<(String, u64, String)> = {
-            let registry = inner.agent_watch.lock().await;
+            let mut registry = inner.agent_watch.lock().await;
             if registry.poll_generation != generation || !registry.has_active() {
+                if registry.poll_generation == generation {
+                    // The exit decision is made under this lock: clear
+                    // the parked handle here too, or a subscribe landing
+                    // before the task is marked finished still sees an
+                    // unfinished poller, starts none, and that
+                    // subscription is never polled. A superseded
+                    // generation already has its replacement parked in
+                    // the slot; leave that handle alone.
+                    registry.poll = None;
+                }
                 return; // superseded, emptied, or torn down: exit quietly
             }
             registry
@@ -623,7 +688,18 @@ async fn agent_watch_poll_loop(inner: Arc<SupervisorChildSessionsInner>, generat
                     let Some(record) = inner.find_record_by_child_id(child_id).await else {
                         return WatchObservation::Vanished(subscription_id.clone(), *epoch);
                     };
-                    let active_session_id = record.lock().await.active_session_id.clone();
+                    let (active_session_id, prompt_admitted) = {
+                        let record = record.lock().await;
+                        (record.active_session_id.clone(), record.prompt_admitted)
+                    };
+                    if !prompt_admitted {
+                        // The task prompt has not landed (the spawn ->
+                        // watch window): observing now would fabricate
+                        // the parent's own kickoff as the first growth
+                        // event. Skip the tick; the baseline arms on
+                        // the first post-admission snapshot instead.
+                        return WatchObservation::Unadmitted;
+                    }
                     let snapshot = tokio::time::timeout(
                         Duration::from_millis(snapshot_timeout_ms),
                         inner.child_watch_snapshot(&active_session_id),
@@ -647,20 +723,39 @@ async fn agent_watch_poll_loop(inner: Arc<SupervisorChildSessionsInner>, generat
             let mut lines = Vec::new();
             for observation in observations {
                 match observation {
+                    WatchObservation::Unadmitted => {} // no observation this tick
                     WatchObservation::Vanished(subscription_id, epoch) => {
-                        registry.mark_vanished(&subscription_id, epoch);
+                        if let Some(event) =
+                            registry.mark_vanished(&subscription_id, epoch, now_ms())
+                        {
+                            let event = registry.push_event(event);
+                            let (child_name, wake) = registry
+                                .subscriptions
+                                .get(&event.subscription_id)
+                                .map(|subscription| {
+                                    (subscription.child_name.clone(), subscription.wake)
+                                })
+                                .unwrap_or_default();
+                            if wake {
+                                lines.push((event, child_name));
+                            }
+                        }
                     }
                     WatchObservation::Snapshot(subscription_id, epoch, snapshot) => {
                         if let Some(event) =
                             registry.apply_snapshot(&subscription_id, epoch, &snapshot, now_ms())
                         {
                             let event = registry.push_event(event);
-                            let child_name = registry
+                            let (child_name, wake) = registry
                                 .subscriptions
                                 .get(&event.subscription_id)
-                                .map(|subscription| subscription.child_name.clone())
+                                .map(|subscription| {
+                                    (subscription.child_name.clone(), subscription.wake)
+                                })
                                 .unwrap_or_default();
-                            lines.push((event, child_name));
+                            if wake {
+                                lines.push((event, child_name));
+                            }
                         }
                     }
                 }

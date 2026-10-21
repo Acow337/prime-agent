@@ -716,6 +716,40 @@ impl SupervisorChildSessions {
         }
     }
 
+    /// Test seam: drop one child record from the roster (the watch
+    /// poller's vanished-child arm against a hand-deleted child).
+    #[cfg(test)]
+    pub(crate) async fn drop_test_child(&self, child_id: &str) {
+        let mut children = self.inner.children.lock().await;
+        let mut victims: Vec<Arc<Mutex<ChildRecord>>> = Vec::new();
+        for record in children.iter() {
+            if record.lock().await.rlm_child_id == child_id {
+                victims.push(Arc::clone(record));
+            }
+        }
+        children.retain(|record| {
+            !victims.iter().any(|victim| Arc::ptr_eq(victim, record))
+        });
+    }
+
+    /// Test seam: flip one child record's prompt admission (the watch
+    /// register/poll behavior across the spawn -> watch window, where
+    /// the task prompt has not landed yet).
+    #[cfg(test)]
+    pub(crate) async fn set_test_child_prompt_admitted(
+        &self,
+        active_session_id: &str,
+        admitted: bool,
+    ) {
+        let children = self.inner.children.lock().await;
+        for record in children.iter() {
+            let mut record = record.lock().await;
+            if record.active_session_id == active_session_id {
+                record.prompt_admitted = admitted;
+            }
+        }
+    }
+
     /// Test seam: admit one child record without the supervisor round trip
     /// (the controller tests exercise the family join on registry state).
     #[cfg(test)]

@@ -721,10 +721,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
 
     // -- rlm.watch.* (supervisor-owned agent activity watches) --------
 
-    fn watch_agent(&self, target: String) -> RlmHostFuture<RlmAgentWatch> {
+    fn watch_agent(&self, target: String, wake: bool) -> RlmHostFuture<RlmAgentWatch> {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
-            let handle = this.watch_agent_register(&target).await?;
+            let handle = this.watch_agent_register(&target, wake).await?;
             super::agent_watch::ensure_agent_watch_poller(&this).await;
             Ok(handle)
         })

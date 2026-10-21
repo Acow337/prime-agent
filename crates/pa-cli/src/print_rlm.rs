@@ -1007,9 +1007,11 @@ impl RlmSubagentHost for InlineHost {
     // -- rlm.watch.* (the inline host has no supervisor-owned watch
     // registry; every watch request answers truthfully) -----------------
 
-    fn watch_agent(&self, target: String) -> RlmHostFuture<RlmAgentWatch> {
+    fn watch_agent(&self, target: String, _wake: bool) -> RlmHostFuture<RlmAgentWatch> {
         Box::pin(async move {
-            anyhow::bail!("No direct child matches \"{target}\" in the current parent session")
+            anyhow::bail!(
+                "cannot watch \"{target}\": this session has no RLM child runtime (a daemon-backed parent session is required)"
+            )
         })
     }
     fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>> {

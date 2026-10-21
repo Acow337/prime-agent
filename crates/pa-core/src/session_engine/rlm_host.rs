@@ -246,8 +246,12 @@ pub trait RlmSubagentHost: Send + Sync {
     /// child (TS `rlm.rename`); answers the applied name.
     fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String>;
     /// `rlm.watch.agent`: subscribe to a direct child's activity
-    /// (message ranges and status transitions, never content).
-    fn watch_agent(&self, target: String) -> RlmHostFuture<RlmAgentWatch>;
+    /// (message ranges and status transitions, never content). `wake`
+    /// selects whether the subscription's events also deliver the
+    /// coalesced quiet wake row per poll batch, or only page through
+    /// `rlm.watch.read` (the factory's own waits: it reads the ring
+    /// itself, so its subscriptions never spend a parent turn).
+    fn watch_agent(&self, target: String, wake: bool) -> RlmHostFuture<RlmAgentWatch>;
     /// `rlm.watch.agent_list`: the owner's watch rows.
     fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>>;
     /// `rlm.watch.agent_cancel`: idempotent cancel; `false` for an
@@ -320,9 +324,16 @@ impl RlmSubagentHost for NoRlmChildren {
             Ok(name)
         })
     }
-    fn watch_agent(&self, target: String) -> RlmHostFuture<RlmAgentWatch> {
+    fn watch_agent(&self, target: String, _wake: bool) -> RlmHostFuture<RlmAgentWatch> {
         Box::pin(async move {
-            anyhow::bail!("No direct child matches \"{target}\" in the current parent session")
+            // Distinct from the daemon's roster miss: this session can
+            // never have children, so a kernel-side wait parked on this
+            // error would stall until its deadline. The factory keys its
+            // park-retry on the daemon miss text ("No direct child
+            // matches"); this form fails the wait fast instead.
+            anyhow::bail!(
+                "cannot watch \"{target}\": this session has no RLM child runtime (a daemon-backed parent session is required)"
+            )
         })
     }
     fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>> {
@@ -636,7 +647,14 @@ fn register_watch_agent(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHost
                 else {
                     anyhow::bail!("rlm.watch.agent requires a target child name or id");
                 };
-                let watch = host.watch_agent(target.to_string()).await?;
+                let wake = match payload.data.get("wake") {
+                    None | Some(Value::Null) => true,
+                    Some(Value::Bool(wake)) => *wake,
+                    Some(_) => {
+                        anyhow::bail!("rlm.watch.agent wake must be a boolean");
+                    }
+                };
+                let watch = host.watch_agent(target.to_string(), wake).await?;
                 serde_json::to_value(&watch).map_err(anyhow::Error::new)
             })
         }),
@@ -1214,7 +1232,7 @@ mod tests {
                 Ok(name)
             })
         }
-        fn watch_agent(&self, target: String) -> RlmHostFuture<RlmAgentWatch> {
+        fn watch_agent(&self, target: String, _wake: bool) -> RlmHostFuture<RlmAgentWatch> {
             let targets = Arc::clone(&self.targets);
             Box::pin(async move {
                 targets.lock().await.push(target);
@@ -1999,6 +2017,22 @@ mod tests {
         assert_eq!(host.targets.lock().await.last().unwrap(), "worker");
     }
 
+    /// `wake` defaults to true and must be a boolean: a non-bool is a
+    /// validation error before the host sees the request.
+    #[tokio::test]
+    async fn watch_agent_wake_defaults_true_and_rejects_non_bools() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wiring = wired(dir.path(), None);
+        let error = call(
+            &wiring,
+            "rlm.watch.agent",
+            json!({ "type": "rlm.watch.agent", "target": "worker", "wake": "yes" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "rlm.watch.agent wake must be a boolean");
+    }
+
     /// A session with no child runtime refuses a watch with the truthful
     /// selector error, never an empty watch.
     #[tokio::test]
@@ -2014,7 +2048,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "No direct child matches \"worker\" in the current parent session"
+            "cannot watch \"worker\": this session has no RLM child runtime (a daemon-backed parent session is required)"
         );
     }
 
