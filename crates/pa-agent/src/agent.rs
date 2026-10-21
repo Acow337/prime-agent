@@ -17,7 +17,7 @@ use crate::agent_loop::{
 use crate::stream::StreamFn;
 use crate::types::{
     AgentEvent, AgentMessage, AgentTool, ImageContent, Model, ThinkingLevel, ToolExecutionMode,
-    Usage,
+    ToolProgressCadence, Usage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -117,6 +117,9 @@ pub struct AgentOptions {
     /// notice lane into the dispatch.
     pub auto_background_registry:
         Option<std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>>,
+    /// Heartbeat cadence for in-flight tool calls; `None` keeps the 60s
+    /// default tick.
+    pub tool_progress: Option<ToolProgressCadence>,
 }
 
 struct MutableAgentState {
@@ -364,6 +367,7 @@ struct AgentInner {
     auto_background_after: std::time::Duration,
     auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
     auto_background_registry: std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>,
+    tool_progress: ToolProgressCadence,
 }
 
 impl AgentInner {
@@ -425,7 +429,8 @@ impl AgentInner {
             }
             AgentEvent::AgentStart
             | AgentEvent::TurnStart
-            | AgentEvent::ToolExecutionUpdate { .. } => {}
+            | AgentEvent::ToolExecutionUpdate { .. }
+            | AgentEvent::ToolExecutionProgress { .. } => {}
         }
 
         let Some(signal) = self.current_signal() else {
@@ -592,6 +597,7 @@ impl AgentInner {
         config
             .auto_background_notice
             .clone_from(&self.auto_background_notice);
+        config.tool_progress = self.tool_progress;
         config.before_tool_call.clone_from(&self.before_tool_call);
         config.after_tool_call.clone_from(&self.after_tool_call);
         config
@@ -830,6 +836,7 @@ impl Agent {
             auto_background_registry: options.auto_background_registry.unwrap_or_else(|| {
                 std::sync::Arc::new(crate::auto_background::AutoBackgroundRegistry::new())
             }),
+            tool_progress: options.tool_progress.unwrap_or_default(),
         });
         Agent { inner }
     }

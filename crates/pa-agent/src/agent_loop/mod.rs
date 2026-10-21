@@ -116,6 +116,9 @@ pub struct AgentLoopConfig {
     pub auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
     /// The registry the per-call arms go into (one per agent).
     pub auto_background_registry: std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>,
+    /// Heartbeat cadence for in-flight tool calls (start-side trace
+    /// visibility for long calls); defaults to a 60s tick.
+    pub tool_progress: crate::types::ToolProgressCadence,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
 }
@@ -149,6 +152,7 @@ impl AgentLoopConfig {
             auto_background_registry: std::sync::Arc::new(
                 crate::auto_background::AutoBackgroundRegistry::new(),
             ),
+            tool_progress: crate::types::ToolProgressCadence::default(),
             before_tool_call: None,
             after_tool_call: None,
         }

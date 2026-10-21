@@ -122,7 +122,7 @@ async fn execute_tool_calls_sequential(
                     registry: std::sync::Arc::clone(&config.auto_background_registry),
                 };
                 let executed =
-                    execute_prepared_tool_call(&prepared, signal, emit, &auto_background).await;
+                    execute_prepared_tool_call(&prepared, config.tool_progress, signal, emit, &auto_background).await;
                 finalize_executed_tool_call(
                     current_context,
                     assistant_message,
@@ -218,6 +218,7 @@ async fn execute_tool_calls_parallel(
                 let handle = tokio::spawn(async move {
                     let executed = execute_prepared_tool_call(
                         &prepared,
+                        config.tool_progress,
                         Some(&signal),
                         &sink,
                         &auto_background,
