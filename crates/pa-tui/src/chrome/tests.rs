@@ -414,7 +414,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
             " ◆ subagents   3 running · 1 idle · 2 inactive",
             " ◷ heartbeats  5m lane canary",
             " ▸ shells      1 running · 0 persistent  ·  cargo test · 12.0s",
-            " ⚙ factory     2 factories · 1 running  ·  nightly paused",
+            " ⚙ factory     2 factories · 0 running · 1 paused  ·  nightly paused",
             " Pursuing goal (0s)",
         ]
     );

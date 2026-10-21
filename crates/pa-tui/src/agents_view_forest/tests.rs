@@ -1487,7 +1487,13 @@ fn the_factory_line_counts_paused_runs_apart_from_running_ones() {
         .map(|row| row.title)
         .collect::<Vec<_>>()
     };
-    assert_eq!(line(0, 1), vec!["\u{2699} 0 factory runs \u{b7} 1 paused"]);
-    assert_eq!(line(2, 1), vec!["\u{2699} 2 factory runs \u{b7} 1 paused"]);
-    assert_eq!(line(1, 0), vec!["\u{2699} 1 factory run"]);
+    assert_eq!(
+        line(0, 1),
+        vec!["\u{2699} 0 factories \u{b7} 0 running \u{b7} 1 paused"]
+    );
+    assert_eq!(
+        line(2, 1),
+        vec!["\u{2699} 0 factories \u{b7} 2 running \u{b7} 1 paused"]
+    );
+    assert_eq!(line(1, 0), vec!["\u{2699} 0 factories \u{b7} 1 running"]);
 }
