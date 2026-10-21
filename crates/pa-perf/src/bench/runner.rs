@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use pa_types::daemon::SAVED_CATALOG_PAGE_FILES;
 
 use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario};
 use crate::corpus::{self, CacheMode, CorpusOptions, Manifest};
@@ -505,28 +504,18 @@ fn post_launch(
             launch.wait_ready()?;
             Ok((editor_echo_ack(ctx, &mut launch.child)?, held))
         }
-        Scenario::AgentsView => {
-            // Include the viewer's fresh session in the stored-file count.
-            let counts = (ctx.manifest.markers.roster_inactive + 1, 0);
-            Ok((
-                agents_view_populate(ctx, &mut launch.child, counts.0, counts.1)?,
-                None,
-            ))
-        }
+        Scenario::AgentsView => Ok((agents_view_populate(ctx, &mut launch.child)?, None)),
         Scenario::AgentsViewWarm => {
             // The first populate warms the daemon's in-process scan cache;
             // the second TUI measures the warm path on the same daemon.
-            let counts = (ctx.manifest.markers.roster_inactive + 1, 0);
-            agents_view_populate(ctx, &mut launch.child, counts.0, counts.1)?;
+            agents_view_populate(ctx, &mut launch.child)?;
             let socket = launch.socket.clone();
             let dump = ctx
                 .corpus_root
                 .join("failed-streams")
                 .join("agents-view-warm-second.bin");
             let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump, None)?;
-            // The held client adds one stored file and one live row.
-            let counts = (ctx.manifest.markers.roster_inactive + 2, 1);
-            let sample = agents_view_populate(ctx, &mut second.child, counts.0, counts.1)?;
+            let sample = agents_view_populate(ctx, &mut second.child)?;
             Ok((sample, Some(second)))
         }
         Scenario::SessionSwitch => Ok((switch_to_target_b(ctx, &mut launch.child)?, None)),
@@ -641,49 +630,43 @@ impl Drop for Launch {
     }
 }
 
-/// Derive the first-page heading and unloaded-file footer.
-fn roster_observables(total_files: usize, active_rows: usize) -> (String, Option<String>) {
-    let folded = total_files.min(SAVED_CATALOG_PAGE_FILES as usize);
-    let heading = format!("Inactive ({})", folded - active_rows);
-    let footer = (total_files > folded)
-        .then(|| format!("{} older sessions not loaded", total_files - folded));
-    (heading, footer)
-}
-
-/// Wait for both first-page completion observables.
-fn wait_roster_completed(
-    ctx: &RunCtx,
-    child: &mut PtyChild,
-    heading: &str,
-    footer: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(footer) = footer {
-        child.wait_screen_contains(
-            footer,
-            "the saved-catalog completion footer",
-            Instant::now() + ctx.liveness,
-        )?;
-    }
-    child.wait_screen_contains(
-        heading,
-        "the agents view roster",
-        Instant::now() + ctx.liveness,
-    )?;
-    Ok(())
-}
-
-/// Time the first page using the scenario's stored-file and live-row counts.
-fn agents_view_populate(
-    ctx: &RunCtx,
-    child: &mut PtyChild,
-    total_files: usize,
-    active_rows: usize,
-) -> anyhow::Result<f64> {
-    let (heading, footer) = roster_observables(total_files, active_rows);
+/// The left-arrow opens the agents view; populate completes when the
+/// roster settles (see [`roster_settled`]; the heading count repaints as
+/// cell diffs, so the byte stream cannot see it — the screen model does).
+/// The count includes the TUI's own fresh session (rendered as one more
+/// inactive row).
+fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     let started = Instant::now();
     child.write(b"\x1b[D")?;
-    wait_roster_completed(ctx, child, &heading, footer.as_deref())?;
+    wait_roster(ctx, child, ctx.manifest.markers.roster_inactive + 1)?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// The agents view opens on its first catalog page: the `Inactive (N)`
+/// heading counts the loaded rows and the `M older sessions not loaded`
+/// footer the rest, so the page is settled once both account for every
+/// expected session. An unpaged roster has no footer.
+fn roster_settled(screen: &str, expected: usize) -> bool {
+    let loaded = screen
+        .split_once("Inactive (")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .and_then(|(number, _)| number.parse::<usize>().ok());
+    let unloaded = screen
+        .lines()
+        .find_map(|line| {
+            let (number, _) = line.trim_start().split_once(" older sessions not loaded")?;
+            number.parse::<usize>().ok()
+        })
+        .unwrap_or(0);
+    loaded.is_some_and(|loaded| loaded + unloaded == expected)
+}
+
+fn wait_roster(ctx: &RunCtx, child: &mut PtyChild, expected: usize) -> anyhow::Result<Instant> {
+    child.wait_screen(
+        "the agents view roster",
+        Instant::now() + ctx.liveness,
+        |screen| roster_settled(screen, expected),
+    )
 }
 
 /// From the opened session A: open the agents view, uniquely filter to
@@ -692,9 +675,8 @@ fn agents_view_populate(
 /// letter z), so Enter always drills THE row.
 fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     child.write(b"\x1b[D")?;
-    // Wait for the first page before typing so the scan cannot swallow the query.
-    let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive, 1);
-    wait_roster_completed(ctx, child, &heading, footer.as_deref())?;
+    // Wait for the settled roster before typing so the scan cannot swallow the query.
+    wait_roster(ctx, child, ctx.manifest.markers.roster_inactive - 1)?;
     child.write(ctx.manifest.markers.switch_query.as_bytes())?;
     // The echoed query does not contain the row's "switch" prefix, so this
     // needle is the picker's result row, not the echo.
@@ -972,24 +954,10 @@ fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
         Scenario::ColdReady | Scenario::WarmReady => {
             "the attach pill (the tray's session-usage row)".to_string()
         }
-        Scenario::AgentsView => {
-            let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive + 1, 0);
-            match footer {
-                Some(footer) => format!(
-                    "the completed roster heading ({heading}) and completion footer ({footer})"
-                ),
-                None => format!("the completed roster heading ({heading})"),
-            }
-        }
-        Scenario::AgentsViewWarm => {
-            let (heading, footer) = roster_observables(ctx.manifest.markers.roster_inactive + 2, 1);
-            match footer {
-                Some(footer) => format!(
-                    "the completed roster heading ({heading}) and completion footer ({footer})"
-                ),
-                None => format!("the completed roster heading ({heading})"),
-            }
-        }
+        Scenario::AgentsView | Scenario::AgentsViewWarm => format!(
+            "the settled roster (Inactive + not-yet-loaded = {})",
+            ctx.manifest.markers.roster_inactive + 1
+        ),
         Scenario::OpenSession => format!(
             "the huge session marker {}",
             ctx.manifest.markers.huge.needle
@@ -1113,39 +1081,6 @@ mod tests {
             "sampled runs must be positive"
         );
         assert!(!absent.exists(), "validation must precede output mutation");
-    }
-
-    #[test]
-    fn roster_observables_follow_the_saved_catalog_page_boundary() {
-        for (total_files, active_rows, heading, footer) in [
-            (199usize, 0usize, "Inactive (199)", None),
-            (199, 1, "Inactive (198)", None),
-            (200, 0, "Inactive (200)", None),
-            (200, 1, "Inactive (199)", None),
-            (
-                201,
-                0,
-                "Inactive (200)",
-                Some("1 older sessions not loaded"),
-            ),
-            (
-                201,
-                1,
-                "Inactive (199)",
-                Some("1 older sessions not loaded"),
-            ),
-        ] {
-            let (got_heading, got_footer) = roster_observables(total_files, active_rows);
-            assert_eq!(
-                got_heading, heading,
-                "{total_files} files, {active_rows} active"
-            );
-            assert_eq!(
-                got_footer.as_deref(),
-                footer,
-                "{total_files} files, {active_rows} active"
-            );
-        }
     }
 
     #[test]
@@ -1311,5 +1246,29 @@ mod tests {
             elapsed < Duration::from_secs(7),
             "hello blocked for {elapsed:?}"
         );
+    }
+    #[test]
+    fn roster_settled_accounts_for_unloaded_pages() {
+        let large = "   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.10.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 0 idle, 200 inactive
+
+ >   Search sessions
+
+Session                       Model                                 Cost  Age
+
+Inactive (200)
+• (no messages)               amazon.nova-2-lite-v1:0:medium       $0.00   4s
+• huge corpus session         gpt-5.4:high                     $71727.10  29d
+  ...
+801 older sessions not loaded · scroll to load
+↑/↓ navigate   Home/End first/last   Enter/→ open";
+        assert!(roster_settled(large, 1001));
+        assert!(!roster_settled(large, 1000));
+        assert!(roster_settled("Inactive (11)\n• a\n• b", 11));
+        assert!(!roster_settled("Inactive (7)\n• a\n• b", 11));
+        assert!(roster_settled(
+            "Inactive (199)\n2302 older sessions not loaded · scroll to load",
+            2501,
+        ));
     }
 }

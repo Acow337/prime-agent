@@ -11,6 +11,7 @@ use crate::agents_view_state::{
     is_unnamed_empty, now_ms, relative_age, section_rank, summary_for_record, Section,
     UnifiedRecord,
 };
+use crate::factory_view::FactoryRunCounts;
 use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
 
 struct BaseRow {
@@ -379,13 +380,14 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// The node's own `$ N shells` and `⚙ N factory runs` lines, each only when its count is nonzero.
+/// The node's own `$ N shells` and `⚙ N factory runs` lines, each only when its count is nonzero;
+/// paused runs read apart from the running ones (`⚙ 0 factory runs · 1 paused`).
 /// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
 fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     let line = |kind: RowKind, prefix: &str, title: String| AgentsViewRow {
         kind,
         section: parent.section,
-        identity: format!("{prefix}:{}", parent.identity),
+        identity: format!("{prefix}{}", parent.identity),
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
         title,
@@ -406,17 +408,23 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     if shells > 0 {
         rows.push(line(
             RowKind::Shells,
-            "shells",
+            super::SHELLS_ROW_PREFIX,
             format!("$ {shells} shell{}", if shells == 1 { "" } else { "s" }),
         ));
     }
-    if factory_runs > 0 {
+    let FactoryRunCounts { running, paused } = factory_runs;
+    if running + paused > 0 {
+        let paused = if paused > 0 {
+            format!(" \u{b7} {paused} paused")
+        } else {
+            String::new()
+        };
         rows.push(line(
             RowKind::FactoryRuns,
-            "factory",
+            super::FACTORY_ROW_PREFIX,
             format!(
-                "\u{2699} {factory_runs} factory run{}",
-                if factory_runs == 1 { "" } else { "s" }
+                "\u{2699} {running} factory run{}{paused}",
+                if running == 1 { "" } else { "s" }
             ),
         ));
     }

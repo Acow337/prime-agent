@@ -8,9 +8,6 @@ use super::{
     DaemonResumeCursor, Deserialize, JsonMap, Serialize, Value,
 };
 
-/// Session files loaded by each saved-catalog page request.
-pub const SAVED_CATALOG_PAGE_FILES: u64 = 200;
-
 /// One page of the display transcript (the branch in order, each compaction as its
 /// summary row), bounded by entry-id cursors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

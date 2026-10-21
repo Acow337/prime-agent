@@ -112,10 +112,10 @@ the liveness deadline only fails broken runs):
 | `cold-ready` | cold | the same launch, exec -> the tray's session-usage pill, the first attach-only content (daemon spawn + session create + attach included) |
 | `warm-start` | warm | exec -> first paint, daemon pre-started |
 | `warm-ready` | warm | the same launch, exec -> the attach pill |
-| `agents-view` | cold | left-arrow -> the completed `Inactive (N)` roster heading in the screen model |
+| `agents-view` | cold | left-arrow -> the settled first catalog page in the screen model |
 | `agents-view-warm` | cold | the same daemon's second populate (its in-process scan cache warm) |
-| `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker |
-| `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker |
+| `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker (followed by a one-line reply) |
+| `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker (followed by a one-line reply) |
 | `at-completion` | cold | the `@` keystroke -> the first completion menu row |
 | `editor-ready` | cold | ten typed characters -> full editor echo; clear verified untimed |
 | `concurrent-session` | cold | exec -> huge history marker while another TUI holds switch-a |

@@ -112,7 +112,9 @@ pub(crate) struct SessionSpec {
     pub rows: usize,
     pub name: Option<String>,
     /// A unique string placed in the LAST user message (the bench needle:
-    /// the transcript paints the session tail on open).
+    /// the transcript paints the session tail on open). Its reply is one
+    /// short text line, so rows the product appends at attach cannot push
+    /// the marker off screen.
     pub marker: Option<String>,
     pub parent_session: Option<String>,
     pub rlm_depth: Option<u64>,
@@ -343,7 +345,11 @@ pub(crate) fn write_session_file(
             continue;
         }
 
-        let text = user_text(rng);
+        let marker_turn = spec.marker.is_some() && target - rows.rows_written() <= 4;
+        let text = match &spec.marker {
+            Some(marker) if marker_turn => marker.clone(),
+            _ => user_text(rng),
+        };
         let content = if rng.chance(30) {
             UserContent::Blocks(vec![UserContentBlock::Text(TextContent {
                 text: text.clone(),
@@ -367,7 +373,7 @@ pub(crate) fn write_session_file(
         last_user_text = text;
 
         // The assistant turn: thinking + text + a tool call, then the result.
-        let tool = rng.chance(45).then(|| {
+        let tool = (!marker_turn && rng.chance(45)).then(|| {
             let name = TOOLS[rng.below(TOOLS.len() as u64) as usize];
             let id = format!("call-{:08x}", rows.counter);
             let mut arguments = serde_json::Map::new();
@@ -379,7 +385,7 @@ pub(crate) fn write_session_file(
             (id, name)
         });
         let mut blocks = Vec::new();
-        if rng.chance(60) {
+        if !marker_turn && rng.chance(60) {
             blocks.push(AssistantContentBlock::Thinking(ThinkingContent {
                 thinking: assistant_text(rng),
                 thinking_signature: None,
@@ -388,7 +394,11 @@ pub(crate) fn write_session_file(
             }));
         }
         blocks.push(AssistantContentBlock::Text(TextContent {
-            text: assistant_text(rng),
+            text: if marker_turn {
+                "Done.".to_string()
+            } else {
+                assistant_text(rng)
+            },
             text_signature: None,
             rest: serde_json::Map::new(),
         }));
@@ -411,7 +421,7 @@ pub(crate) fn write_session_file(
         }
         let stop_reason = if tool.is_some() {
             StopReason::ToolUse
-        } else if rng.chance(2) {
+        } else if !marker_turn && rng.chance(2) {
             StopReason::Error
         } else {
             StopReason::Stop
@@ -460,7 +470,7 @@ pub(crate) fn write_session_file(
             )?;
         }
 
-        if rng.chance(7) {
+        if !marker_turn && rng.chance(7) {
             let custom = CUSTOM_TYPES[rng.below(CUSTOM_TYPES.len() as u64) as usize];
             rows.push(
                 "custom_message",
@@ -474,22 +484,6 @@ pub(crate) fn write_session_file(
                 rng,
             )?;
         }
-    }
-
-    // Only the visible tail paints on resume, so the marker must be last.
-    if let Some(marker) = &spec.marker {
-        rows.push(
-            "message",
-            serde_json::json!({
-                "message": pa_types::session::AgentMessage::User(UserMessage {
-                    content: UserContent::Text(marker.clone()),
-                    timestamp: rows.millis,
-                    rest: serde_json::Map::new(),
-                })
-            }),
-            rng,
-        )?;
-        last_user_text = marker.clone();
     }
 
     rows.writer.flush()?;
@@ -519,9 +513,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("session directory");
         for seed in 0..16 {
             for target in 9..32 {
-                let path = directory.path().join("session.jsonl");
                 let written = super::write_session_file(
-                    &path,
+                    &directory.path().join("session.jsonl"),
                     &spec(target),
                     &mut crate::rng::Rng::new(seed),
                 )
@@ -530,20 +523,6 @@ mod tests {
                     written.last_user_text, "final user marker",
                     "seed={seed}, target={target}"
                 );
-                let contents = std::fs::read_to_string(&path).expect("read session");
-                let last = contents.lines().next_back().expect("the file holds rows");
-                let last: serde_json::Value =
-                    serde_json::from_str(last).expect("the last row parses");
-                assert_eq!(last["type"], "message", "seed={seed}, target={target}");
-                assert_eq!(
-                    last["message"]["role"], "user",
-                    "seed={seed}, target={target}"
-                );
-                let text = last["message"]["content"]
-                    .as_str()
-                    .or_else(|| last["message"]["content"][0]["text"].as_str())
-                    .expect("the last row is a typed user message");
-                assert_eq!(text, "final user marker", "seed={seed}, target={target}");
             }
         }
     }
