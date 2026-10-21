@@ -34,6 +34,17 @@ pub enum Scenario {
     SessionSwitch,
     /// The `@` keystroke -> the first completion menu row.
     AtCompletion,
+    /// `--resume <huge session>`, then PageUps: each keystroke -> the first
+    /// frame whose topmost corpus block ordinal is above the previous one
+    /// (one sample per page).
+    TranscriptPaging,
+    /// `--resume <huge session>`, then the top key -> the first frame
+    /// showing the session's first block (a daemon page fetch).
+    TranscriptTop,
+    /// Owned daemon + TUI, ready, then an idle window: the CPU time of the
+    /// daemon, its descendants, and the TUI (the sample, in ms), plus their
+    /// context switches. Linux-only (/proc).
+    IdleCost,
 }
 
 /// Every bench knob for one scenario over one corpus.
@@ -86,6 +97,26 @@ pub struct BenchResult {
     pub needle: String,
     pub binary: String,
     pub corpus: BenchCorpus,
+    /// The first usable paint of the same runs (the median above stays the
+    /// settled mark, the baseline's meaning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_paint: Option<Series>,
+    /// Each run's longest no-output gap inside its measured windows (a
+    /// flag, never gated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worst_gap: Option<Series>,
+    /// idle-cost: each run's context switches over the idle window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wakeups: Option<Vec<u64>>,
+}
+
+/// A secondary per-run series (ms) with its summary statistics.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Series {
+    pub samples_ms: Vec<f64>,
+    pub median_ms: f64,
+    pub p95_ms: f64,
+    pub max_ms: f64,
 }
 
 /// The corpus summary the result records (baseline keys use scenario/profile).

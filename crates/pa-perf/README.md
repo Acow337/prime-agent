@@ -119,6 +119,48 @@ the liveness deadline only fails broken runs):
 | `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker (the final user row; its reply is one line) |
 | `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker (the final user row; its reply is one line) |
 | `at-completion` | cold | the `@` keystroke -> the first completion menu row |
+| `transcript-paging` | cold | `--resume <huge session>`, then 20 PageUps: each keystroke -> the first frame whose topmost block ordinal is above the previous frame's (one sample per page) |
+| `transcript-top` | cold | `--resume <huge session>`, then the `tui.viewport.top` key -> the first frame showing the session's first block (ordinal 0); the head is never in the attach tail, so this is a daemon page fetch |
+| `idle-cost` | cold | owned daemon + TUI, ready, then a 30 s idle window: CPU ms (utime+stime) of the daemon, its descendants, and the TUI, plus their context switches (medium only, Linux only) |
+
+Two marks per run, one run: `agents-view` and `agents-view-warm` also
+record the first usable paint of the same run (the `first_paint` series;
+the median stays the settled mark the baseline keys mean): the first frame
+whose roster lists a loaded row, from the same roster parse as the settled
+mark. `cold-start`/`cold-ready` (and `warm-*`) are already a
+first-paint/ready pair from one launch. Not applicable: `open-session` (its
+marker is the first usable paint and no computed later mark exists) and
+`session-switch` (the agents view stays up until B's first chat frame,
+which already carries B's marker; the filtered picker has no `Inactive (`
+heading to watch disappear).
+
+Block ordinals: the corpus prefixes every generated text block of the huge
+session (user text, thinking, assistant text, tool output) with
+`ord<n>`, `n` counting up from 0 in transcript order (no generated word
+contains `ord`). The 20 PageUps stay inside the attach tail (the daemon
+serves the last 512 messages; 20 pages move ~100 blocks), so
+`transcript-paging` is the TUI's own scroll and render cost.
+`transcript-top` is the daemon side: the head page (`get_messages`) is
+fetched on the key.
+
+Stall gauge: the pty harness timestamps every output chunk; each sample's
+window (trigger -> its mark) records its longest no-output stretch, and
+the result keeps each run's worst (`worst_gap`). It is a flag — the report
+prints its p95 and max, and it never gates.
+
+idle-cost reads `/proc` from the owned pids down (`/proc/<pid>/task/*/children`,
+never by name): CPU ticks from `stat`, context switches summed over
+`task/*/status`, over the processes alive at the window's end (one that
+exits inside the window is not counted). One sample per suite on the medium leg (`pa-perf run`
+skips it elsewhere and on non-Linux; `bench --scenario idle-cost` errors
+there). The window is the measured quantity; CPU resolution is one clock
+tick (10 ms at the usual 100 Hz).
+
+Screen needles see only completed frames: the chat surface brackets its
+paints in synchronized output (mode 2026), and the terminal the bench
+presents as (ghostty) shows such a frame only at its end, so the screen
+model is read only outside a bracket. The agents view paints unbracketed;
+its needles see the bytes as they arrive, like a real terminal.
 
 Mechanics (the repo's pty-e2e discipline): the TUI child runs in its own
 session with NO controlling tty (`setsid` pre-exec; vendored crossterm
@@ -139,9 +181,12 @@ pid/name-based kill.
 pa-perf report --baseline crates/pa-perf/baseline.json --results results/*.json [--markdown OUT]
 ```
 
-Prints the aggregate table (scenario/profile, median, p95, baseline, delta)
-and exits nonzero ONLY when a non-report-only median exceeds twice the
-baseline. Noisy scenarios (>20% spread across 3 CI runs) are marked
+Prints the aggregate table (scenario/profile, median, p95, first-paint
+median, worst gap p95 / max, baseline, delta), then one line per idle-cost
+result (CPU ms and context switches), and exits nonzero ONLY when a
+non-report-only median exceeds twice the baseline. The first-paint and
+worst-gap columns never gate; scenarios without a baseline entry print as
+`(no baseline)`. Noisy scenarios (>20% spread across 3 CI runs) are marked
 `report_only` in the baseline: their deltas always print, the gate never
 fails. `baseline.json` is committed from CI numbers, not laptop/sandbox
 ones.
