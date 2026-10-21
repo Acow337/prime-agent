@@ -7525,6 +7525,176 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.all_events_of(result, "wait_timeout"), [])
 
     @async_test
+    async def test_a_late_waking_deadline_pass_still_drains_to_the_match(self) -> None:
+        # The deadline check is the drain's livelock guard at the loop
+        # END, never a gate on entering it: a pass that wakes LATE —
+        # the usual real-sleep case — must still examine the backlog
+        # queued before the deadline, so the page-2 match fires instead
+        # of a wait_timeout. (Mutating the guard back to the loop entry
+        # fails this pin: the late pass never reads page 2.)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+
+        class ParkOnce:
+            """Hold the first park sleep; yield on every later call."""
+
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def __call__(self, seconds: float) -> None:
+                if not self.entered.is_set():
+                    self.entered.set()
+                    await self.release.wait()
+                else:
+                    await asyncio.sleep(0)
+
+        park = ParkOnce()
+        self.executor._sleep_fn = park
+        result = await self.start()
+        await park.entered.wait()  # the loop parked after the first empty pass
+        # 50 sibling events fill page 1; the match queues behind them, and
+        # the clock runs PAST the deadline before the next pass wakes.
+        for seq in range(1, 51):
+            self.host.watch_events.append(
+                {
+                    "id": f"watch-sibling-{seq}",
+                    "seq": seq,
+                    "subscription_id": "watch-agent-sibling",
+                    "kind": "watch.agent",
+                    "content": {"target": "sibling", "start": 0, "end": seq, "status": None},
+                    "at_ms": seq,
+                }
+            )
+        self.host.watch_events.append(
+            {
+                "id": "watch-abc",
+                "seq": 51,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 50, "end": 51, "status": None},
+                "at_ms": 51,
+            }
+        )
+        self.clock.advance(0.6)
+        park.release.set()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        fired = self.all_events_of(result, "wait_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["end"], 51)
+        self.assertEqual(self.all_events_of(result, "wait_timeout"), [])
+
+    @async_test
+    async def test_a_transient_drain_read_failure_skips_the_round(self) -> None:
+        # The first read's transient-miss contract covers the drain too:
+        # a host flake on a paginated read skips that poll round (the
+        # deadline still bounds the wait) and the next pass fires the
+        # match — never an executor_error that fails the whole run.
+        # (Mutating the try/except out fails this pin: the run fails
+        # with executor_error and the wait never fires.)
+
+        class DrainFlakeHost(FakeHost):
+            """FakeHost whose FIRST paginated read (any since_seq past the
+            first page) raises once; every other call passes through."""
+
+            def __init__(self, clock: FakeClock) -> None:
+                super().__init__(clock=clock)
+                self.drained_flake = False
+
+            async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+                payload = payload or {}
+                if (
+                    request_type == "rlm.watch.read"
+                    and int(payload.get("since_seq") or 0) > 0
+                    and not self.drained_flake
+                ):
+                    self.drained_flake = True
+                    raise RuntimeError("transient drain read failure")
+                return await super().__call__(request_type, payload)
+
+        self.host = DrainFlakeHost(clock=self.clock)
+        patcher = patch.object(rlm_module, "host_request", self.host)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+
+        class ParkOnce:
+            """Hold the first park sleep; yield on every later call."""
+
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def __call__(self, seconds: float) -> None:
+                if not self.entered.is_set():
+                    self.entered.set()
+                    await self.release.wait()
+                else:
+                    await asyncio.sleep(0)
+
+        park = ParkOnce()
+        self.executor._sleep_fn = park
+        result = await self.start()
+        await park.entered.wait()  # the loop parked after the first empty pass
+        # Page 1 fills with sibling events; the match queues behind them.
+        for seq in range(1, 51):
+            self.host.watch_events.append(
+                {
+                    "id": f"watch-sibling-{seq}",
+                    "seq": seq,
+                    "subscription_id": "watch-agent-sibling",
+                    "kind": "watch.agent",
+                    "content": {"target": "sibling", "start": 0, "end": seq, "status": None},
+                    "at_ms": seq,
+                }
+            )
+        self.host.watch_events.append(
+            {
+                "id": "watch-abc",
+                "seq": 51,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 50, "end": 51, "status": None},
+                "at_ms": 51,
+            }
+        )
+        # The deadline pass wakes inside the window: the flaky drain read
+        # skips the round, and the next pass (at the deadline) reads the
+        # partial page and fires the match.
+        self.clock.advance(0.4)
+        park.release.set()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        fired = self.all_events_of(result, "wait_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["end"], 51)
+        self.assertEqual(self.all_events_of(result, "executor_error"), [])
+
+    @async_test
     async def test_a_roster_miss_retries_until_the_target_appears(self) -> None:
         # A wait-only entry arms during the readiness pass, before the
         # run admits the sibling it watches: the roster miss parks the

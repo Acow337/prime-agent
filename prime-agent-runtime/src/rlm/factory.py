@@ -3349,18 +3349,20 @@ class FactoryExecutor:
             # A FULL page means the ring may hold more events since the
             # cursor than one 50-event page carries: keep draining pages
             # instead of missing a match that sits past the first page
-            # until the next poll round. The bound is >= 0 — the deadline
-            # pass itself must still drain the backlog queued BEFORE the
-            # deadline (a page-2 match at expiry fires the wait, exactly
-            # like an in-window event on a later pass); a reread clock
-            # past the deadline exits mid-drain, so only the pre-deadline
-            # backlog is admitted.
-            while (
-                match is None
-                and len(page.get("events") or []) >= 50
-                and started + timeout_s - self._now_fn() >= 0
-            ):
-                page = await watch_read(since_seq=entry.wait_cursor, limit=50)
+            # until the next poll round. A deadline pass that wakes LATE
+            # still drains the backlog queued before the deadline — a
+            # page-2 match fires the wait, exactly like an in-window
+            # event on a later pass — so the reread-deadline check runs
+            # at the loop END, as the livelock guard against a ring that
+            # sustains full pages, never as a gate on entering the
+            # drain. A read failure here shares the first read's
+            # transient contract: skip the round (the deadline still
+            # bounds the wait), never fail the run.
+            while match is None and len(page.get("events") or []) >= 50:
+                try:
+                    page = await watch_read(since_seq=entry.wait_cursor, limit=50)
+                except Exception:
+                    break  # transient host miss: the next pass re-polls
                 if entry.status != "waiting":
                     break
                 entry.wait_cursor = int(page.get("next_seq") or entry.wait_cursor)
@@ -3372,6 +3374,8 @@ class FactoryExecutor:
                     ),
                     None,
                 )
+                if match is None and started + timeout_s - self._now_fn() < 0:
+                    break  # past the deadline mid-drain: settle or park below
             if match is not None:
                 content = match.get("content") or {}
                 status = content.get("status")
