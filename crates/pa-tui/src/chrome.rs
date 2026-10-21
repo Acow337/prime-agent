@@ -933,14 +933,20 @@ fn render_expanded_dock_row(
         ActivityGroup::Factory => {
             let counts = crate::factory_view::FactoryCounts {
                 specs: dock.factory_specs,
-                runs: dock.factory_runs.len(),
+                runs: dock.factory_counts,
             };
             let items: Vec<String> = counts
                 .label()
                 .into_iter()
                 .chain(dock.factory_runs.clone())
                 .collect();
-            expanded_group_row(theme, width, ("⚙", "factory"), counts.runs, &items)
+            expanded_group_row(
+                theme,
+                width,
+                ("⚙", "factory"),
+                dock.factory_counts.running,
+                &items,
+            )
         }
         ActivityGroup::Goal => vec![Span::raw(" "), goal_span(dock, theme)],
     };

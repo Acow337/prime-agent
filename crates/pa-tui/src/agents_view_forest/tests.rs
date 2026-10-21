@@ -1,7 +1,7 @@
 use super::*;
 use crate::agents_view_state::reconcile_unified_sessions;
 use crate::bash_view::ShellCounts;
-use crate::factory_view::FactoryCounts;
+use crate::factory_view::{FactoryCounts, FactoryRunCounts};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -1271,7 +1271,7 @@ fn activity(entries: &[(&str, usize, usize, usize)]) -> HashMap<String, SessionA
                     },
                     factory: FactoryCounts {
                         specs: 0,
-                        runs: running + paused,
+                        runs: FactoryRunCounts { running, paused },
                     },
                 },
             )
@@ -1346,7 +1346,10 @@ fn activity_lines_without_subagents_and_without_counts() {
         roster_entry("b", "idle", &parent_summary("b")),
     ];
     let specs_only = SessionActivity {
-        factory: FactoryCounts { specs: 2, runs: 0 },
+        factory: FactoryCounts {
+            specs: 2,
+            ..FactoryCounts::default()
+        },
         ..SessionActivity::default()
     };
     let counts = HashMap::from([("a-live".to_string(), specs_only)]);

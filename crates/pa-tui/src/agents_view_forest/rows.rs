@@ -115,7 +115,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
                         .saved
                         .as_ref()
                         .map_or(0, crate::factory_view::stored_spec_count),
-                    runs: 0,
+                    runs: crate::factory_view::FactoryRunCounts::default(),
                 },
             },
         };
@@ -393,8 +393,8 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// The node's own `$ N shells[ · M persistent]` and `⚙ N factories · M running` lines, each only
-/// when one of its counts is nonzero.
+/// The node's own `$ N shells[ · M persistent]` and `⚙ N factories · M running[ · K paused]` lines,
+/// each only when one of its counts is nonzero.
 /// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
 fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     let line = |kind: RowKind, prefix: &str, title: String| AgentsViewRow {

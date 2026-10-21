@@ -254,11 +254,11 @@ pub fn stored_spec_count(data: &Value) -> usize {
         .unwrap_or_default()
 }
 
-/// A session's stored factory specs (durable) and its live runs (their active state).
+/// A session's stored factory specs (durable) and its live runs, the paused ones apart.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FactoryCounts {
     pub specs: usize,
-    pub runs: usize,
+    pub runs: FactoryRunCounts,
 }
 
 impl FactoryCounts {
@@ -267,21 +267,28 @@ impl FactoryCounts {
     pub fn of(data: &Value) -> Self {
         Self {
             specs: stored_spec_count(data),
-            runs: live_run_count(data),
+            runs: FactoryRunCounts::of(&parse_factory_runs(data)),
         }
     }
 
-    /// `N factories · M running`, or `None` while the session has neither: the agents view's
-    /// factory line and the expanded dock's factory row show exactly then.
+    /// `N factories · M running[ · K paused]`, or `None` while the session has neither specs nor
+    /// live runs: the agents view's factory line and the expanded dock's factory row show exactly
+    /// then.
     #[must_use]
     pub fn label(self) -> Option<String> {
-        (self.specs > 0 || self.runs > 0).then(|| {
+        let FactoryRunCounts { running, paused } = self.runs;
+        (self.specs > 0 || running + paused > 0).then(|| {
             let noun = if self.specs == 1 {
                 "factory"
             } else {
                 "factories"
             };
-            format!("{} {noun} \u{b7} {} running", self.specs, self.runs)
+            let paused = if paused > 0 {
+                format!(" \u{b7} {paused} paused")
+            } else {
+                String::new()
+            };
+            format!("{} {noun} \u{b7} {running} running{paused}", self.specs)
         })
     }
 }

@@ -4,7 +4,7 @@
 use super::*;
 use crate::agents_view_forest::SessionActivity;
 use crate::bash_view::ShellCounts;
-use crate::factory_view::FactoryCounts;
+use crate::factory_view::{FactoryCounts, FactoryRunCounts};
 use crate::interactive::SessionPanel;
 
 fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory_runs: usize) {
@@ -17,7 +17,10 @@ fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory
             },
             factory: FactoryCounts {
                 specs: 0,
-                runs: factory_runs,
+                runs: FactoryRunCounts {
+                    running: factory_runs,
+                    paused: 0,
+                },
             },
         },
     );
