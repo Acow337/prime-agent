@@ -3348,12 +3348,17 @@ class FactoryExecutor:
             )
             # A FULL page means the ring may hold more events since the
             # cursor than one 50-event page carries: keep draining pages
-            # (bounded by the deadline) instead of missing a match that
-            # sits past the first page until the next poll round.
+            # instead of missing a match that sits past the first page
+            # until the next poll round. The bound is >= 0 — the deadline
+            # pass itself must still drain the backlog queued BEFORE the
+            # deadline (a page-2 match at expiry fires the wait, exactly
+            # like an in-window event on a later pass); a reread clock
+            # past the deadline exits mid-drain, so only the pre-deadline
+            # backlog is admitted.
             while (
                 match is None
                 and len(page.get("events") or []) >= 50
-                and started + timeout_s - self._now_fn() > 0
+                and started + timeout_s - self._now_fn() >= 0
             ):
                 page = await watch_read(since_seq=entry.wait_cursor, limit=50)
                 if entry.status != "waiting":

@@ -7452,6 +7452,79 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertGreaterEqual(len(self.host.calls_of("rlm.watch.read")), 3)
 
     @async_test
+    async def test_a_full_page_at_the_deadline_still_drains_to_the_match(self) -> None:
+        # The full-page drain: 50 sibling events fill the first page and
+        # the matching growth event sits on page 2, and the pass that
+        # reads them lands exactly ON the deadline. The match queued
+        # before the deadline must fire the wait, not time out — a
+        # single-page read (or a drain bound that skips the deadline
+        # pass) settles a wait_timeout naming no growth. (Mutating the
+        # drain loop out fails this pin: the wait times out.)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 500},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+
+        class ParkOnce:
+            """Hold the first park sleep; yield on every later call."""
+
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def __call__(self, seconds: float) -> None:
+                if not self.entered.is_set():
+                    self.entered.set()
+                    await self.release.wait()
+                else:
+                    await asyncio.sleep(0)
+
+        park = ParkOnce()
+        self.executor._sleep_fn = park
+        result = await self.start()
+        await park.entered.wait()  # the loop parked after the first empty pass
+        # 50 sibling events fill page 1; the match queues behind them, and
+        # the clock runs to the exact deadline before the next pass.
+        for seq in range(1, 51):
+            self.host.watch_events.append(
+                {
+                    "id": f"watch-sibling-{seq}",
+                    "seq": seq,
+                    "subscription_id": "watch-agent-sibling",
+                    "kind": "watch.agent",
+                    "content": {"target": "sibling", "start": 0, "end": seq, "status": None},
+                    "at_ms": seq,
+                }
+            )
+        self.host.watch_events.append(
+            {
+                "id": "watch-abc",
+                "seq": 51,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {"target": "watched", "start": 50, "end": 51, "status": None},
+                "at_ms": 51,
+            }
+        )
+        self.clock.advance(0.5)
+        park.release.set()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        fired = self.all_events_of(result, "wait_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["end"], 51)
+        self.assertEqual(self.all_events_of(result, "wait_timeout"), [])
+
+    @async_test
     async def test_a_roster_miss_retries_until_the_target_appears(self) -> None:
         # A wait-only entry arms during the readiness pass, before the
         # run admits the sibling it watches: the roster miss parks the
