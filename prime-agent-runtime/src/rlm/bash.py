@@ -123,9 +123,10 @@ _scan_hints_written = 0
 
 def _is_home_scale_root(token: str) -> bool:
     """A ~-rooted path or a $HOME expansion; exact names keep other env vars
-    ($HOMEDIR, ${HOMEBREW_PREFIX}) out. A grouping closer glued to the token
-    (`(rg pattern $HOME)`) is stripped first. Mirrors the Rust bash_guard."""
-    token = token.rstrip(")}")
+    ($HOMEDIR, ${HOMEBREW_PREFIX}) out. A grouping paren glued to the token
+    (`(rg pattern $HOME)`) is stripped first — only `)`: `${HOME}`'s closing
+    brace is part of the expansion. Mirrors the Rust bash_guard."""
+    token = token.rstrip(")")
     return (
         token.startswith("~")
         or token in ("$HOME", "${HOME}")

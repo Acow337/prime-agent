@@ -1655,6 +1655,11 @@ class ScanCostGuardTest(unittest.TestCase):
         # (bot round on the fix head), and many grouped prefixes stay
         # linear in the preflight (Macroscope round on the fix head).
         self.assertTrue(is_scan("(rg pattern $HOME)"))
+        # `${HOME}`'s closing brace is part of the expansion: the paren
+        # strip must not eat it (Macroscope round on the fix head).
+        self.assertTrue(is_scan('grep -rl needle "${HOME}"'))
+        self.assertTrue(is_scan('grep -rl needle "${HOME}/"'))
+        self.assertTrue(is_scan('(rg pattern "${HOME}")'))
         self.assertTrue(is_scan("((rg pattern $HOME))"))
         self.assertTrue(is_scan("(grep -rl needle $HOME)"))
         self.assertTrue(is_scan("(find $HOME)"))

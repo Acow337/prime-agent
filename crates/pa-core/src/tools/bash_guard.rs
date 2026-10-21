@@ -541,9 +541,10 @@ pub(crate) const SCAN_TIMEOUT_ENV: &str = "PRIME_AGENT_SCAN_TIMEOUT";
 /// milliseconds. Exact-name tests keep other env vars (`$HOMEDIR`,
 /// `${HOMEBREW_PREFIX}`) out.
 fn is_home_scale_root(token: &str) -> bool {
-    // A grouping closer glued to the token (`(rg pattern $HOME)`) is
-    // stripped first.
-    let token = token.trim_end_matches([')', '}']);
+    // A grouping paren glued to the token (`(rg pattern $HOME)`) is
+    // stripped first — only ')': "${HOME}"'s closing brace is part of
+    // the expansion.
+    let token = token.trim_end_matches(')');
     token.starts_with('~')
         || token == "$HOME"
         || token.starts_with("$HOME/")
@@ -1391,6 +1392,11 @@ mod tests {
         // (bot round on the fix head), and many grouped prefixes stay
         // linear in the preflight (Macroscope round on the fix head).
         assert!(is_unbounded_home_scan("(rg pattern $HOME)", None));
+        // "${HOME}"'s closing brace is part of the expansion: the paren
+        // strip must not eat it (Macroscope round on the fix head).
+        assert!(is_unbounded_home_scan("grep -rl needle \"${HOME}\"", None));
+        assert!(is_unbounded_home_scan("grep -rl needle \"${HOME}/\"", None));
+        assert!(is_unbounded_home_scan("(rg pattern \"${HOME}\")", None));
         assert!(is_unbounded_home_scan("((rg pattern $HOME))", None));
         assert!(is_unbounded_home_scan("(grep -rl needle $HOME)", None));
         assert!(is_unbounded_home_scan("(find $HOME)", None));
