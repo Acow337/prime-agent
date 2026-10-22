@@ -56,8 +56,6 @@ fn a_saved_anchor_beyond_the_first_page_remains_pending_until_it_arrives() {
     );
 }
 
-/// A subagents panel anchored on its own root (never listed in its scope) arms no wait, so a
-/// partial catalog is not paged for it.
 #[test]
 fn a_panel_anchored_on_its_scope_root_does_not_page_the_catalog() {
     let mut mode = scoped_mode(

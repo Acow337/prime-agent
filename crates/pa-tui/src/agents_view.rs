@@ -519,10 +519,8 @@ impl AgentsViewMode {
         let selected_identity = options.selected_row_identity.clone();
         let selected_key = options.selected_key.clone();
         let keybindings = options.keybindings.clone();
-        // Every open waits on the anchor, the session the view was opened from: the carried row
-        // is the one the previous run opened, and the chat may have switched sessions since. A
-        // scoped view never lists its own root, so a subagents panel opened from the root keeps
-        // the carried row.
+        // Every open waits on the anchor: the chat may have switched sessions since the carried
+        // row was opened. A scoped view never lists its own root, so that anchor arms no wait.
         let scope_root = options
             .scope
             .as_ref()

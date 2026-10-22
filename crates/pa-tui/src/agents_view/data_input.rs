@@ -76,23 +76,22 @@ impl AgentsViewMode {
             &self.session_activity,
             self.options.anchor_session_id.as_deref(),
         );
-        // The entry anchor's row may be nested: arm the same ancestor expansion below so this
-        // pass reveals it (a scoped view's child anchor is revealed by the expansion its open
-        // carried).
+        // The entry anchor's row may be nested: add its ancestors to the expansion below so this
+        // pass reveals it.
         if let (true, Some(anchor)) = (
-            self.anchor_selection_pending
-                && self.options.scope.is_none()
-                && self.pending_ancestors.is_none(),
+            self.anchor_selection_pending,
             self.options.anchor_session_id.as_deref(),
         ) {
-            self.pending_ancestors = Some(scope_ancestors(
-                &records,
-                &AgentsViewScope {
-                    session_id: Some(anchor.to_string()),
-                    active_session_id: None,
-                    session_name: None,
-                },
-            ));
+            self.pending_ancestors
+                .get_or_insert_with(Vec::new)
+                .extend(scope_ancestors(
+                    &records,
+                    &AgentsViewScope {
+                        session_id: Some(anchor.to_string()),
+                        active_session_id: None,
+                        session_name: None,
+                    },
+                ));
         }
         // Re-expand the drilled-in row's ancestors: a nested row appears only once its parent is
         // expanded (expand-and-rebuild until a pass reveals nothing new).
@@ -138,9 +137,8 @@ impl AgentsViewMode {
             self.selected_key.as_ref(),
         );
         // The entry anchor lands the selection on its session's row once it appears. A carried row
-        // whose key names the anchor session stays (a persistent shell row, an unattachable child
-        // opened through its root); the sync below pins the landing, so later rebuilds restore
-        // onto it through the carried identity/key alone.
+        // keyed to the anchor session also counts (a persistent shell row, an unattachable child
+        // opened through its root). The sync below pins the landing for later rebuilds.
         if let (true, Some(anchor)) = (
             self.anchor_selection_pending,
             self.options.anchor_session_id.as_deref(),

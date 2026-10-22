@@ -267,8 +267,43 @@ fn nested_anchor_expands_its_ancestors() {
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "c");
 }
 
-/// A view run the flow reopens after a session: anchored on the session just left, carrying the
-/// row the previous run opened.
+#[test]
+fn a_scoped_reopen_expands_a_nested_anchor_outside_the_carried_branch() {
+    let mut mode = AgentsViewMode::new(AgentsViewOptions {
+        socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+        cwd: PathBuf::from("/tmp"),
+        session_dir: None,
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: Some("g".to_string()),
+        scope: Some(AgentsViewScope {
+            session_id: Some("p".to_string()),
+            active_session_id: Some("p-live".to_string()),
+            session_name: Some("p name".to_string()),
+        }),
+        query: None,
+        expanded_ancestors: vec!["p".to_string(), "d".to_string()],
+        selected_row_identity: None,
+        selected_key: None,
+        status_message: None,
+        keybindings: crate::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
+        create_config: serde_json::json!({}),
+    });
+    mode.roster = vec![
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        roster_entry("g", "running", &child_summary("g", "c", "grandchild")),
+        roster_entry("d", "running", &child_summary("d", "p", "worker two")),
+        roster_entry("e", "running", &child_summary("e", "d", "other grandchild")),
+    ];
+    mode.rebuild_rows();
+    assert_eq!(mode.rows[mode.selected].summary["sessionId"], "g");
+    assert!(!mode.anchor_selection_pending);
+}
+
+/// A reopened view: anchored on the session just left, carrying the row the previous run opened.
 fn returning_mode(
     anchor: &str,
     selected_row_identity: String,
@@ -294,8 +329,6 @@ fn returning_mode(
     })
 }
 
-/// The chat can change sessions in-run (`/switch`, `/new`, `/fork`, scope-back): the session
-/// actually left wins over the carried row the view opened last time.
 #[test]
 fn the_left_session_wins_over_a_stale_carried_selection() {
     let mut mode = returning_mode(
@@ -315,8 +348,6 @@ fn the_left_session_wins_over_a_stale_carried_selection() {
     assert!(!mode.anchor_selection_pending);
 }
 
-/// Left then right returns to the origin, even when its row lands after the first rebuild and the
-/// list re-sorts on the way.
 #[test]
 fn a_round_trip_returns_to_the_origin_when_its_row_lands_late() {
     let mut first = mode_with_anchor(
