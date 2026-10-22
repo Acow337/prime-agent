@@ -11,6 +11,7 @@ use crate::agents_view_state::{
     is_unnamed_empty, now_ms, relative_age, section_rank, summary_for_record, Section,
     UnifiedRecord,
 };
+use crate::bash_view::ShellCounts;
 use crate::factory_view::FactoryRunCounts;
 use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
 
@@ -100,18 +101,24 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
-        let activity = match summary.get("activeSessionId").and_then(Value::as_str) {
-            Some(active) => activity.live.get(active).copied().unwrap_or_default(),
-            // Without a live kernel, the session's own live persistent shells.
-            None => SessionActivity {
-                shells: summary
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .and_then(|session_id| activity.persistent_shells.get(session_id))
-                    .copied()
-                    .unwrap_or_default(),
-                factory_runs: FactoryRunCounts::default(),
+        let live = summary
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .and_then(|active| activity.live.get(active))
+            .copied()
+            .unwrap_or_default();
+        // Persistent shells count from the daemon list only; the kernel adds its other shells.
+        let persistent = summary
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .and_then(|session_id| activity.persistent_shells.get(session_id))
+            .map_or(0, |shells| shells.persistent);
+        let activity = SessionActivity {
+            shells: ShellCounts {
+                running: live.shells.running - live.shells.persistent + persistent,
+                persistent,
             },
+            factory_runs: live.factory_runs,
         };
         base.push(BaseRow {
             kind,

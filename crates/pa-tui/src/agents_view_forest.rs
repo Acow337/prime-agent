@@ -131,7 +131,7 @@ pub struct SessionActivity {
 }
 
 /// The activity poll's counts: each live session's by its `activeSessionId`, and the live
-/// persistent shells by their assigned `sessionId` (a session without a live kernel renders these).
+/// persistent shells by their assigned `sessionId` (every session's persistent count).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityCounts {
     pub live: std::collections::HashMap<String, SessionActivity>,

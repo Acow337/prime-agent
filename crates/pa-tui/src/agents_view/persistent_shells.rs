@@ -263,7 +263,7 @@ impl AgentsViewMode {
     }
 }
 
-/// The list's shell counts by assigned `sessionId`: the inactive sessions' shells lines.
+/// The list's shell counts by assigned `sessionId`: every session's persistent shells.
 fn shell_counts_by_session(data: &Value) -> HashMap<String, ShellCounts> {
     let mut rows: HashMap<String, Vec<Value>> = HashMap::new();
     for row in data
