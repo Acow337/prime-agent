@@ -616,6 +616,37 @@ fn agent_watch_stale_observations_after_a_rebaseline_are_discarded() {
     assert_eq!(event.content.end, 5);
 }
 
+/// A re-register without a snapshot (the child's link timed out) keeps
+/// the armed baseline: the next poll reports the growth since it, never
+/// a quiet re-arm that absorbs it. **Mutation check:** overwrite the
+/// baseline with the snapshot-less `None` and the growth tick arms
+/// quietly, failing the expect.
+#[test]
+fn agent_watch_snapshotless_rebaseline_keeps_the_armed_baseline() {
+    let mut registry = AgentWatchRegistry::default();
+    registry
+        .register("sub-1", "worker", Some((3, "idle")), 1_000, true)
+        .expect("register");
+    let row = registry
+        .register("sub-1", "worker", None, 1_100, true)
+        .expect("re-register without a snapshot");
+    assert_eq!(row.messages, 3, "the armed baseline survives");
+    let epoch = registry.subscription_epoch("watch-agent-sub-1");
+    let event = registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &Ok((7, "running")), 1_200)
+        .expect("the growth since the baseline reports");
+    assert_eq!(event.content.start, 3);
+    assert_eq!(event.content.end, 7);
+    assert_eq!(
+        event
+            .content
+            .status
+            .as_ref()
+            .map(|change| (change.from, change.to)),
+        Some(("idle", "running"))
+    );
+}
+
 /// Owner teardown: the close walk cancels every subscription (nano-rlm
 /// "owner termination cancels subscriptions") and retires the poller.
 #[tokio::test]
@@ -1105,6 +1136,62 @@ async fn agent_watch_unadmitted_child_registers_without_a_baseline() {
     assert_eq!(events[0]["childId"], "sub-1");
     assert_eq!(events[0]["fromIndex"], 1, "armed at the admission boundary");
     assert_eq!(events[0]["toIndex"], 7);
+}
+
+/// An unadmitted register racing the spawn watcher's admission: the
+/// admission cannot flip `prompt_admitted` between the register's read
+/// and its row insert, so the admission arm always finds the row and
+/// arms it at the admission boundary. The register is parked on the
+/// registry lock it inserts under; lock fairness then runs its insert
+/// before the admission arm's check, so only the flag read can expose
+/// the window deterministically (production loses the row when the
+/// admission's registry lock wins that race). **Mutation check:** read
+/// the flag and insert the row in separate record-lock holds and the
+/// admission flips the flag while the register is parked, failing the
+/// first assertion.
+#[tokio::test]
+async fn agent_watch_unadmitted_register_racing_admission_arms_at_the_boundary() {
+    let (sessions, _follow_up_rx, state) = quick_watch_sessions().await;
+    push_child(&sessions, "sub-1", "live-1").await;
+    sessions
+        .set_test_child_prompt_admitted("live-1", false)
+        .await;
+    let record = sessions
+        .inner
+        .find_record_ordered("sub-1")
+        .await
+        .expect("the pushed child");
+    let sessions = Arc::new(sessions);
+    let registry = sessions.inner.agent_watch.lock().await;
+    let register = tokio::spawn({
+        let sessions = Arc::clone(&sessions);
+        async move { sessions.watch_agent("sub-1".to_string(), true).await }
+    });
+    tokio::task::yield_now().await;
+    // The kickoff row lands and the prompt admits while the register is
+    // parked.
+    state.count("live-1", 1);
+    let admit = tokio::spawn({
+        let sessions = Arc::clone(&sessions);
+        async move {
+            sessions
+                .set_test_child_prompt_admitted("live-1", true)
+                .await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !record.try_lock().is_ok_and(|child| child.prompt_admitted),
+        "the admission flipped the flag while the register was between its read and its insert"
+    );
+    drop(registry);
+    register
+        .await
+        .expect("the register task")
+        .expect("register the never-prompted child");
+    admit.await.expect("the admission task");
+    let rows = sessions.watch_agent_list().await.expect("list the row");
+    assert_eq!(rows[0].messages, 1, "armed at the admission boundary");
 }
 
 /// A child whose kickoff failed permanently (the spawn watcher killed

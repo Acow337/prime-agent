@@ -239,6 +239,10 @@ impl AgentWatchRegistry {
     /// cancel-then-register re-baseline: it consumes no new slot and
     /// never burns the monotonic total cap, and it bumps the epoch so a
     /// poll observation taken under the old registration is discarded.
+    /// Only a real snapshot re-baselines: a re-register without one (an
+    /// unreachable or unadmitted child) keeps the row's baseline, so an
+    /// armed watch never falls back to a quiet arming read that absorbs
+    /// the growth since.
     /// A row that was cancelled or stopped is a new registration: the
     /// caps apply and the total advances (it never refunds).
     pub(crate) fn register(
@@ -262,8 +266,10 @@ impl AgentWatchRegistry {
                 .subscriptions
                 .get_mut(&id)
                 .expect("the active row was just checked");
-            subscription.baseline = arming_baseline;
-            subscription.last_status = arming_status;
+            if let Some((count, status)) = baseline {
+                subscription.baseline = Some(count);
+                subscription.last_status = status;
+            }
             subscription.child_name = child_name.to_string();
             subscription.created_at_ms = at_ms;
             subscription.unreachable_since_ms = None;
@@ -639,33 +645,46 @@ impl SupervisorChildSessionsInner {
         let Some(record) = self.find_record_ordered(target).await else {
             bail!("No direct child matches \"{target}\"");
         };
-        let (child_id, child_name, active_session_id, prompt_admitted) = {
+        let (child_id, child_name, active_session_id) = {
             let record = record.lock().await;
+            if !record.prompt_admitted {
+                // Unarmed until the prompt lands. The row is inserted
+                // under the record lock the spawn watcher flips
+                // `prompt_admitted` under before its admission arm looks
+                // for unarmed rows: either this read sees the admission,
+                // or the row exists when the arm looks.
+                return self
+                    .agent_watch
+                    .lock()
+                    .await
+                    .register(
+                        &record.rlm_child_id,
+                        &record.session_name,
+                        None,
+                        now_ms(),
+                        wake,
+                    )
+                    .map_err(|error| anyhow!(error.message()));
+            }
             (
                 record.rlm_child_id.clone(),
                 record.session_name.clone(),
                 record.active_session_id.clone(),
-                record.prompt_admitted,
             )
         };
-        let baseline = if prompt_admitted {
-            // The register-time baseline snapshot is a link round trip on
-            // the same lane the poller snapshots: bound it by the
-            // registry's snapshot timeout, not the 30s
-            // `STATE_TIMEOUT_MS` — a dead link must not park the
-            // kernel's `rlm.watch.agent` call (a wait-only entry state
-            // does this inside `run()`).
-            let snapshot_timeout_ms = self.agent_watch.lock().await.snapshot_timeout();
-            tokio::time::timeout(
-                Duration::from_millis(snapshot_timeout_ms),
-                self.child_watch_snapshot(&active_session_id),
-            )
-            .await
-            .unwrap_or_else(|_| Err(anyhow!("agent watch snapshot timed out")))
-            .ok()
-        } else {
-            None // unarmed until the prompt lands (the poller's arming read)
-        };
+        // The register-time baseline snapshot is a link round trip on
+        // the same lane the poller snapshots: bound it by the registry's
+        // snapshot timeout, not the 30s `STATE_TIMEOUT_MS` — a dead link
+        // must not park the kernel's `rlm.watch.agent` call (a wait-only
+        // entry state does this inside `run()`).
+        let snapshot_timeout_ms = self.agent_watch.lock().await.snapshot_timeout();
+        let baseline = tokio::time::timeout(
+            Duration::from_millis(snapshot_timeout_ms),
+            self.child_watch_snapshot(&active_session_id),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("agent watch snapshot timed out")))
+        .ok();
         let at_ms = now_ms();
         let mut registry = self.agent_watch.lock().await;
         registry
