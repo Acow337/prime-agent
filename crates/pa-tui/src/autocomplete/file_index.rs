@@ -1,15 +1,16 @@
 //! The session file index: an in-memory mirror of the `@` completion's walk results
 //! under the session base — fd printed-form paths, relative to the base, directories
-//! keeping their trailing `/` — so every query after the first answers from memory
-//! instead of walking the tree.
+//! keeping their trailing `/` — so a query answers from memory instead of walking the
+//! tree.
 //!
-//! The first `@` query builds it with one full walk (fd's rules, no result cut), a
-//! watcher started before that walk buffers the changes it races with, and one applier
-//! thread keeps the entries current afterwards: batches applied by each path's current
-//! existence (event kinds differ per editor and platform), the shared walker deciding
-//! what may enter. Queries the index cannot serve — an absolute or `..` scope, a typed
-//! directory the walk rules exclude, a watcher that failed, or a tree over the entry
-//! cap — fall back to the per-query walk, which stays.
+//! A background thread builds it with one full walk (fd's rules, no result cut) —
+//! started with the session view, else by the first `@` query — and queries walk until
+//! it is ready. A watcher started before that walk buffers the changes it races with,
+//! and one applier thread keeps the entries current afterwards: batches applied by each
+//! path's current existence (event kinds differ per editor and platform), the shared
+//! walker deciding what may enter. Queries the index cannot serve — an absolute or `..`
+//! scope, a typed directory the walk rules exclude, a watcher that failed, or a tree
+//! over the entry cap — fall back to the per-query walk, which stays.
 //!
 //! Limitations: changes inside symlinked directories whose targets sit outside the
 //! base are not observed (the build-time view stands until a rebuild); `.git/info/exclude`
@@ -62,9 +63,9 @@ pub(super) enum Answer {
     Walk,
 }
 
-/// The session's file index, one per autocomplete provider: lazily built on the first
-/// `@` query, then shared by every query thread. Cheap to clone; the last clone drops
-/// the index and its watcher.
+/// The session's file index, one per autocomplete provider: built in the background
+/// (see [`FileIndex::start_build`]), then shared by every query. Cheap to clone; the last
+/// clone drops the index and its watcher.
 #[derive(Clone)]
 pub(super) struct FileIndex {
     shared: Arc<Shared>,
@@ -76,9 +77,8 @@ struct Shared {
     ready: Condvar,
 }
 
-/// The index lifecycle. `Unbuilt` builds on the next query; `Building` makes later
-/// queries wait instead of starting their own walks; `Disabled` walks per query for
-/// the rest of the provider's life.
+/// The index lifecycle. `Unbuilt` starts a background build on the next query; queries
+/// walk while it is `Building`, and for the rest of the provider's life once `Disabled`.
 enum IndexState {
     Unbuilt,
     Building,
@@ -88,13 +88,6 @@ enum IndexState {
         _watcher: RecommendedWatcher,
     },
     Disabled,
-}
-
-enum Step {
-    Build,
-    Wait,
-    Serve,
-    Walk,
 }
 
 impl FileIndex {
@@ -114,54 +107,39 @@ impl FileIndex {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Answer one query from the index: build on first use, wait out a concurrent
-    /// build, then rank the matched entries (under the lock — the candidates borrow
-    /// the entries). `Answer::Served` is the index's own result (`None` inside it an
-    /// empty menu); `Answer::Walk` means the index does not serve the query — it is
-    /// disabled, or the scope sits outside it.
+    /// Answer one query from the index without ever waiting for a build: rank the
+    /// matched entries (under the lock — the candidates borrow the entries) when it is
+    /// ready. `Answer::Served` is the index's own result (`None` inside it an empty menu);
+    /// `Answer::Walk` means the index does not serve the query — it is not built yet
+    /// (an unbuilt one starts building), disabled, or the scope sits outside it.
     pub(super) fn query(&self, base: &Path, scope: &IndexScope, search: &AtSearch<'_>) -> Answer {
-        let mut guard = self.lock();
-        loop {
-            let step = match &*guard {
-                IndexState::Unbuilt => Step::Build,
-                IndexState::Building => Step::Wait,
-                IndexState::Ready { .. } => Step::Serve,
-                IndexState::Disabled => Step::Walk,
-            };
-            match step {
-                Step::Wait => {
-                    guard = self
-                        .shared
-                        .ready
-                        .wait(guard)
-                        .unwrap_or_else(PoisonError::into_inner);
-                }
-                Step::Build => {
-                    drop(guard);
-                    self.build(base, MAX_INDEX_ENTRIES);
-                    guard = self.lock();
-                }
-                Step::Walk => return Answer::Walk,
-                Step::Serve => {
-                    let IndexState::Ready { entries, .. } = &*guard else {
-                        return Answer::Walk;
-                    };
-                    let prefix = match scope {
-                        // The typed directory is not in the index (the walk rules
-                        // exclude it): the walk lists its contents instead.
-                        IndexScope::Outside => return Answer::Walk,
-                        IndexScope::Prefix(prefix)
-                            if !prefix.is_empty() && !contains(entries, prefix) =>
-                        {
-                            return Answer::Walk;
-                        }
-                        IndexScope::Prefix(prefix) => prefix.as_str(),
-                        IndexScope::Unscoped => "",
-                    };
-                    return Answer::Served(suggestions(scan(entries, prefix, search), search));
-                }
-            }
+        let guard = self.lock();
+        if matches!(*guard, IndexState::Unbuilt) {
+            drop(guard);
+            self.start_build(base);
+            return Answer::Walk;
         }
+        let IndexState::Ready { entries, .. } = &*guard else {
+            return Answer::Walk;
+        };
+        let prefix = match scope {
+            // The typed directory is not in the index (the walk rules exclude it): the
+            // walk lists its contents instead.
+            IndexScope::Outside => return Answer::Walk,
+            IndexScope::Prefix(prefix) if !prefix.is_empty() && !contains(entries, prefix) => {
+                return Answer::Walk;
+            }
+            IndexScope::Prefix(prefix) => prefix.as_str(),
+            IndexScope::Unscoped => "",
+        };
+        Answer::Served(suggestions(scan(entries, prefix, search), search))
+    }
+
+    /// Run [`Self::build`] under `base` on a background thread.
+    pub(super) fn start_build(&self, base: &Path) {
+        let index = self.clone();
+        let base = base.to_path_buf();
+        thread::spawn(move || index.build(&base, MAX_INDEX_ENTRIES));
     }
 
     /// Build from `Unbuilt`: one full walk under `base`, at most `cap` entries, with the
@@ -199,7 +177,7 @@ impl FileIndex {
         }
     }
 
-    /// Swap in a new state and wake every waiter.
+    /// Swap in a new state and wake the applier waiting out a build.
     fn replace(&self, state: IndexState) {
         let mut guard = self.lock();
         *guard = state;
@@ -672,6 +650,68 @@ fn remove_ranges(entries: &mut Vec<Box<str>>, mut removals: Vec<Range<usize>>) {
         index += 1;
         !removed
     });
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+    use crate::autocomplete::fuzzy_file_search::resolve_search;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    /// A query never waits out a build: it walks while the index is building.
+    #[test]
+    fn query_walks_while_the_index_builds() {
+        let index = FileIndex::new();
+        index.replace(IndexState::Building);
+        let base = Path::new("base");
+        let cancel = AtomicBool::new(false);
+        let mut answer = None;
+        resolve_search(base, "@", &cancel, |search, scope| {
+            answer = Some(index.query(base, scope, search));
+            None
+        });
+        assert!(matches!(answer, Some(Answer::Walk)));
+    }
+
+    /// The inline match-and-rank pass over a 100k-entry index stays interactive: a bare
+    /// `@` and a typical query each answer within the budget, best of three runs. Measured
+    /// on an 8-core x86 VM: debug ~16 ms bare / ~20 ms typical, release ~1.7 / ~1.5 ms.
+    #[test]
+    fn scan_of_a_large_index_answers_within_budget() {
+        const BUDGET: Duration = Duration::from_millis(60);
+        let mut entries: Vec<Box<str>> = Vec::new();
+        for package in 0..100 {
+            entries.push(format!("pkg{package}/").into());
+            for module in 0..10 {
+                entries.push(format!("pkg{package}/module{module}/").into());
+                for file in 0..99 {
+                    entries.push(format!("pkg{package}/module{module}/handler_{file}.rs").into());
+                }
+            }
+        }
+        entries.sort_unstable();
+        let cancel = AtomicBool::new(false);
+        for at_prefix in ["@", "@handler_4"] {
+            let elapsed = (0..3)
+                .map(|_| {
+                    let start = Instant::now();
+                    let answered =
+                        resolve_search(Path::new("base"), at_prefix, &cancel, |search, _| {
+                            suggestions(scan(&entries, "", search), search)
+                        });
+                    assert!(answered.is_some(), "{at_prefix} matches");
+                    start.elapsed()
+                })
+                .min()
+                .expect("three runs");
+            assert!(
+                elapsed < BUDGET,
+                "{at_prefix} over {} entries took {elapsed:?}",
+                entries.len()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

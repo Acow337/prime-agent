@@ -489,6 +489,9 @@ enum UiInput {
     },
     /// One materialized input-idle tick (the headless `SettleIdle` step).
     SettleIdle,
+    /// The end of one terminal write ([`crate::input::ReaderInput::ChunkEnd`]): the run loop
+    /// materializes like [`UiInput::SettleIdle`]; the opening and onboarding loops ignore it.
+    InputChunkEnd,
     WaitIdle {
         timeout_ms: u64,
     },
