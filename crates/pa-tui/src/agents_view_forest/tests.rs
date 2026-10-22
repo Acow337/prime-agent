@@ -1375,7 +1375,7 @@ fn shells_lines(rows: &[AgentsViewRow]) -> Vec<(&str, &str)> {
 }
 
 /// A live node's shells line breaks out its persistent shells; without any it keeps the plain
-/// count.
+/// count. The kernel lists its persistent shells too, so they count once.
 #[test]
 fn a_live_shells_line_counts_its_persistent_shells() {
     let roster = vec![
@@ -1389,11 +1389,28 @@ fn a_live_shells_line_counts_its_persistent_shells() {
         },
         ..SessionActivity::default()
     };
-    let counts = HashMap::from([
-        ("a-live".to_string(), shells(2, 1)),
-        ("b-live".to_string(), shells(2, 0)),
-    ]);
-    let rows = rows_with_activity(&roster, None, &[], &counts);
+    let records = reconcile_unified_sessions(&roster, &[], None);
+    let rows = build_rows(
+        &records,
+        None,
+        &HashSet::default(),
+        &HashSet::default(),
+        &compute_rollups(&records),
+        &ActivityCounts {
+            live: HashMap::from([
+                ("a-live".to_string(), shells(2, 1)),
+                ("b-live".to_string(), shells(2, 0)),
+            ]),
+            persistent_shells: HashMap::from([(
+                "a".to_string(),
+                ShellCounts {
+                    running: 1,
+                    persistent: 1,
+                },
+            )]),
+        },
+        None,
+    );
     let mut lines = shells_lines(&rows);
     lines.sort_unstable();
     assert_eq!(
@@ -1405,10 +1422,10 @@ fn a_live_shells_line_counts_its_persistent_shells() {
     );
 }
 
-/// A session without a live kernel shows its live persistent shells from the poll's daemon list
-/// (by `sessionId`); a live session counts its kernel rows only, never the list's too.
+/// A node's persistent shells come from the poll's daemon list (by `sessionId`), with or without
+/// a live kernel: an idle live session still shows them.
 #[test]
-fn an_inactive_node_shows_its_live_persistent_shells() {
+fn a_node_without_kernel_shells_shows_its_live_persistent_shells() {
     let roster = vec![roster_entry("live", "idle", &parent_summary("live"))];
     let saved = vec![
         json!({ "id": "gone", "path": "/x/gone.jsonl", "messageCount": 2 }),
@@ -1434,9 +1451,14 @@ fn an_inactive_node_shows_its_live_persistent_shells() {
         },
         None,
     );
+    let mut lines = shells_lines(&rows);
+    lines.sort_unstable();
     assert_eq!(
-        shells_lines(&rows),
-        vec![("shells:file:/x/gone.jsonl", "$ 2 shells · 2 persistent")]
+        lines,
+        vec![
+            ("shells:file:/x/gone.jsonl", "$ 2 shells · 2 persistent"),
+            ("shells:file:/x/live.jsonl", "$ 1 shell · 1 persistent"),
+        ]
     );
 }
 

@@ -11,6 +11,7 @@ use crate::agents_view_state::{
     is_unnamed_empty, now_ms, relative_age, section_rank, summary_for_record, Section,
     UnifiedRecord,
 };
+use crate::bash_view::ShellCounts;
 use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
 
 struct BaseRow {
@@ -99,17 +100,11 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
-        let activity = match summary.get("activeSessionId").and_then(Value::as_str) {
+        let live = match summary.get("activeSessionId").and_then(Value::as_str) {
             Some(active) => activity.live.get(active).copied().unwrap_or_default(),
-            // Without a live kernel, the session's own live persistent shells and the catalog
-            // row's stored factory specs.
+            // Without a live kernel, the catalog row's stored factory specs.
             None => SessionActivity {
-                shells: summary
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .and_then(|session_id| activity.persistent_shells.get(session_id))
-                    .copied()
-                    .unwrap_or_default(),
+                shells: ShellCounts::default(),
                 factory: crate::factory_view::FactoryCounts {
                     specs: record
                         .saved
@@ -118,6 +113,19 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
                     runs: crate::factory_view::FactoryRunCounts::default(),
                 },
             },
+        };
+        // Persistent shells count from the daemon list only; the kernel adds its other shells.
+        let persistent = summary
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .and_then(|session_id| activity.persistent_shells.get(session_id))
+            .map_or(0, |shells| shells.persistent);
+        let activity = SessionActivity {
+            shells: ShellCounts {
+                running: live.shells.running - live.shells.persistent + persistent,
+                persistent,
+            },
+            ..live
         };
         base.push(BaseRow {
             kind,
