@@ -57,17 +57,20 @@ fn a_saved_anchor_beyond_the_first_page_remains_pending_until_it_arrives() {
 }
 
 #[test]
-fn a_panel_anchored_on_its_scope_root_does_not_page_the_catalog() {
-    let mut mode = scoped_mode(
-        Some("p"),
-        vec![
-            roster_entry("p", "idle", &parent_summary("p")),
-            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
-        ],
-    );
-    mode.finish_saved_page(more());
-    assert!(!mode.anchor_selection_pending);
-    assert_eq!(mode.next_saved_fetch(), None);
+fn a_panel_anchored_outside_its_listed_subtree_does_not_page_the_catalog() {
+    for anchor in ["p", "x"] {
+        let mut mode = scoped_mode(
+            Some(anchor),
+            vec![
+                roster_entry("p", "idle", &parent_summary("p")),
+                roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+                roster_entry("x", "idle", &parent_summary("x")),
+            ],
+        );
+        mode.finish_saved_page(more());
+        assert!(!mode.anchor_selection_pending, "anchor {anchor}");
+        assert_eq!(mode.next_saved_fetch(), None, "anchor {anchor}");
+    }
 }
 
 #[test]

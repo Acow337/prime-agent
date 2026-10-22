@@ -82,16 +82,28 @@ impl AgentsViewMode {
             self.anchor_selection_pending,
             self.options.anchor_session_id.as_deref(),
         ) {
-            self.pending_ancestors
-                .get_or_insert_with(Vec::new)
-                .extend(scope_ancestors(
-                    &records,
-                    &AgentsViewScope {
-                        session_id: Some(anchor.to_string()),
-                        active_session_id: None,
-                        session_name: None,
-                    },
-                ));
+            let anchor_scope = AgentsViewScope {
+                session_id: Some(anchor.to_string()),
+                active_session_id: None,
+                session_name: None,
+            };
+            let ancestors = scope_ancestors(&records, &anchor_scope);
+            let outside_scope = scope_active
+                && scope_root(&records, &anchor_scope).is_some()
+                && self
+                    .options
+                    .scope
+                    .as_ref()
+                    .and_then(|scope| scope.session_id.as_deref())
+                    .is_some_and(|root| !ancestors.iter().any(|id| id == root));
+            if outside_scope {
+                // A known anchor outside the scope subtree never lists here.
+                self.end_anchor_wait();
+            } else {
+                self.pending_ancestors
+                    .get_or_insert_with(Vec::new)
+                    .extend(ancestors);
+            }
         }
         // Re-expand the drilled-in row's ancestors: a nested row appears only once its parent is
         // expanded (expand-and-rebuild until a pass reveals nothing new).
