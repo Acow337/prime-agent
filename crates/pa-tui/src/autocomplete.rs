@@ -779,8 +779,8 @@ impl CombinedAutocompleteProvider {
         }
     }
 
-    /// Start building the `@` file index in the background now, so the first `@` query
-    /// already answers from memory (other providers build on their first `@` query).
+    /// Start building the `@` file index in the background, so the first `@` query can
+    /// already answer from memory.
     pub fn start_file_index(&self) {
         self.file_index.start_build(&self.paths.base);
     }

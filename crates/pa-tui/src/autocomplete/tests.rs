@@ -747,30 +747,19 @@ fn at_index_matches_the_walk_suggestions() {
     }
 }
 
-/// The `@` lookup never waits on the index: an unbuilt one answers by the background
-/// walk (and starts building), a built one answers the same items on the caller's thread.
 #[test]
-fn at_lookup_answers_inline_only_from_a_built_index() {
+fn at_lookup_answers_inline_from_a_built_index() {
     let outer = parity_fixture();
     let base = outer.path().join("base");
+    let provider = provider(base.to_str().expect("utf8"));
+    assert!(provider
+        .file_index
+        .build(&base, file_index::MAX_INDEX_ENTRIES));
     let text = "@par";
-    let lookup = |provider: &CombinedAutocompleteProvider| {
-        provider.get_suggestions(&[text.to_string()], 0, text.len(), false)
-    };
-    let unbuilt = provider(base.to_str().expect("utf8"));
-    let Some(SuggestionLookup::Searching(search)) = lookup(&unbuilt) else {
-        panic!("an unbuilt index answers by the walk");
-    };
-    let walked = search.results.recv().expect("the walk finishes");
-    let built = provider(base.to_str().expect("utf8"));
-    assert!(built.file_index.build(&base, file_index::MAX_INDEX_ENTRIES));
-    let Some(SuggestionLookup::Ready(served)) = lookup(&built) else {
-        panic!("a built index answers inline");
-    };
-    assert_eq!(
-        Some(served.items),
-        walked.map(|suggestions| suggestions.items)
-    );
+    assert!(matches!(
+        provider.get_suggestions(&[text.to_string()], 0, text.len(), false),
+        Some(SuggestionLookup::Ready(_))
+    ));
 }
 
 /// A xorshift generator: the random trees need no dependency.

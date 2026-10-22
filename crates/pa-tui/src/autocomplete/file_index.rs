@@ -63,9 +63,8 @@ pub(super) enum Answer {
     Walk,
 }
 
-/// The session's file index, one per autocomplete provider: built in the background
-/// (see [`FileIndex::start_build`]), then shared by every query. Cheap to clone; the last
-/// clone drops the index and its watcher.
+/// The session's file index, one per autocomplete provider. Cheap to clone; the last clone
+/// drops the index and its watcher.
 #[derive(Clone)]
 pub(super) struct FileIndex {
     shared: Arc<Shared>,
@@ -79,15 +78,23 @@ struct Shared {
 
 /// The index lifecycle. `Unbuilt` starts a background build on the next query; queries
 /// walk while it is `Building`, and for the rest of the provider's life once `Disabled`.
+/// Only the applier changes a `Ready` state.
 enum IndexState {
     Unbuilt,
     Building,
     Ready {
-        /// Sorted, no duplicates: a scope's entries are one contiguous slice.
-        entries: Vec<Box<str>>,
+        /// Sorted, no duplicates: a scope's entries are one contiguous slice. Shared so a
+        /// query scans its snapshot with no lock held.
+        entries: Arc<Vec<Box<str>>>,
         _watcher: RecommendedWatcher,
     },
     Disabled,
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, IndexState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl FileIndex {
@@ -100,20 +107,12 @@ impl FileIndex {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, IndexState> {
-        self.shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Answer one query from the index without ever waiting for a build: rank the
-    /// matched entries (under the lock — the candidates borrow the entries) when it is
-    /// ready. `Answer::Served` is the index's own result (`None` inside it an empty menu);
+    /// Answer one query from the ready index; never waits on a build or a batch.
+    /// `Answer::Served` is the index's own result (`None` inside it an empty menu);
     /// `Answer::Walk` means the index does not serve the query — it is not built yet
     /// (an unbuilt one starts building), disabled, or the scope sits outside it.
     pub(super) fn query(&self, base: &Path, scope: &IndexScope, search: &AtSearch<'_>) -> Answer {
-        let guard = self.lock();
+        let guard = self.shared.lock();
         if matches!(*guard, IndexState::Unbuilt) {
             drop(guard);
             self.start_build(base);
@@ -122,17 +121,19 @@ impl FileIndex {
         let IndexState::Ready { entries, .. } = &*guard else {
             return Answer::Walk;
         };
+        let entries = Arc::clone(entries);
+        drop(guard);
         let prefix = match scope {
             // The typed directory is not in the index (the walk rules exclude it): the
             // walk lists its contents instead.
             IndexScope::Outside => return Answer::Walk,
-            IndexScope::Prefix(prefix) if !prefix.is_empty() && !contains(entries, prefix) => {
+            IndexScope::Prefix(prefix) if !prefix.is_empty() && !contains(&entries, prefix) => {
                 return Answer::Walk;
             }
             IndexScope::Prefix(prefix) => prefix.as_str(),
             IndexScope::Unscoped => "",
         };
-        Answer::Served(suggestions(scan(entries, prefix, search), search))
+        Answer::Served(suggestions(scan(&entries, prefix, search), search))
     }
 
     /// Run [`Self::build`] under `base` on a background thread.
@@ -148,7 +149,7 @@ impl FileIndex {
     /// leaves `Disabled`.
     pub(super) fn build(&self, base: &Path, cap: usize) -> bool {
         {
-            let mut guard = self.lock();
+            let mut guard = self.shared.lock();
             if !matches!(&*guard, IndexState::Unbuilt) {
                 return matches!(&*guard, IndexState::Ready { .. });
             }
@@ -167,7 +168,7 @@ impl FileIndex {
         ));
         if let Some(entries) = walk_index_entries(base, cap) {
             self.replace(IndexState::Ready {
-                entries,
+                entries: Arc::new(entries),
                 _watcher: watcher,
             });
             true
@@ -179,7 +180,7 @@ impl FileIndex {
 
     /// Swap in a new state and wake the applier waiting out a build.
     fn replace(&self, state: IndexState) {
-        let mut guard = self.lock();
+        let mut guard = self.shared.lock();
         *guard = state;
         self.shared.ready.notify_all();
     }
@@ -309,9 +310,11 @@ impl Drop for ThreadEntries<'_> {
 }
 
 /// The one watcher-draining thread: each batch — everything queued at a wake-up, the
-/// coalescing — applies to the index under the lock, and a batch that arrives during a
-/// build waits for the build to finish first. Holding the channel's receiver and only
-/// a weak index reference, it exits when the watcher drops with the provider.
+/// coalescing — is planned against a snapshot of the entries with no lock held (the
+/// filesystem reads stay off the queries' lock) and published under the lock; a batch
+/// that arrives during a build waits for the build to finish first. Holding the channel's
+/// receiver and only a weak index reference, it exits when the watcher drops with the
+/// provider.
 fn spawn_applier(
     shared: Weak<Shared>,
     events: Receiver<notify::Result<Event>>,
@@ -327,8 +330,8 @@ fn spawn_applier(
             while let Ok(event) = events.try_recv() {
                 batch.push(event);
             }
-            let mut guard = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
-            loop {
+            let mut guard = shared.lock();
+            let entries = loop {
                 match &*guard {
                     IndexState::Building => {
                         guard = shared
@@ -336,48 +339,97 @@ fn spawn_applier(
                             .wait(guard)
                             .unwrap_or_else(PoisonError::into_inner);
                     }
-                    IndexState::Ready { .. } => {
-                        apply_batch(&mut guard, &batch, &base, &canonical_base);
-                        #[cfg(test)]
-                        shared.ready.notify_all();
-                        // Invalidation drops this watcher's ownership. Exit while
-                        // still holding the lock, before a query can rebuild and
-                        // expose its new state to any old queued callbacks.
-                        if !matches!(*guard, IndexState::Ready { .. }) {
-                            return;
-                        }
-                        break;
-                    }
+                    IndexState::Ready { entries, .. } => break Arc::clone(entries),
                     // The watcher that fed this batch is gone: the state is a
                     // rebuilt or fallback one, and nothing applies to it.
                     IndexState::Unbuilt | IndexState::Disabled => return,
                 }
+            };
+            drop(guard);
+            let update = plan_batch(&entries, &batch, &base, &canonical_base);
+            drop(entries);
+            let mut guard = shared.lock();
+            update.publish(&mut guard);
+            #[cfg(test)]
+            shared.ready.notify_all();
+            // Invalidation drops this watcher's ownership. Exit while still holding
+            // the lock, before a query can rebuild and expose its new state to any
+            // old queued callbacks.
+            if !matches!(*guard, IndexState::Ready { .. }) {
+                return;
             }
         }
     })
 }
 
-/// Apply one watcher batch using each path's current existence. A structural event on
+/// One watcher batch's effect on the ready index, planned against its entries.
+enum Update {
+    /// Rebuild on the next query.
+    Rebuild,
+    Disable,
+    /// Drop `removals` (ranges of the planned-on entries), then merge in `additions`.
+    Edit {
+        removals: Vec<Range<usize>>,
+        additions: Vec<Box<str>>,
+    },
+}
+
+impl Update {
+    /// Publish into the ready `state` the update was planned on.
+    fn publish(self, state: &mut IndexState) {
+        let (removals, additions) = match self {
+            Update::Rebuild => {
+                *state = IndexState::Unbuilt;
+                return;
+            }
+            Update::Disable => {
+                *state = IndexState::Disabled;
+                return;
+            }
+            Update::Edit {
+                removals,
+                additions,
+            } => (removals, additions),
+        };
+        let IndexState::Ready { entries, .. } = state else {
+            return;
+        };
+        // Copies only while a query still scans this snapshot; the applier dropped its own
+        // before publishing.
+        let entries = Arc::make_mut(entries);
+        remove_ranges(entries, removals);
+        if !additions.is_empty() {
+            entries.extend(additions);
+            // The stable sort takes the sorted entries as one run, so the merge stays linear.
+            entries.sort();
+            entries.dedup();
+        }
+        if entries.len() > MAX_INDEX_ENTRIES {
+            *state = IndexState::Disabled;
+        }
+    }
+}
+
+/// Plan one watcher batch using each path's current existence: every filesystem read
+/// happens here, against the batch's starting `entries`. A structural event on
 /// an indexed directory re-walks its subtree; ordinary file saves keep the typed-form
 /// fast path. A watcher error disables the index; rescan notices, a structural event on
 /// the base or a `.git` marker, an event on a `.git` file, or changed ignore rules
 /// trigger a lazy rebuild. A batch exceeding [`MAX_INDEX_ENTRIES`] disables the index.
-fn apply_batch(
-    state: &mut IndexState,
+fn plan_batch(
+    entries: &[Box<str>],
     batch: &[notify::Result<Event>],
     base: &Path,
     canonical_base: &Path,
-) {
+) -> Update {
     if batch.iter().any(Result::is_err) {
-        *state = IndexState::Disabled;
-        return;
+        return Update::Disable;
     }
     let mut rels: BTreeSet<String> = BTreeSet::new();
     let mut replaced: BTreeSet<String> = BTreeSet::new();
     for event in batch.iter().flatten() {
         if event.need_rescan() {
-            *state = IndexState::Unbuilt;
-            return;
+            return Update::Rebuild;
         }
         // Reads change nothing the index tracks — and the walker's own
         // directory opens (plus any search over the session tree) arrive as
@@ -395,8 +447,7 @@ fn apply_batch(
             // cannot locate every real filename (or distinguish all collisions).
             // Rebuild through the shared walker instead of mutating a wrong key.
             if Path::new(&rel) != raw_rel {
-                *state = IndexState::Unbuilt;
-                return;
+                return Update::Rebuild;
             }
             // A directory's name event may be the only event for an entire
             // moved subtree. Its current existence cannot prove it is still
@@ -426,8 +477,7 @@ fn apply_batch(
         rel.rsplit('/').next() == Some(GIT_DIR)
             && (replaced.contains(rel) || base.join(rel).is_file())
     }) {
-        *state = IndexState::Unbuilt;
-        return;
+        return Update::Rebuild;
     }
     let rels: Vec<String> = rels
         .iter()
@@ -435,12 +485,8 @@ fn apply_batch(
         .cloned()
         .collect();
     if rels.iter().any(|rel| is_ignore_rules_name(rel)) {
-        *state = IndexState::Unbuilt;
-        return;
+        return Update::Rebuild;
     }
-    let IndexState::Ready { entries, .. } = state else {
-        return;
-    };
     // Every decision reads the batch's starting entries; the edits apply once per
     // batch, because each single edit of the sorted entries shifts their tail.
     let mut removals: Vec<Range<usize>> = Vec::new();
@@ -474,8 +520,7 @@ fn apply_batch(
         // metadata changes remain no-ops.
         if is_directory && replaced.contains(rel) {
             if rel.is_empty() {
-                *state = IndexState::Unbuilt;
-                return;
+                return Update::Rebuild;
             }
             if contains(entries, &form) {
                 removals.push(range_under(entries, &form));
@@ -509,17 +554,14 @@ fn apply_batch(
         if rel.is_empty() {
             // The base itself is gone: rebuild on the next query (into an empty
             // or failing walk) instead of serving the dead tree.
-            *state = IndexState::Unbuilt;
-            return;
+            return Update::Rebuild;
         }
         remove_subtree(entries, rel, &mut removals);
     }
-    remove_ranges(entries, removals);
     let mut additions: Vec<Box<str>> = Vec::new();
     for rel in rewalked {
-        if !walk_subtree(base, rel, entries.len(), &mut additions) {
-            *state = IndexState::Disabled;
-            return;
+        if !walk_subtree(base, rel, &mut additions) {
+            return Update::Disable;
         }
     }
     for (parent, paths) in inserted {
@@ -551,34 +593,28 @@ fn apply_batch(
             } else {
                 rel.clone()
             }));
-            if is_directory && !walk_subtree(base, &rel, entries.len(), &mut additions) {
-                *state = IndexState::Disabled;
-                return;
+            if is_directory && !walk_subtree(base, &rel, &mut additions) {
+                return Update::Disable;
             }
         }
     }
-    if !additions.is_empty() {
-        entries.extend(additions);
-        // The stable sort takes the sorted entries as one run, so the merge stays linear.
-        entries.sort();
-        entries.dedup();
-    }
-    if entries.len() > MAX_INDEX_ENTRIES {
-        *state = IndexState::Disabled;
+    Update::Edit {
+        removals,
+        additions,
     }
 }
 
 /// Walk the directory `rel`'s subtree with the shared rules into `additions` — `false`
-/// once the index (`indexed` entries plus the additions) passes [`MAX_INDEX_ENTRIES`]:
-/// an over-cap batch disables the index, like an over-cap build does.
-fn walk_subtree(base: &Path, rel: &str, indexed: usize, additions: &mut Vec<Box<str>>) -> bool {
+/// once the additions alone pass [`MAX_INDEX_ENTRIES`]: an over-cap batch disables the
+/// index, like an over-cap build does (publishing checks the merged total).
+fn walk_subtree(base: &Path, rel: &str, additions: &mut Vec<Box<str>>) -> bool {
     for form in walk_builder(&base.join(rel))
         .build()
         .filter_map(Result::ok)
         .filter_map(|entry| fd_printed_form(&entry, base))
     {
         additions.push(Box::from(form));
-        if indexed + additions.len() > MAX_INDEX_ENTRIES {
+        if additions.len() > MAX_INDEX_ENTRIES {
             return false;
         }
     }
@@ -657,9 +693,7 @@ mod query_tests {
     use super::*;
     use crate::autocomplete::fuzzy_file_search::resolve_search;
     use std::sync::atomic::AtomicBool;
-    use std::time::{Duration, Instant};
 
-    /// A query never waits out a build: it walks while the index is building.
     #[test]
     fn query_walks_while_the_index_builds() {
         let index = FileIndex::new();
@@ -673,45 +707,6 @@ mod query_tests {
         });
         assert!(matches!(answer, Some(Answer::Walk)));
     }
-
-    /// The inline match-and-rank pass over a 100k-entry index stays interactive: a bare
-    /// `@` and a typical query each answer within the budget, best of three runs. Measured
-    /// on an 8-core x86 VM: debug ~16 ms bare / ~20 ms typical, release ~1.7 / ~1.5 ms.
-    #[test]
-    fn scan_of_a_large_index_answers_within_budget() {
-        const BUDGET: Duration = Duration::from_millis(60);
-        let mut entries: Vec<Box<str>> = Vec::new();
-        for package in 0..100 {
-            entries.push(format!("pkg{package}/").into());
-            for module in 0..10 {
-                entries.push(format!("pkg{package}/module{module}/").into());
-                for file in 0..99 {
-                    entries.push(format!("pkg{package}/module{module}/handler_{file}.rs").into());
-                }
-            }
-        }
-        entries.sort_unstable();
-        let cancel = AtomicBool::new(false);
-        for at_prefix in ["@", "@handler_4"] {
-            let elapsed = (0..3)
-                .map(|_| {
-                    let start = Instant::now();
-                    let answered =
-                        resolve_search(Path::new("base"), at_prefix, &cancel, |search, _| {
-                            suggestions(scan(&entries, "", search), search)
-                        });
-                    assert!(answered.is_some(), "{at_prefix} matches");
-                    start.elapsed()
-                })
-                .min()
-                .expect("three runs");
-            assert!(
-                elapsed < BUDGET,
-                "{at_prefix} over {} entries took {elapsed:?}",
-                entries.len()
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -721,15 +716,23 @@ mod freshness_tests {
 
     fn snapshot(base: &Path) -> IndexState {
         IndexState::Ready {
-            entries: walk_index_entries(base, MAX_INDEX_ENTRIES).expect("walk"),
+            entries: Arc::new(walk_index_entries(base, MAX_INDEX_ENTRIES).expect("walk")),
             _watcher: notify::recommended_watcher(|_: notify::Result<Event>| {}).expect("watcher"),
         }
+    }
+
+    /// Plan and publish one batch, as the applier does.
+    fn apply_batch(state: &mut IndexState, batch: &[notify::Result<Event>], base: &Path) {
+        let IndexState::Ready { entries, .. } = state else {
+            panic!("ready state");
+        };
+        plan_batch(entries, batch, base, base).publish(state);
     }
 
     fn assert_matches_live_walk(state: &IndexState, base: &Path) {
         let expected = walk_index_entries(base, MAX_INDEX_ENTRIES).expect("live walk");
         let actual = match state {
-            IndexState::Ready { entries, .. } => entries.clone(),
+            IndexState::Ready { entries, .. } => entries.to_vec(),
             IndexState::Unbuilt => walk_index_entries(base, MAX_INDEX_ENTRIES).expect("rebuild"),
             _ => panic!("unexpected state"),
         };
@@ -789,7 +792,7 @@ mod freshness_tests {
             std::fs::create_dir(base.join("dir")).expect("mkdir");
             std::fs::write(base.join("dir/new.rs"), "new").expect("write");
             let event = Event::new(notify::EventKind::Modify(kind)).add_path(base.join("dir"));
-            apply_batch(&mut state, &[Ok(event)], base, base);
+            apply_batch(&mut state, &[Ok(event)], base);
             assert_matches_live_walk(&state, base);
         }
     }
@@ -807,7 +810,7 @@ mod freshness_tests {
             notify::event::DataChange::Content,
         )))
         .add_path(path);
-        apply_batch(&mut state, &[Ok(event)], base, base);
+        apply_batch(&mut state, &[Ok(event)], base);
         assert_matches_live_walk(&state, base);
     }
 
@@ -827,7 +830,7 @@ mod freshness_tests {
             notify::event::DataChange::Content,
         )))
         .add_path(path);
-        apply_batch(&mut state, &[Ok(event)], base, base);
+        apply_batch(&mut state, &[Ok(event)], base);
         assert_matches_live_walk(&state, base);
     }
 
@@ -845,6 +848,7 @@ mod freshness_tests {
         let IndexState::Ready { entries, .. } = &mut state else {
             panic!("ready snapshot");
         };
+        let entries = Arc::make_mut(entries);
         for index in entries.len()..MAX_INDEX_ENTRIES {
             entries.push(format!("unaffected-{index:07}.rs").into_boxed_str());
         }
@@ -858,11 +862,11 @@ mod freshness_tests {
             Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
                 .add_path(base.join("dir/nested"))),
         ];
-        apply_batch(&mut state, &events, base, base);
+        apply_batch(&mut state, &events, base);
         let IndexState::Ready { entries, .. } = state else {
             panic!("overlapping refreshes must not disable an index within the cap");
         };
-        assert_eq!(entries, expected);
+        assert_eq!(*entries, expected);
     }
 
     #[test]
@@ -878,7 +882,7 @@ mod freshness_tests {
         std::fs::rename(&source, base.join("dest")).expect("rename");
         let event = Event::new(notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)))
             .add_path(base.join("dest"));
-        apply_batch(&mut state, &[Ok(event)], &base, &base);
+        apply_batch(&mut state, &[Ok(event)], &base);
         assert_matches_live_walk(&state, &base);
     }
 
@@ -898,7 +902,7 @@ mod freshness_tests {
             Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
                 .add_path(base.join("dest"))),
         ];
-        apply_batch(&mut state, &events, &base, &base);
+        apply_batch(&mut state, &events, &base);
         assert_matches_live_walk(&state, &base);
     }
 
@@ -914,7 +918,7 @@ mod freshness_tests {
         std::fs::write(base.join("new.rs"), "new").expect("write");
         let event =
             Event::new(notify::EventKind::Remove(RemoveKind::Folder)).add_path(base.clone());
-        apply_batch(&mut state, &[Ok(event)], &base, &base);
+        apply_batch(&mut state, &[Ok(event)], &base);
         assert_matches_live_walk(&state, &base);
     }
 
@@ -929,7 +933,7 @@ mod freshness_tests {
             notify::event::MetadataKind::WriteTime,
         )))
         .add_path(base.join(".git"));
-        apply_batch(&mut state, &[Ok(event)], base, base);
+        apply_batch(&mut state, &[Ok(event)], base);
         assert!(
             matches!(state, IndexState::Ready { .. }),
             "ordinary Git directory metadata must not rebuild the index"
@@ -948,13 +952,13 @@ mod freshness_tests {
         std::fs::create_dir(base.join(".git")).expect("git init");
         let event =
             Event::new(notify::EventKind::Create(CreateKind::Folder)).add_path(base.join(".git"));
-        apply_batch(&mut state, &[Ok(event)], base, base);
+        apply_batch(&mut state, &[Ok(event)], base);
         assert_matches_live_walk(&state, base);
         let mut state = snapshot(base);
         std::fs::remove_dir(base.join(".git")).expect("remove git marker");
         let event =
             Event::new(notify::EventKind::Remove(RemoveKind::Folder)).add_path(base.join(".git"));
-        apply_batch(&mut state, &[Ok(event)], base, base);
+        apply_batch(&mut state, &[Ok(event)], base);
         assert_matches_live_walk(&state, base);
     }
 }

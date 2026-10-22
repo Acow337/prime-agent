@@ -1171,8 +1171,7 @@ async fn run_interactive_surface(
                 }
                 // Paint the handled input in this iteration: the select below can otherwise wait
                 // out its 50ms tick before the next draw, felt as keystroke-to-render lag. A
-                // handoff paints nothing: the next surface owns the pane. A write boundary that
-                // changed nothing paints nothing.
+                // handoff paints nothing: the next surface owns the pane.
                 if let Some(renderer) = renderer
                     .is_terminal_mut()
                     .filter(|_| !chunk_end || session.dirty)
