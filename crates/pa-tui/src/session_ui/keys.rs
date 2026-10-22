@@ -109,7 +109,7 @@ impl SessionUi {
         }
         if let Some(delta) = crate::mouse::wheel_scroll_delta(&event) {
             if !overlay_focused {
-                view.scroll_by(delta);
+                self.scroll_transcript(delta, view);
                 self.dirty = true;
             }
             return;
@@ -408,14 +408,14 @@ impl SessionUi {
             // The viewport consumes the key before the editor, so a selection must
             // collapse here or it survives the scroll as a stale replace range.
             view.editor.clear_selection();
-            view.scroll_by(-(view.page_size() as isize));
+            self.scroll_transcript(-(view.page_size() as isize), view);
             self.track_scroll("page_up", view.is_following());
             self.dirty = true;
             return Ok(());
         }
         if page_down {
             view.editor.clear_selection();
-            view.scroll_by(view.page_size() as isize);
+            self.scroll_transcript(view.page_size() as isize, view);
             self.track_scroll("page_down", view.is_following());
             self.dirty = true;
             return Ok(());

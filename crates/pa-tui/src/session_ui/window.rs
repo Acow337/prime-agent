@@ -93,6 +93,9 @@ pub(crate) struct TranscriptWindow {
     head_requested: bool,
     /// A page failed: no more pages until the next reset.
     failed: bool,
+    /// Rows of scroll-up that hit the top of the resident rows while older history was still
+    /// to load: the older page completes them when it applies.
+    pending_scroll_up: usize,
     epoch: u64,
     /// Dropping the handle aborts the in-flight page; the epoch fences a note
     /// that was already queued.
@@ -137,6 +140,7 @@ impl TranscriptWindow {
     /// The top key: the session's first page replaces the resident run.
     pub(crate) fn request_head(&mut self) {
         self.head_requested = !self.start_resident;
+        self.pending_scroll_up = 0;
     }
 
     fn resident_entries(&self) -> usize {
@@ -225,6 +229,9 @@ impl TranscriptWindow {
                 let mut grown = count as isize;
                 if self.chunks.len() > RESIDENT_CHUNKS {
                     grown += self.evict_newest(view);
+                }
+                if self.pending_scroll_up > 0 {
+                    view.scroll_by(-(std::mem::take(&mut self.pending_scroll_up) as isize));
                 }
                 grown
             }
@@ -359,6 +366,7 @@ impl TranscriptWindow {
     /// Drop a disjoint resident run, leaving the contiguous tail. Returns how many
     /// entries the rows above the tail shrank by.
     fn collapse_to_tail(&mut self, view: &mut AgentView) -> usize {
+        self.pending_scroll_up = 0;
         if !self.gap {
             return 0;
         }
@@ -383,6 +391,19 @@ impl SessionUi {
     /// Whether the viewport needs a page that is not yet in flight.
     pub(crate) fn wants_transcript_page(&self, view: &AgentView) -> bool {
         self.window.next_page(view).is_some()
+    }
+
+    /// Scroll the viewport. A scroll up at the top of the resident rows, while older history is
+    /// still to load, is owed to the older page.
+    pub(crate) fn scroll_transcript(&mut self, delta: isize, view: &mut AgentView) {
+        let window = &mut self.window;
+        window.pending_scroll_up =
+            if delta < 0 && view.viewport_at_top() && !window.start_resident && !window.failed {
+                window.pending_scroll_up + delta.unsigned_abs()
+            } else {
+                0
+            };
+        view.scroll_by(delta);
     }
 
     /// Start the page the viewport needs, if any. Runs at the loop top after a paint,

@@ -57,6 +57,8 @@ struct Paging {
     hold_newer: bool,
     /// Never answer older pages (`from: end` with a `before` cursor).
     hold_older: bool,
+    /// Every older page answers this late.
+    older_delay_ms: u64,
     /// After a `reload`, every page answers this late.
     slow_after_reload_ms: u64,
     /// After a `reload`, the old branch anchor is gone (a navigation or fork).
@@ -110,8 +112,12 @@ impl MockSupervisor {
                     if paging.hold_newer && page["from"] == "start" && page.get("after").is_some() {
                         continue;
                     }
-                    if paging.hold_older && page["from"] == "end" && page.get("before").is_some() {
+                    let older = page["from"] == "end" && page.get("before").is_some();
+                    if paging.hold_older && older {
                         continue;
+                    }
+                    if older {
+                        std::thread::sleep(std::time::Duration::from_millis(paging.older_delay_ms));
                     }
                     if reloaded {
                         std::thread::sleep(std::time::Duration::from_millis(
@@ -549,5 +555,34 @@ fn an_older_page_in_flight_marks_the_top_of_the_resident_rows() {
         marker_rows(last).iter().all(|(row, _)| *row > marker)
             && top_marker(last) == Some(MESSAGES - TAIL),
         "the marker stands above the stale first resident row:\n{last}"
+    );
+}
+
+#[test]
+fn a_page_up_at_the_top_of_the_resident_rows_completes_when_the_older_page_lands() {
+    // The climb reaches the top of the attach tail well before the older page answers, so its
+    // last presses land on the loading marker.
+    let mut steps = paced(&[key(crossterm::event::KeyCode::PageUp)], 30);
+    steps.push(HeadlessStep::WaitGone {
+        needle: "Loading older history".to_string(),
+        timeout_ms: 10_000,
+    });
+    let (frames, _) = run(
+        Paging {
+            older_delay_ms: 2_000,
+            ..Paging::default()
+        },
+        steps,
+    );
+    assert!(
+        frames.iter().any(|frame| {
+            frame.contains("Loading older history") && top_marker(frame) == Some(MESSAGES - TAIL)
+        }),
+        "the climb reached the top of the tail while the page was in flight"
+    );
+    let last = frames.last().expect("frames rendered");
+    assert!(
+        top_marker(last).is_some_and(|top| top < MESSAGES - TAIL),
+        "the presses at the top scrolled into the landed page:\n{last}"
     );
 }
