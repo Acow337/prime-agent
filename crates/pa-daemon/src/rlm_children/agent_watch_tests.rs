@@ -1039,10 +1039,14 @@ async fn agent_watch_vanished_child_emits_one_terminal_vanished_event() {
 
 /// A register against a child whose task prompt has not landed (the
 /// spawn -> `watch.agent` window) stays unarmed: no fabricated kickoff
-/// event, the baseline arms on the first post-admission snapshot, and
-/// growth only then reports. **Mutation check:** drop the admission
-/// guard (snapshot the unadmitted child anyway) and the pre-admission
-/// growth is observed as the first event, failing the quiet assertion.
+/// event, and the baseline arms AT ADMISSION — one bounded snapshot in
+/// the admission path (host.rs's spawn watcher, mirrored by the test
+/// seam), not at the next poll tick — so a fast child that finishes
+/// before the first tick still reports its growth from the admission
+/// boundary. **Mutation check:** drop the admission arm and the row
+/// still answers `messages == 0` right after admission (the poller's
+/// first arming tick cannot complete between the admission flip and the
+/// list read, so the boundary assertion fails deterministically).
 #[tokio::test]
 async fn agent_watch_unadmitted_child_registers_without_a_baseline() {
     let (sessions, mut follow_up_rx, state) = quick_watch_sessions().await;
@@ -1068,19 +1072,28 @@ async fn agent_watch_unadmitted_child_registers_without_a_baseline() {
     );
     let page = sessions.watch_read(0, 100).await.expect("read the ring");
     assert!(page.events.is_empty());
-    // The prompt lands; the first post-admission tick arms the baseline
-    // at the current count (quiet), and later growth reports normally.
+    // The prompt admits. The admission arm snapshots the boundary (the
+    // kickoff row, count 1) immediately: only that first `get_state`
+    // answers and every later one parks behind the release, so the
+    // arm — not a poller tick — is the only writer of the baseline.
+    state.set_serve_limit(1);
     sessions
         .set_test_child_prompt_admitted("live-1", true)
         .await;
-    state.count("live-1", 2);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv())
-            .await
-            .is_err(),
-        "the arming read is quiet, never a fabricated event"
+    let rows = sessions.watch_agent_list().await.expect("list the row");
+    assert_eq!(
+        rows[0].messages, 1,
+        "the baseline armed at the admission boundary (the kickoff row)"
     );
+    let page = sessions.watch_read(0, 100).await.expect("read the ring");
+    assert!(
+        page.events.is_empty(),
+        "the admission arm is quiet, never a fabricated event"
+    );
+    // A fast child grows past the boundary before the parked tick can
+    // observe: the growth reports from the boundary, not absorbed.
     state.count("live-1", 7);
+    state.release();
     let row = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
         .await
         .expect("post-admission growth reports")
@@ -1090,11 +1103,129 @@ async fn agent_watch_unadmitted_child_registers_without_a_baseline() {
         .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["childId"], "sub-1");
-    assert_eq!(
-        events[0]["fromIndex"], 2,
-        "armed at the post-admission count"
-    );
+    assert_eq!(events[0]["fromIndex"], 1, "armed at the admission boundary");
     assert_eq!(events[0]["toIndex"], 7);
+}
+
+/// A child whose kickoff failed permanently (the spawn watcher killed
+/// the worker and `settle_failed` retained the roster row with an error
+/// verdict, the prompt never admitted) ends its watch with ONE terminal
+/// `-> failed` event instead of the unadmitted skip looping forever: a
+/// parked consumer learns the target is dead and the row stops burning
+/// an active slot. **Mutation check:** revert the settled check (skip
+/// every unadmitted child) and the row never arrives, failing the wait
+/// bound.
+#[tokio::test]
+async fn agent_watch_failed_kickoff_ends_the_watch_with_one_terminal_failed_event() {
+    let (sessions, mut follow_up_rx, _state) = quick_watch_sessions().await;
+    push_child(&sessions, "sub-1", "live-1").await;
+    sessions
+        .set_test_child_prompt_admitted("live-1", false)
+        .await;
+    sessions
+        .watch_agent("sub-1".to_string(), true)
+        .await
+        .expect("register the never-prompted child");
+    // The kickoff fails permanently: the record settles `error` with the
+    // prompt never admitted (the `settle_failed` retention shape).
+    {
+        let children = sessions.inner.children.lock().await;
+        for record in children.iter() {
+            let mut record = record.lock().await;
+            if record.active_session_id == "live-1" {
+                record.settled_status = Some("error");
+            }
+        }
+    }
+    let row = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the failed kickoff delivers one terminal row")
+        .expect("the follow_up channel stays open");
+    let events = row["customMessage"]["details"]["events"]
+        .as_array()
+        .unwrap();
+    assert_eq!(events.len(), 1, "one terminal event: {row:?}");
+    assert_eq!(events[0]["childId"], "sub-1");
+    assert_eq!(events[0]["fromIndex"], 0);
+    assert_eq!(events[0]["toIndex"], 0);
+    assert_eq!(events[0]["statusChange"]["to"], "failed");
+    // The terminal event is readable through the ring, and the
+    // subscription is Stopped: a later poll observes nothing.
+    let page = sessions.watch_read(0, 100).await.expect("read the ring");
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(
+        page.events[0].content.status.as_ref().map(|c| c.to),
+        Some("failed")
+    );
+    let rows = sessions.watch_agent_list().await.expect("list");
+    assert_eq!(rows[0].status, "stopped");
+}
+
+/// The unreachable give-up measures elapsed wall time, never poll
+/// strikes: a hung link spends about 10s per failed tick (the 5s
+/// cadence plus its own 5s snapshot await), so a 12-strike counter
+/// would report near 120s against the documented ~60s bound, and a
+/// factory wait (capped at 60s) would never see the terminal event.
+/// A reachable poll resets the window: a fresh dead streak needs the
+/// full 60s again. **Mutation check:** revert to a strike counter and
+/// four failed polls never reach twelve strikes, so the give-up below
+/// never fires, failing both expects.
+#[test]
+fn agent_watch_unreachable_gives_up_on_elapsed_time_not_strike_counts() {
+    let mut registry = AgentWatchRegistry::default();
+    registry
+        .register("sub-1", "worker", Some((3, "idle")), 1_000, true)
+        .expect("register");
+    let epoch = registry.subscription_epoch("watch-agent-sub-1");
+    let dead = Err(anyhow!("dead link"));
+    // A first dead streak: quiet until 60s of failed polls elapse.
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &dead, 10_000)
+        .is_none());
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &dead, 40_000)
+        .is_none());
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &dead, 69_999)
+        .is_none());
+    let event = registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &dead, 70_000)
+        .expect("the elapsed window ends the subscription");
+    assert_eq!(event.content.start, 3, "the baseline is retained");
+    assert_eq!(event.content.end, 3);
+    assert_eq!(
+        event.content.status.as_ref().map(|change| change.to),
+        Some("unreachable")
+    );
+    // The terminal row never re-fires.
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-1", epoch, &dead, 200_000)
+        .is_none());
+    // A reachable poll mid-streak resets the window: a fresh dead
+    // streak needs the full 60s again.
+    registry
+        .register("sub-2", "worker", Some((5, "running")), 1_000, true)
+        .expect("register the second row");
+    let epoch2 = registry.subscription_epoch("watch-agent-sub-2");
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-2", epoch2, &dead, 10_000)
+        .is_none());
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-2", epoch2, &Ok((5, "running")), 35_000)
+        .is_none());
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-2", epoch2, &dead, 40_000)
+        .is_none());
+    assert!(registry
+        .apply_snapshot("watch-agent-sub-2", epoch2, &dead, 95_999)
+        .is_none());
+    let event = registry
+        .apply_snapshot("watch-agent-sub-2", epoch2, &dead, 100_000)
+        .expect("the fresh streak gives up after its own full window");
+    assert_eq!(
+        event.content.status.as_ref().map(|change| change.to),
+        Some("unreachable")
+    );
 }
 
 /// A `wake: false` subscription (a factory-owned wait) still pages the

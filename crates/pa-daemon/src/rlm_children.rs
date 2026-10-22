@@ -732,19 +732,33 @@ impl SupervisorChildSessions {
 
     /// Test seam: flip one child record's prompt admission (the watch
     /// register/poll behavior across the spawn -> watch window, where
-    /// the task prompt has not landed yet).
+    /// the task prompt has not landed yet). Admitting runs the same
+    /// admission arm the spawn watcher runs (host.rs), so the tests
+    /// exercise the real arming path.
     #[cfg(test)]
     pub(crate) async fn set_test_child_prompt_admitted(
         &self,
         active_session_id: &str,
         admitted: bool,
     ) {
-        let children = self.inner.children.lock().await;
-        for record in children.iter() {
-            let mut record = record.lock().await;
-            if record.active_session_id == active_session_id {
-                record.prompt_admitted = admitted;
+        let admitted_child_id = {
+            let children = self.inner.children.lock().await;
+            let mut admitted_child_id = None;
+            for record in children.iter() {
+                let mut record = record.lock().await;
+                if record.active_session_id == active_session_id {
+                    record.prompt_admitted = admitted;
+                    if admitted {
+                        admitted_child_id = Some(record.rlm_child_id.clone());
+                    }
+                }
             }
+            admitted_child_id
+        };
+        if let Some(child_id) = admitted_child_id {
+            self.inner
+                .admit_agent_watch_baselines(&child_id, active_session_id)
+                .await;
         }
     }
 

@@ -55,11 +55,16 @@ const AGENT_WATCH_SNAPSHOT_TIMEOUT_MS: u64 = 5_000;
 /// proceed concurrently (the batch is still one applied lock hold and
 /// one wake row), and the load stays bounded at 64 subscriptions.
 const AGENT_WATCH_SNAPSHOT_CONCURRENCY: usize = 8;
-/// Failed child polls before a subscription gives up with one terminal
-/// `-> unreachable` event (the settle watcher's
-/// `WATCH_MAX_UNREACHABLE_POLLS` give-up shape, subscription-local and
-/// far shorter: a watch is advisory, never a liveness gate).
-const WATCH_SUB_MAX_UNREACHABLE_POLLS: u32 = 12;
+/// How long a subscription keeps polling a child whose snapshots keep
+/// failing before it gives up with one terminal `-> unreachable` event.
+/// Wall time, never a strike count: a hung link spends about 10s per
+/// failed tick (the 5s cadence plus its own 5s snapshot await), so a
+/// strike multiple of the cadence would report near 120s against the
+/// documented ~60s bound — the give-up measures the failed-poll window
+/// itself (the settle watcher's `WATCH_MAX_UNREACHABLE_POLLS` is the
+/// different, strike-based shape; a watch is advisory, never a
+/// liveness gate).
+const WATCH_SUB_UNREACHABLE_GIVE_UP_MS: u64 = 60_000;
 /// The readable event ring: bounded by entries and serialized bytes,
 /// drop-oldest, and every drop is counted at the read surface.
 const AGENT_WATCH_EVENT_RING_MAX: usize = 1024;
@@ -109,7 +114,10 @@ struct AgentWatchSubscription {
     created_at_ms: u64,
     status: WatchStatus,
     total_events: u64,
-    unreachable_polls: u32,
+    /// The wall-clock time of the first snapshot failure of the current
+    /// dead streak (`None` while the child stays reachable); the
+    /// give-up measures elapsed time from here, never poll strikes.
+    unreachable_since_ms: Option<u64>,
     /// Bumped on every register: a poll observation carries the epoch it
     /// was taken under, so one taken before a re-baseline is discarded
     /// instead of emitting a backwards range against the new baseline.
@@ -258,7 +266,7 @@ impl AgentWatchRegistry {
             subscription.last_status = arming_status;
             subscription.child_name = child_name.to_string();
             subscription.created_at_ms = at_ms;
-            subscription.unreachable_polls = 0;
+            subscription.unreachable_since_ms = None;
             subscription.epoch = epoch;
             subscription.wake = wake;
             return Ok(self.row(&id));
@@ -282,7 +290,7 @@ impl AgentWatchRegistry {
                 created_at_ms: at_ms,
                 status: WatchStatus::Active,
                 total_events: 0,
-                unreachable_polls: 0,
+                unreachable_since_ms: None,
                 epoch,
                 wake,
             },
@@ -325,6 +333,61 @@ impl AgentWatchRegistry {
         ))
     }
 
+    /// A settled-but-never-admitted child (a kickoff that failed
+    /// permanently: the spawn watcher killed the worker and
+    /// `settle_failed` retained the roster row) ends its subscription
+    /// with ONE zero-width terminal `-> failed` event, like the
+    /// vanished and unreachable ends. The record can never admit, so
+    /// the poller's unadmitted skip would otherwise loop forever
+    /// against a dead child while a parked consumer times out and the
+    /// row keeps burning an active slot. An observation from before a
+    /// re-baseline is stale, exactly like the vanish arm.
+    pub(crate) fn mark_failed_kickoff(
+        &mut self,
+        id: &str,
+        epoch: u64,
+        at_ms: u64,
+    ) -> Option<RlmWatchEvent> {
+        let subscription = self.subscriptions.get_mut(id)?;
+        if subscription.status != WatchStatus::Active || subscription.epoch != epoch {
+            return None;
+        }
+        subscription.status = WatchStatus::Stopped;
+        Some(Self::build_event(
+            subscription,
+            subscription.baseline.unwrap_or_default(),
+            subscription.baseline.unwrap_or_default(),
+            Some((subscription.last_status, "failed")),
+            at_ms,
+        ))
+    }
+
+    /// Whether the child has an active, still-unarmed subscription (the
+    /// admission arm's short-circuit: nothing to arm, no snapshot).
+    pub(crate) fn has_unarmed_for_child(&self, child_id: &str) -> bool {
+        self.subscriptions.values().any(|subscription| {
+            subscription.status == WatchStatus::Active
+                && subscription.child_id == child_id
+                && subscription.baseline.is_none()
+        })
+    }
+
+    /// The admission arm: one snapshot taken at the admission boundary
+    /// arms every still-unarmed watch on the child. First writer wins —
+    /// the poller's arming read may have landed first — so the arm only
+    /// touches rows whose baseline is still `None`.
+    pub(crate) fn arm_admitted(&mut self, child_id: &str, count: u64, status: &'static str) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription.status == WatchStatus::Active
+                && subscription.child_id == child_id
+                && subscription.baseline.is_none()
+            {
+                subscription.baseline = Some(count);
+                subscription.last_status = status;
+            }
+        }
+    }
+
     /// Owner teardown: every subscription ends cancelled.
     pub(crate) fn cancel_all(&mut self) {
         for subscription in self.subscriptions.values_mut() {
@@ -362,10 +425,14 @@ impl AgentWatchRegistry {
         }
         // An unreachable child accumulates a dead-poll streak and, past
         // the give-up bound, ends the subscription with one terminal
-        // `-> unreachable` status event.
+        // `-> unreachable` status event. The give-up is elapsed wall
+        // time since the streak's first failure, never a strike count:
+        // a hung link spends the 5s cadence plus its own snapshot await
+        // per failed tick, so strikes overshoot the bound the docs
+        // state.
         let Ok((count, status)) = snapshot else {
-            subscription.unreachable_polls += 1;
-            if subscription.unreachable_polls < WATCH_SUB_MAX_UNREACHABLE_POLLS {
+            let since = *subscription.unreachable_since_ms.get_or_insert(at_ms);
+            if at_ms.saturating_sub(since) < WATCH_SUB_UNREACHABLE_GIVE_UP_MS {
                 return None;
             }
             subscription.status = WatchStatus::Stopped;
@@ -378,7 +445,7 @@ impl AgentWatchRegistry {
             ));
         };
         let (count, status) = (*count, *status);
-        subscription.unreachable_polls = 0;
+        subscription.unreachable_since_ms = None;
         // The arming read: a register against an unreachable child never
         // fabricates a 0..count growth event.
         let Some(baseline) = subscription.baseline else {
@@ -533,7 +600,8 @@ fn event_wire_size(event: &RlmWatchEvent) -> usize {
         .unwrap_or_default()
 }
 
-/// One poll observation: a snapshot result, the vanished-child arm, or
+/// One poll observation: a snapshot result, the vanished-child arm, a
+/// settled-but-never-admitted child (its kickoff failed permanently), or
 /// an unadmitted child (its task prompt has not landed: observe nothing
 /// this tick, so the parent's own kickoff never fabricates growth).
 /// All carry the registration epoch the observation was taken under, so
@@ -541,6 +609,10 @@ fn event_wire_size(event: &RlmWatchEvent) -> usize {
 enum WatchObservation {
     Snapshot(String, u64, Result<(u64, &'static str)>),
     Vanished(String, u64),
+    /// The kickoff failed before the prompt ever admitted (the worker
+    /// was killed and `settle_failed` retained the roster row with an
+    /// error verdict): one terminal `-> failed` event ends the watch.
+    FailedKickoff(String, u64),
     /// An unadmitted child: no snapshot this tick (the skip is keyed by
     /// the subscription row the poll stage already resolved).
     Unadmitted,
@@ -596,6 +668,45 @@ impl SupervisorChildSessionsInner {
         registry
             .register(&child_id, &child_name, baseline, at_ms, wake)
             .map_err(|error| anyhow!(error.message()))
+    }
+
+    /// The task prompt just admitted (host.rs's spawn watcher): the
+    /// unadmitted window is over, so every watch registered inside the
+    /// spawn -> `watch.agent` window arms NOW, off one bounded snapshot
+    /// at the admission boundary — a fast child that finishes before
+    /// the next poll tick still reports its growth instead of being
+    /// absorbed whole into the baseline by the poller's later arming
+    /// read. The arm is quiet (the arming-read contract) and only
+    /// touches rows whose baseline is still unarmed; an unreachable
+    /// child at the boundary stays unarmed for the poller's arming read.
+    pub(super) async fn admit_agent_watch_baselines(
+        &self,
+        child_id: &str,
+        active_session_id: &str,
+    ) {
+        if !self
+            .agent_watch
+            .lock()
+            .await
+            .has_unarmed_for_child(child_id)
+        {
+            return;
+        }
+        let snapshot_timeout_ms = self.agent_watch.lock().await.snapshot_timeout();
+        let snapshot = tokio::time::timeout(
+            Duration::from_millis(snapshot_timeout_ms),
+            self.child_watch_snapshot(active_session_id),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("agent watch snapshot timed out")))
+        .ok();
+        let Some((count, status)) = snapshot else {
+            return; // unreachable at the boundary: the poller arms it later
+        };
+        self.agent_watch
+            .lock()
+            .await
+            .arm_admitted(child_id, count, status);
     }
 
     /// Owner teardown: cancel every subscription, retire the poller
@@ -688,11 +799,25 @@ async fn agent_watch_poll_loop(inner: Arc<SupervisorChildSessionsInner>, generat
                     let Some(record) = inner.find_record_by_child_id(child_id).await else {
                         return WatchObservation::Vanished(subscription_id.clone(), *epoch);
                     };
-                    let (active_session_id, prompt_admitted) = {
+                    let (active_session_id, prompt_admitted, settled_status) = {
                         let record = record.lock().await;
-                        (record.active_session_id.clone(), record.prompt_admitted)
+                        (
+                            record.active_session_id.clone(),
+                            record.prompt_admitted,
+                            record.settled_status,
+                        )
                     };
                     if !prompt_admitted {
+                        if settled_status.is_some() {
+                            // The kickoff failed permanently: the record
+                            // can never admit, so the unadmitted skip
+                            // would loop forever against a dead child.
+                            // End the watch with one terminal event.
+                            return WatchObservation::FailedKickoff(
+                                subscription_id.clone(),
+                                *epoch,
+                            );
+                        }
                         // The task prompt has not landed (the spawn ->
                         // watch window): observing now would fabricate
                         // the parent's own kickoff as the first growth
@@ -724,6 +849,23 @@ async fn agent_watch_poll_loop(inner: Arc<SupervisorChildSessionsInner>, generat
             for observation in observations {
                 match observation {
                     WatchObservation::Unadmitted => {} // no observation this tick
+                    WatchObservation::FailedKickoff(subscription_id, epoch) => {
+                        if let Some(event) =
+                            registry.mark_failed_kickoff(&subscription_id, epoch, now_ms())
+                        {
+                            let event = registry.push_event(event);
+                            let (child_name, wake) = registry
+                                .subscriptions
+                                .get(&event.subscription_id)
+                                .map(|subscription| {
+                                    (subscription.child_name.clone(), subscription.wake)
+                                })
+                                .unwrap_or_default();
+                            if wake {
+                                lines.push((event, child_name));
+                            }
+                        }
+                    }
                     WatchObservation::Vanished(subscription_id, epoch) => {
                         if let Some(event) =
                             registry.mark_vanished(&subscription_id, epoch, now_ms())

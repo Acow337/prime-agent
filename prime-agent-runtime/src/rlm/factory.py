@@ -3437,11 +3437,17 @@ class FactoryExecutor:
             if match is not None:
                 content = match.get("content") or {}
                 status = content.get("status")
-                if isinstance(status, dict) and status.get("to") in ("unreachable", "vanished"):
-                    # The terminal `-> unreachable` / `-> vanished`
-                    # events are not growth: the watched child is dead
-                    # (unresponsive past the give-up bound, or deleted
-                    # from the roster), and completing the wait as done
+                if isinstance(status, dict) and status.get("to") in (
+                    "unreachable",
+                    "vanished",
+                    "failed",
+                ):
+                    # The terminal `-> unreachable` / `-> vanished` /
+                    # `-> failed` events are not growth: the watched
+                    # child is dead (unresponsive past the give-up
+                    # bound, deleted from the roster, or settled without
+                    # ever admitting its kickoff), and completing the
+                    # wait as done
                     # would run downstream transitions on a broken
                     # dependency. The wait settles as an error through
                     # the failure policy, exactly like a timeout.

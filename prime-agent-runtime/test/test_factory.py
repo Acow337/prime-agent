@@ -7407,6 +7407,59 @@ class FactoryExecutorTest(_ExecutorTestCase):
         )
 
     @async_test
+    async def test_failed_kickoff_watch_event_fails_the_wait(self) -> None:
+        # The terminal `-> failed` event (the watched child settled
+        # without ever admitting its kickoff: the spawn watcher killed
+        # the worker and `settle_failed` retained the roster row)
+        # settles the wait as an error through the failure policy,
+        # exactly like the unreachable give-up and the vanished delete:
+        # a dead-before-admission target must not park the wait until a
+        # silent timeout. (Mutating the "failed" label out of the
+        # terminal guard fails this pin: the wait fires on the failed
+        # event as growth.)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "w1",
+                        "entry": True,
+                        "subagent": "worker",
+                        "wait": {"kind": "agent", "target": "watched", "timeout_ms": 60_000},
+                    },
+                ],
+                "transitions": [],
+            }
+        )
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start()
+        await self.wait_until(lambda: self.host.calls_of("rlm.watch.agent"))
+        self.host.watch_events.append(
+            {
+                "id": "watch-dead-kickoff",
+                "seq": 1,
+                "subscription_id": "watch-agent-watched",
+                "kind": "watch.agent",
+                "content": {
+                    "target": "watched",
+                    "start": 0,
+                    "end": 0,
+                    "status": {"from": "idle", "to": "failed"},
+                },
+                "at_ms": 1,
+            }
+        )
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(self.all_events_of(result, "wait_fired"), [])
+        timeouts = self.all_events_of(result, "wait_timeout")
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("went failed", timeouts[0]["detail"])
+        self.assertEqual(
+            [c["id"] for c in self.host.calls_of("rlm.watch.agent_cancel")],
+            ["watch-agent-watched"],
+        )
+
+    @async_test
     async def test_factory_waits_subscribe_non_waking(self) -> None:
         # The factory reads the watch ring itself, so its wait
         # subscriptions carry wake=False: their events never spend a

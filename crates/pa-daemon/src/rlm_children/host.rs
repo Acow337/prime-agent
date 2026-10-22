@@ -294,6 +294,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // The worker accepted the task: from here an idle read is a
                 // finished run, never the pre-prompt idle worker.
                 watcher_record.lock().await.prompt_admitted = true;
+                // Admission closes the spawn -> watch window: arm every
+                // watch registered against the never-prompted child at
+                // the admission boundary, so a fast child's growth is
+                // preserved instead of absorbed by the next poll tick's
+                // baseline.
+                watcher_this
+                    .admit_agent_watch_baselines(&child_log_id, &child_active_session_id)
+                    .await;
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {
