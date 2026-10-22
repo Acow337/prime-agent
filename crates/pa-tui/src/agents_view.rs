@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::agents_view_forest::{
     ancestor_session_ids, build_rows, compute_rollups, has_session_children, resolve_selection,
-    scope_ancestors, scope_root, scope_to_subtree, AgentsViewRow, RowKind, ScopeRoot, SelectionKey,
-    SessionActivity,
+    scope_ancestors, scope_root, scope_to_subtree, subtree_contains, AgentsViewRow, RowKind,
+    ScopeRoot, SelectionKey, SessionActivity,
 };
 use crate::agents_view_state::truncate_text;
 use crate::agents_view_state::{

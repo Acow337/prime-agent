@@ -4,9 +4,9 @@
 use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
     parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors, scope_root,
-    scope_to_subtree, AgentsViewMode, AgentsViewRow, AgentsViewScope, Composer, OpenedRow, PathBuf,
-    PressedMouseClick, RowKind, SavedMore, ScopeRoot, SelectionEdge, SelectionKey,
-    SessionSelection, Value, ANCHOR_LOADING_HINT, SAVED_CATALOG_PAGE_FILES,
+    scope_to_subtree, subtree_contains, AgentsViewMode, AgentsViewRow, AgentsViewScope, Composer,
+    OpenedRow, PathBuf, PressedMouseClick, RowKind, SavedMore, ScopeRoot, SelectionEdge,
+    SelectionKey, SessionSelection, Value, ANCHOR_LOADING_HINT, SAVED_CATALOG_PAGE_FILES,
 };
 
 impl AgentsViewMode {
@@ -87,22 +87,21 @@ impl AgentsViewMode {
                 active_session_id: None,
                 session_name: None,
             };
-            let ancestors = scope_ancestors(&records, &anchor_scope);
             let outside_scope = scope_active
-                && scope_root(&records, &anchor_scope).is_some()
                 && self
                     .options
                     .scope
                     .as_ref()
                     .and_then(|scope| scope.session_id.as_deref())
-                    .is_some_and(|root| !ancestors.iter().any(|id| id == root));
+                    .and_then(|root| subtree_contains(&records, root, &anchor_scope))
+                    == Some(false);
             if outside_scope {
-                // A known anchor outside the scope subtree never lists here.
+                // An anchor whose full lineage misses the scope root never lists here.
                 self.end_anchor_wait();
             } else {
                 self.pending_ancestors
                     .get_or_insert_with(Vec::new)
-                    .extend(ancestors);
+                    .extend(scope_ancestors(&records, &anchor_scope));
             }
         }
         // Re-expand the drilled-in row's ancestors: a nested row appears only once its parent is
