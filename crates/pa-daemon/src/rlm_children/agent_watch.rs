@@ -268,7 +268,10 @@ impl AgentWatchRegistry {
             subscription.created_at_ms = at_ms;
             subscription.unreachable_since_ms = None;
             subscription.epoch = epoch;
-            subscription.wake = wake;
+            // Sticky: the shared per-child row serves the model's watch and the
+            // factory wait; a wake=false re-arm must not silence wake rows an
+            // earlier registration asked for.
+            subscription.wake = subscription.wake || wake;
             return Ok(self.row(&id));
         }
         if self.active_count() >= AGENT_WATCH_MAX_ACTIVE {
