@@ -311,10 +311,10 @@ impl Drop for ThreadEntries<'_> {
 
 /// The one watcher-draining thread: each batch — everything queued at a wake-up, the
 /// coalescing — is planned against a snapshot of the entries with no lock held (the
-/// filesystem reads stay off the queries' lock) and published under the lock; a batch
-/// that arrives during a build waits for the build to finish first. Holding the channel's
-/// receiver and only a weak index reference, it exits when the watcher drops with the
-/// provider.
+/// filesystem reads and the merge stay off the queries' lock) and published under the
+/// lock as a pointer swap; a batch that arrives during a build waits for the build to
+/// finish first. Holding the channel's receiver and only a weak index reference, it exits
+/// when the watcher drops with the provider.
 fn spawn_applier(
     shared: Weak<Shared>,
     events: Receiver<notify::Result<Event>>,
@@ -347,7 +347,9 @@ fn spawn_applier(
             };
             drop(guard);
             let update = plan_batch(&entries, &batch, &base, &canonical_base);
-            drop(entries);
+            if matches!(update, Update::Unchanged) {
+                continue;
+            }
             let mut guard = shared.lock();
             update.publish(&mut guard);
             #[cfg(test)]
@@ -364,48 +366,26 @@ fn spawn_applier(
 
 /// One watcher batch's effect on the ready index, planned against its entries.
 enum Update {
+    Unchanged,
     /// Rebuild on the next query.
     Rebuild,
     Disable,
-    /// Drop `removals` (ranges of the planned-on entries), then merge in `additions`.
-    Edit {
-        removals: Vec<Range<usize>>,
-        additions: Vec<Box<str>>,
-    },
+    /// The batch's new entries: sorted, no duplicates.
+    Replace(Vec<Box<str>>),
 }
 
 impl Update {
     /// Publish into the ready `state` the update was planned on.
     fn publish(self, state: &mut IndexState) {
-        let (removals, additions) = match self {
-            Update::Rebuild => {
-                *state = IndexState::Unbuilt;
-                return;
+        match self {
+            Update::Unchanged => {}
+            Update::Rebuild => *state = IndexState::Unbuilt,
+            Update::Disable => *state = IndexState::Disabled,
+            Update::Replace(new) => {
+                if let IndexState::Ready { entries, .. } = state {
+                    *entries = Arc::new(new);
+                }
             }
-            Update::Disable => {
-                *state = IndexState::Disabled;
-                return;
-            }
-            Update::Edit {
-                removals,
-                additions,
-            } => (removals, additions),
-        };
-        let IndexState::Ready { entries, .. } = state else {
-            return;
-        };
-        // Copies only while a query still scans this snapshot; the applier dropped its own
-        // before publishing.
-        let entries = Arc::make_mut(entries);
-        remove_ranges(entries, removals);
-        if !additions.is_empty() {
-            entries.extend(additions);
-            // The stable sort takes the sorted entries as one run, so the merge stays linear.
-            entries.sort();
-            entries.dedup();
-        }
-        if entries.len() > MAX_INDEX_ENTRIES {
-            *state = IndexState::Disabled;
         }
     }
 }
@@ -598,15 +578,24 @@ fn plan_batch(
             }
         }
     }
-    Update::Edit {
-        removals,
-        additions,
+    if removals.iter().all(Range::is_empty) && additions.is_empty() {
+        return Update::Unchanged;
     }
+    let mut merged = entries.to_vec();
+    remove_ranges(&mut merged, removals);
+    merged.extend(additions);
+    // The stable sort takes the sorted entries as one run, so the merge stays linear.
+    merged.sort();
+    merged.dedup();
+    if merged.len() > MAX_INDEX_ENTRIES {
+        return Update::Disable;
+    }
+    Update::Replace(merged)
 }
 
 /// Walk the directory `rel`'s subtree with the shared rules into `additions` — `false`
 /// once the additions alone pass [`MAX_INDEX_ENTRIES`]: an over-cap batch disables the
-/// index, like an over-cap build does (publishing checks the merged total).
+/// index, like an over-cap build does (the merged total is checked after the walks).
 fn walk_subtree(base: &Path, rel: &str, additions: &mut Vec<Box<str>>) -> bool {
     for form in walk_builder(&base.join(rel))
         .build()
