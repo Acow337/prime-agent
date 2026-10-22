@@ -50,7 +50,6 @@ pub fn report(results: &[BenchResult], baseline: &Baseline) -> Report {
     for result in results {
         let key = format!("{}/{}", key_of(result.scenario), result.profile);
         let median = result.median_ms;
-        // The secondary columns print only; they never feed `regressions`.
         let first_paint = result
             .first_paint
             .as_ref()

@@ -21,9 +21,9 @@ pub(crate) const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 /// The idle poll slice between empty reads (poll(2) drives the wakeups).
 const IDLE_POLL: Duration = Duration::from_millis(25);
 
-/// The synchronized-output bracket (mode 2026) the product wraps every
-/// frame in: a terminal that honors it — the ghostty the bench presents as —
-/// shows only completed frames, so screen predicates see only those too.
+/// The synchronized-output bracket (mode 2026): the terminal the bench
+/// presents as (ghostty) shows only completed frames, so screen predicates
+/// must too.
 const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
 const SYNC_END: &[u8] = b"\x1b[?2026l";
 
@@ -284,14 +284,17 @@ impl PtyChild {
     /// # Errors
     ///
     /// Errors when the child exits inside the window.
+    #[cfg(target_os = "linux")]
     pub(crate) fn drain_until(&mut self, deadline: Instant) -> anyhow::Result<()> {
-        while Instant::now() < deadline {
+        loop {
+            self.pump(Some(deadline))?;
             if let Some(status) = self.exited {
                 anyhow::bail!("child exited with {status} inside the measured window");
             }
-            self.pump(Some(deadline))?;
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     /// The longest no-output stretch from `from` until now.
@@ -470,6 +473,26 @@ mod tests {
             .expect_err("screen wait also sees exit")
             .to_string()
             .contains("exit status: 7"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_exit_seen_by_the_last_drain_pump_fails_the_window() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &["-c".into(), "exit 7".into()],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn exiting mock");
+        child.child.wait().expect("the mock exits");
+        let error = child
+            .drain_until(Instant::now())
+            .expect_err("a dead child fails the window");
+        assert!(error.to_string().contains("exit status: 7"), "{error}");
     }
 
     #[test]

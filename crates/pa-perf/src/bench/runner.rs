@@ -24,21 +24,15 @@ const FIRST_PAINT_NEEDLE: &[u8] = "▗▄▄█▀".as_bytes();
 /// "0 (0%)".
 const READY_NEEDLE: &str = "0 (0%)";
 
-/// The PageUp keystroke and how many transcript-paging presses per run: the
-/// pages stay inside the attach tail (the TUI's own scroll cost);
-/// transcript-top measures the daemon fetch.
 const PAGE_UP: &[u8] = b"\x1b[5~";
+/// Few enough pages to stay inside the attach tail (TUI-local scrolling).
 const PAGES: usize = 20;
 /// The product's default `tui.viewport.top` key (shift+alt+up).
 const VIEWPORT_TOP: &[u8] = b"\x1b[1;4A";
 
-/// The idle-cost window (the measured quantity, not a wait for anything).
 const IDLE_WINDOW: Duration = Duration::from_secs(30);
 
-/// One run's measurements: the settled marks (one per interaction; one per
-/// page for transcript-paging), the first usable paint where the scenario
-/// has one, the longest no-output gap of the measured windows, and the
-/// idle-cost context switches.
+/// One run's measurements (transcript-paging settles once per page).
 #[derive(Debug, Default)]
 struct Measured {
     settled: Vec<f64>,
@@ -48,7 +42,6 @@ struct Measured {
 }
 
 impl Measured {
-    /// One interaction: its settled mark and the gap of the same window.
     fn single(mark: Mark) -> Self {
         Self {
             settled: vec![mark.ms],
@@ -66,7 +59,6 @@ struct Mark {
 }
 
 impl Mark {
-    /// The mark at now for the window that started at `started`.
     fn since(child: &PtyChild, started: Instant) -> Self {
         Self {
             ms: millis(started.elapsed()),
@@ -606,8 +598,7 @@ impl Drop for Launch {
 /// roster settles (see [`roster_settled`]; the heading count repaints as
 /// cell diffs, so the byte stream cannot see it — the screen model does).
 /// The count includes the TUI's own fresh session (rendered as one more
-/// inactive row). The first usable paint is the first frame listing a
-/// loaded row (the first catalog page painted).
+/// inactive row).
 fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
     let started = Instant::now();
     child.write(b"\x1b[D")?;
@@ -640,8 +631,8 @@ fn roster_counts(screen: &str) -> Option<(usize, usize)> {
     Some((loaded, unloaded))
 }
 
-/// The agents view opens on its first catalog page, settled once the
-/// loaded and not-yet-loaded counts account for every expected session.
+/// The first catalog page is settled once the loaded and not-yet-loaded
+/// counts account for every expected session.
 fn roster_settled(screen: &str, expected: usize) -> bool {
     roster_counts(screen).is_some_and(|(loaded, unloaded)| loaded + unloaded == expected)
 }
@@ -706,11 +697,8 @@ fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured>
     Ok(Measured::single(Mark::since(child, started)))
 }
 
-/// From the resumed huge session's tail: PAGES PageUps, each timed to the
-/// first frame whose topmost block ordinal (the corpus tags every text
-/// block of that session, counting up) is above the previous frame's — the
-/// view moved up a page. One sample per page. The pages stay inside the
-/// attach tail (TUI-local scrolling); `transcript-top` measures the fetch.
+/// From the resumed tail: PAGES PageUps, each timed to the first frame whose
+/// topmost block ordinal is above the previous frame's.
 fn transcript_paging(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
     wait_ordinal_frame(ctx, child)?;
     let first = topmost_ordinal(&child.screen_text());
@@ -738,9 +726,8 @@ fn transcript_paging(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measu
     })
 }
 
-/// From the resumed huge session's tail: the top key -> the first frame
-/// showing the session's first block (ordinal 0). The head is never in the
-/// attach tail, so the TUI fetches it from the daemon (a Start page).
+/// The top key -> the first frame showing block ordinal 0. The head is never
+/// in the attach tail, so the TUI fetches it from the daemon.
 fn transcript_top(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
     wait_ordinal_frame(ctx, child)?;
     let started = Instant::now();
@@ -753,8 +740,6 @@ fn transcript_top(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured
     Ok(Measured::single(Mark::since(child, started)))
 }
 
-/// The first completed transcript frame carrying a block ordinal (the
-/// resumed tail painted).
 fn wait_ordinal_frame(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Instant> {
     child.wait_screen(
         "an ordinal-tagged transcript frame",
@@ -763,8 +748,7 @@ fn wait_ordinal_frame(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Inst
     )
 }
 
-/// The smallest corpus block ordinal on screen (the topmost transcript
-/// block, ordinals counting up in transcript order).
+/// The smallest block ordinal on screen is the topmost block.
 fn topmost_ordinal(screen: &str) -> Option<u64> {
     screen
         .match_indices(corpus::ORDINAL_PREFIX)
@@ -944,9 +928,7 @@ fn restore(ctx: &RunCtx) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The result object for one scenario's runs: the settled marks pooled
-/// (transcript-paging: one per page), and the secondary series where every
-/// run carries one.
+/// The result object for one scenario's runs (settled marks pooled).
 fn build_result(ctx: &RunCtx, scenario: Scenario, runs: Vec<Measured>) -> BenchResult {
     let mut samples: Vec<f64> = runs.iter().flat_map(|run| run.settled.clone()).collect();
     samples.sort_by(f64::total_cmp);
@@ -1046,9 +1028,8 @@ fn write_result(result: &BenchResult, path: &Path) -> anyhow::Result<()> {
     std::fs::write(path, json).with_context(|| format!("write {}", path.display()))
 }
 
-/// idle-cost: the CPU time and context switches of the owned daemon, its
-/// descendants, and the TUI over an idle window. Processes are found from
-/// the owned pids down (/proc children), never by name.
+/// idle-cost: processes are found from the owned pids down (/proc
+/// children), never by name.
 #[cfg(target_os = "linux")]
 mod idle {
     use std::collections::BTreeMap;
@@ -1058,8 +1039,7 @@ mod idle {
 
     use super::{Measured, PtyChild, IDLE_WINDOW};
 
-    /// One process's counters: utime+stime (clock ticks) and the voluntary +
-    /// involuntary context switches summed over its live threads.
+    /// utime+stime (clock ticks) and context switches summed over threads.
     #[derive(Debug, Clone, Copy, Default)]
     struct Usage {
         ticks: u64,
@@ -1071,8 +1051,12 @@ mod idle {
         let before = snapshot(&roots);
         child.drain_until(Instant::now() + IDLE_WINDOW)?;
         let after = snapshot(&roots);
-        // A process spawned inside the window counts from zero; one that
-        // exited inside it is gone from `after` (its share is not seen).
+        anyhow::ensure!(
+            after.contains_key(&daemon),
+            "the daemon exited inside the idle window"
+        );
+        // A process that exited inside the window is gone from `after`, so
+        // its share is not counted.
         let delta = after.iter().fold(Usage::default(), |sum, (pid, end)| {
             let start = before.get(pid).copied().unwrap_or_default();
             Usage {
@@ -1112,7 +1096,7 @@ mod idle {
     fn read_usage(pid: i32) -> Option<Usage> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         Some(Usage {
-            ticks: stat_ticks(&stat)?,
+            ticks: live_ticks(&stat)?,
             switches: tasks(pid)
                 .filter_map(|tid| {
                     std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/status")).ok()
@@ -1122,11 +1106,16 @@ mod idle {
         })
     }
 
-    /// utime + stime: fields 14 and 15 of /proc/<pid>/stat, counted after
-    /// the parenthesized comm (which may itself contain spaces).
-    fn stat_ticks(stat: &str) -> Option<u64> {
+    /// utime + stime (stat fields 14 and 15, counted after the comm, which
+    /// may contain spaces and parentheses); `None` for an unreaped zombie,
+    /// whose stat file outlives it.
+    fn live_ticks(stat: &str) -> Option<u64> {
         let (_, fields) = stat.rsplit_once(')')?;
-        let mut fields = fields.split_whitespace().skip(11);
+        let mut fields = fields.split_whitespace();
+        if fields.next()? == "Z" {
+            return None;
+        }
+        let mut fields = fields.skip(10);
         let utime: u64 = fields.next()?.parse().ok()?;
         let stime: u64 = fields.next()?.parse().ok()?;
         Some(utime + stime)
@@ -1171,10 +1160,10 @@ mod idle {
     mod tests {
         #[test]
         fn counters_parse_from_proc_text() {
-            // A comm with spaces and a parenthesis must not shift the fields.
             let stat =
                 "4242 (pa worker (x)) S 1 4242 4242 0 -1 4194560 900 0 0 0 31 7 0 0 20 0 9 0";
-            assert_eq!(super::stat_ticks(stat), Some(38));
+            assert_eq!(super::live_ticks(stat), Some(38));
+            assert_eq!(super::live_ticks(&stat.replacen(") S", ") Z", 1)), None);
             let status = "Name:\tprime-agent\nvoluntary_ctxt_switches:\t120\nnonvoluntary_ctxt_switches:\t5\n";
             assert_eq!(super::status_switches(status), 125);
         }
@@ -1195,7 +1184,6 @@ mod idle {
     }
 }
 
-/// The non-Linux stand-in: idle-cost reads /proc.
 #[cfg(not(target_os = "linux"))]
 mod idle {
     use super::{Measured, PtyChild};

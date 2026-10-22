@@ -34,16 +34,14 @@ pub enum Scenario {
     SessionSwitch,
     /// The `@` keystroke -> the first completion menu row.
     AtCompletion,
-    /// `--resume <huge session>`, then PageUps: each keystroke -> the first
-    /// frame whose topmost corpus block ordinal is above the previous one
-    /// (one sample per page).
+    /// `--resume <huge session>`, then each PageUp -> the first frame scrolled
+    /// up a page (one sample per page).
     TranscriptPaging,
-    /// `--resume <huge session>`, then the top key -> the first frame
-    /// showing the session's first block (a daemon page fetch).
+    /// `--resume <huge session>`, then the top key -> the session's first
+    /// block (a daemon page fetch).
     TranscriptTop,
-    /// Owned daemon + TUI, ready, then an idle window: the CPU time of the
-    /// daemon, its descendants, and the TUI (the sample, in ms), plus their
-    /// context switches. Linux-only (/proc).
+    /// CPU ms of the owned daemon, its descendants, and the TUI over an idle
+    /// window after ready. Linux-only (/proc).
     IdleCost,
 }
 

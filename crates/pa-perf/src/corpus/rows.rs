@@ -118,10 +118,9 @@ pub(crate) struct SessionSpec {
     pub marker: Option<String>,
     pub parent_session: Option<String>,
     pub rlm_depth: Option<u64>,
-    /// Lead every generated text block (user text, thinking, assistant text,
-    /// tool output) with the next block ordinal (`ORDINAL_PREFIX` + n, n
-    /// counting up in transcript order), so a scrolled screen names how far
-    /// up it is. The marker turn stays untagged.
+    /// Prefix every generated text block with its ordinal (`ORDINAL_PREFIX` +
+    /// n, counting up in transcript order) so a scrolled screen names how far
+    /// up it is; the marker turn stays untagged.
     pub ordinals: bool,
 }
 

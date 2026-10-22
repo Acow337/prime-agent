@@ -123,44 +123,36 @@ the liveness deadline only fails broken runs):
 | `transcript-top` | cold | `--resume <huge session>`, then the `tui.viewport.top` key -> the first frame showing the session's first block (ordinal 0); the head is never in the attach tail, so this is a daemon page fetch |
 | `idle-cost` | cold | owned daemon + TUI, ready, then a 30 s idle window: CPU ms (utime+stime) of the daemon, its descendants, and the TUI, plus their context switches (medium only, Linux only) |
 
-Two marks per run, one run: `agents-view` and `agents-view-warm` also
-record the first usable paint of the same run (the `first_paint` series;
-the median stays the settled mark the baseline keys mean): the first frame
-whose roster lists a loaded row, from the same roster parse as the settled
-mark. `cold-start`/`cold-ready` (and `warm-*`) are already a
-first-paint/ready pair from one launch. Not applicable: `open-session` (its
-marker is the first usable paint and no computed later mark exists) and
-`session-switch` (the agents view stays up until B's first chat frame,
-which already carries B's marker; the filtered picker has no `Inactive (`
-heading to watch disappear).
+First paint: `agents-view` and `agents-view-warm` also record the first
+usable paint of the same run (`first_paint`: the first frame whose roster
+lists a loaded row); the median stays the settled mark the baseline keys
+mean. `cold-start`/`cold-ready` (and `warm-*`) are already a
+first-paint/ready pair from one launch. `open-session` and `session-switch`
+have no separate first paint: their marker is the first usable frame.
 
 Block ordinals: the corpus prefixes every generated text block of the huge
-session (user text, thinking, assistant text, tool output) with
-`ord<n>`, `n` counting up from 0 in transcript order (no generated word
-contains `ord`). The 20 PageUps stay inside the attach tail (the daemon
-serves the last 512 messages; 20 pages move ~100 blocks), so
-`transcript-paging` is the TUI's own scroll and render cost.
-`transcript-top` is the daemon side: the head page (`get_messages`) is
-fetched on the key.
+session with `ord<n>`, `n` counting up from 0 in transcript order. The 20
+PageUps stay inside the attach tail (the daemon serves the last 512
+messages), so `transcript-paging` measures the TUI's own scroll and render;
+`transcript-top` measures the daemon's head-page fetch (`get_messages`).
 
-Stall gauge: the pty harness timestamps every output chunk; each sample's
-window (trigger -> its mark) records its longest no-output stretch, and
-the result keeps each run's worst (`worst_gap`). It is a flag — the report
-prints its p95 and max, and it never gates.
+Stall gauge (`worst_gap`): each run's longest no-output stretch inside its
+measured windows (trigger -> mark). The report prints its p95 and max; it
+never gates.
 
-idle-cost reads `/proc` from the owned pids down (`/proc/<pid>/task/*/children`,
-never by name): CPU ticks from `stat`, context switches summed over
-`task/*/status`, over the processes alive at the window's end (one that
-exits inside the window is not counted). One sample per suite on the medium leg (`pa-perf run`
-skips it elsewhere and on non-Linux; `bench --scenario idle-cost` errors
-there). The window is the measured quantity; CPU resolution is one clock
-tick (10 ms at the usual 100 Hz).
+idle-cost walks `/proc` from the owned pids down
+(`/proc/<pid>/task/*/children`, never by name) and sums CPU ticks (`stat`)
+and context switches (`task/*/status`) over the processes alive at the
+window's end; a process that exits inside the window is not counted, and
+the run fails if the daemon or the TUI exits. It runs once per suite on the
+medium leg: `pa-perf run` skips it elsewhere and on non-Linux, and
+`bench --scenario idle-cost` errors on non-Linux. CPU resolution is one
+clock tick (10 ms at 100 Hz).
 
 Screen needles see only completed frames: the chat surface brackets its
 paints in synchronized output (mode 2026), and the terminal the bench
-presents as (ghostty) shows such a frame only at its end, so the screen
-model is read only outside a bracket. The agents view paints unbracketed;
-its needles see the bytes as they arrive, like a real terminal.
+presents as (ghostty) shows such a frame only at its end. The agents view
+paints unbracketed, so its needles see bytes as they arrive.
 
 Mechanics (the repo's pty-e2e discipline): the TUI child runs in its own
 session with NO controlling tty (`setsid` pre-exec; vendored crossterm
