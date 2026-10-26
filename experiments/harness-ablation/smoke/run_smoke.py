@@ -33,7 +33,7 @@ def read_keychain_key() -> str:
     account = os.environ.get("USER")
     if not account:
         raise RuntimeError("Keychain credential unavailable")
-    completed = subprocess.run(
+    commands = [
         [
             "security",
             "find-generic-password",
@@ -43,15 +43,26 @@ def read_keychain_key() -> str:
             "prime-agent-deepseek-smoke",
             "-w",
         ],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    credential = completed.stdout.strip()
-    if completed.returncode != 0 or not _SECRET_PATTERN.fullmatch(credential):
-        raise RuntimeError("Keychain credential unavailable")
-    return credential
+        [
+            "security",
+            "find-generic-password",
+            "-s",
+            "prime-agent-deepseek-smoke",
+            "-w",
+        ],
+    ]
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        credential = completed.stdout.strip()
+        if completed.returncode == 0 and _SECRET_PATTERN.fullmatch(credential):
+            return credential
+    raise RuntimeError("Keychain credential unavailable")
 
 
 def build_command(binary: Path, prompt: str) -> list[str]:
@@ -407,8 +418,21 @@ def run_experiment(*, mode: str, binary: Path, workspace: Path) -> dict[str, Any
             api_key = ""
     else:
         raise ValueError(f"unsupported experiment mode: {mode}")
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=SMOKE_DIR,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    commit = revision.stdout.strip()
+    if revision.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        commit = "unknown"
     summary = {
         "schema_version": 1,
+        "run_date": RESULT_STEM,
+        "commit": commit,
         "mode": mode,
         "provider": manifest["provider"],
         "model": manifest["model"],
@@ -462,6 +486,8 @@ def main(argv: list[str] | None = None) -> int:
         usage = summary["usage"]
         report = (
             "# DeepSeek baseline smoke report\n\n"
+            f"Run date: `{summary['run_date']}`  \n"
+            f"Commit: `{summary['commit']}`  \n"
             f"Model: `{summary['provider']}/{summary['model']}`  \n"
             f"Task records: `{len(summary['tasks'])}`\n\n"
             "## Results\n\n"

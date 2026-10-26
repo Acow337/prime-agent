@@ -245,6 +245,19 @@ class RunnerTests(unittest.TestCase):
                 run_smoke.read_keychain_key()
         self.assertNotIn("sensitive", str(error.exception))
 
+    def test_keychain_read_falls_back_to_service_only_without_exposing_account(self):
+        credential = "s" + "k-" + ("y" * 24)
+        missing = subprocess.CompletedProcess([], 44, stdout="", stderr="private")
+        found = subprocess.CompletedProcess([], 0, stdout=credential + "\n", stderr="")
+        with mock.patch.object(
+            run_smoke.subprocess, "run", side_effect=[missing, found]
+        ) as run:
+            self.assertEqual(run_smoke.read_keychain_key(), credential)
+        self.assertEqual(run.call_count, 2)
+        fallback_command = run.call_args_list[1].args[0]
+        self.assertNotIn("-a", fallback_command)
+        self.assertNotIn(credential, " ".join(fallback_command))
+
     def test_timeout_stops_before_later_tasks(self):
         manifest = json.loads((SMOKE_DIR / "manifest.json").read_text())
         with tempfile.TemporaryDirectory() as directory:
@@ -464,6 +477,8 @@ class RunnerTests(unittest.TestCase):
             tasks.materialize_tasks(root / "fresh-tasks")
             expected_digest = tasks.fixture_digest(root / "fresh-tasks")
         self.assertEqual(summary["mode"], "dry-run")
+        self.assertRegex(summary["commit"], r"^[0-9a-f]{40}$")
+        self.assertEqual(summary["run_date"], run_smoke.RESULT_STEM)
         self.assertEqual(len(summary["tasks"]), 3)
         self.assertTrue(all(row["success"] for row in summary["tasks"]), summary)
         self.assertEqual(summary["fixture_digest"], expected_digest)
