@@ -92,6 +92,14 @@ def isolated_env(root: Path, api_key: str | None = None) -> dict[str, str]:
         )
         if name in os.environ
     }
+    if "PRIME_AGENT_KERNEL_PYTHON" not in env:
+        original_home = os.environ.get("HOME")
+        if original_home:
+            kernel_python = (
+                Path(original_home) / ".prime" / "agent" / "kernel-venv" / "bin" / "python"
+            )
+            if kernel_python.is_file():
+                env["PRIME_AGENT_KERNEL_PYTHON"] = str(kernel_python)
     env.update(
         {
             "HOME": str(home),
@@ -224,42 +232,43 @@ def run_cases(
             if case.kind == "json":
                 faux_script = {"responses": [{"text": case.reference_output}]}
             elif case.kind == "tests":
+                old_delimiter = (
+                    '        elif char == "|":\n'
+                    "            if current:\n"
+                    '                fields.append("".join(current))\n'
+                    "                current = []\n"
+                )
+                new_delimiter = (
+                    '        elif char == "|":\n'
+                    '            fields.append("".join(current))\n'
+                    "            current = []\n"
+                )
+                old_tail = (
+                    "    if current:\n"
+                    '        fields.append("".join(current))\n'
+                )
+                new_tail = (
+                    "    if escaped:\n"
+                    '        current.append("\\\\")\n'
+                    '    fields.append("".join(current))\n'
+                )
+                python_code = (
+                    "from pathlib import Path\n"
+                    "path = Path('parser.py')\n"
+                    "content = path.read_text(encoding='utf-8')\n"
+                    f"content = content.replace({old_delimiter!r}, {new_delimiter!r}, 1)\n"
+                    f"content = content.replace({old_tail!r}, {new_tail!r}, 1)\n"
+                    "path.write_text(content, encoding='utf-8')\n"
+                    "print('parser fixed')\n"
+                )
                 faux_script = {
                     "responses": [
                         {
                             "content": [
                                 {
                                     "type": "toolCall",
-                                    "name": "edit",
-                                    "arguments": {
-                                        "path": "parser.py",
-                                        "edits": [
-                                            {
-                                                "oldText": (
-                                                    '        elif char == "|":\n'
-                                                    "            if current:\n"
-                                                    '                fields.append("".join(current))\n'
-                                                    "                current = []\n"
-                                                ),
-                                                "newText": (
-                                                    '        elif char == "|":\n'
-                                                    '            fields.append("".join(current))\n'
-                                                    "            current = []\n"
-                                                ),
-                                            },
-                                            {
-                                                "oldText": (
-                                                    "    if current:\n"
-                                                    '        fields.append("".join(current))\n'
-                                                ),
-                                                "newText": (
-                                                    "    if escaped:\n"
-                                                    '        current.append("\\\\")\n'
-                                                    '    fields.append("".join(current))\n'
-                                                ),
-                                            },
-                                        ],
-                                    },
+                                    "name": "python_repl",
+                                    "arguments": {"code": python_code},
                                 }
                             ]
                         },
@@ -366,6 +375,7 @@ def run_experiment(*, mode: str, binary: Path, workspace: Path) -> dict[str, Any
 
     fixture_root = workspace / "tasks"
     cases = tasks.materialize_tasks(fixture_root)
+    fixture_digest = tasks.fixture_digest(fixture_root)
     ledger = budget_proxy.UsageLedger(policy)
     if mode == "dry-run":
         results = _dry_run(cases)
@@ -402,7 +412,7 @@ def run_experiment(*, mode: str, binary: Path, workspace: Path) -> dict[str, Any
         "mode": mode,
         "provider": manifest["provider"],
         "model": manifest["model"],
-        "fixture_digest": tasks.fixture_digest(fixture_root),
+        "fixture_digest": fixture_digest,
         "tasks": results,
         "usage": ledger.summary(),
         "limits": {

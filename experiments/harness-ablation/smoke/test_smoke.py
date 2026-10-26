@@ -455,14 +455,18 @@ class RunnerTests(unittest.TestCase):
 
     def test_dry_run_verifies_all_tasks_without_a_binary(self):
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
             summary = run_smoke.run_experiment(
                 mode="dry-run",
-                binary=Path(directory) / "does-not-exist",
-                workspace=Path(directory) / "workspace",
+                binary=root / "does-not-exist",
+                workspace=root / "workspace",
             )
+            tasks.materialize_tasks(root / "fresh-tasks")
+            expected_digest = tasks.fixture_digest(root / "fresh-tasks")
         self.assertEqual(summary["mode"], "dry-run")
         self.assertEqual(len(summary["tasks"]), 3)
         self.assertTrue(all(row["success"] for row in summary["tasks"]), summary)
+        self.assertEqual(summary["fixture_digest"], expected_digest)
         self.assertEqual(summary["usage"]["request_count"], 0)
         self.assertEqual(summary["usage"]["actual_cost_cny"], 0.0)
 
@@ -479,12 +483,9 @@ class RunnerTests(unittest.TestCase):
                 "    for block in response.get('content', []):\n"
                 "        if block.get('type') != 'toolCall':\n"
                 "            continue\n"
-                "        arguments = block['arguments']\n"
-                "        path = pathlib.Path(arguments['path'])\n"
-                "        content = path.read_text()\n"
-                "        for edit in arguments['edits']:\n"
-                "            content = content.replace(edit['oldText'], edit['newText'], 1)\n"
-                "        path.write_text(content)\n"
+                "        if block.get('name') != 'python_repl':\n"
+                "            sys.exit(8)\n"
+                "        exec(block['arguments']['code'])\n"
                 "answer = script['responses'][-1].get('text', '')\n"
                 "print(json.dumps({'type': 'message_end', 'message': "
                 "{'role': 'assistant', 'content': [{'type': 'text', 'text': answer}]}}))\n",
