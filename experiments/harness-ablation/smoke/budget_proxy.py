@@ -246,6 +246,11 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         capture.finish()
         if capture.usage is not None:
             self.proxy_server.ledger.record_usage(capture.usage)
+        elif (
+            200 <= response.status < 300
+            and content_type.lower().startswith("text/event-stream")
+        ):
+            self.proxy_server.ledger.record_error("missing_usage")
         self.close_connection = True
 
     def _send_error(self, status: int, category: str) -> None:
