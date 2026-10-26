@@ -61,7 +61,12 @@ class UsageLedger:
         self._error_categories: dict[str, int] = {}
 
     def admit(self, payload: Mapping[str, Any]) -> None:
-        max_tokens = payload.get("max_tokens")
+        token_fields = [
+            payload[name]
+            for name in ("max_tokens", "max_completion_tokens")
+            if name in payload
+        ]
+        max_tokens = token_fields[0] if len(token_fields) == 1 else None
         with self._lock:
             if (
                 not isinstance(max_tokens, int)

@@ -9,7 +9,8 @@ treatment varies, so the result supports only a single-model baseline check.
 
 - The forwarding proxy binds only to `127.0.0.1` and forwards only
   `POST /chat/completions`.
-- At most six provider requests are admitted, each with `max_tokens <= 1024`.
+- At most six provider requests are admitted, each with exactly one of
+  `max_tokens` or `max_completion_tokens` set to at most 1024.
 - The conservative gate assumes the full 1,000,000-token context for every
   admitted request and rejects projected spend at or above the ¥10 limit.
 - Authentication, balance, rate-limit, missing-usage, proxy, and timeout

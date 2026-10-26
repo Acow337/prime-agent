@@ -152,10 +152,10 @@ class ProxyTests(unittest.TestCase):
         self.upstream.server_close()
         self.upstream_thread.join()
 
-    def _post(self, max_tokens):
+    def _post(self, max_tokens, field="max_tokens"):
         request = urllib.request.Request(
             f"{self.proxy.base_url}/chat/completions",
-            data=json.dumps({"max_tokens": max_tokens, "stream": True}).encode(),
+            data=json.dumps({field: max_tokens, "stream": True}).encode(),
             headers={
                 "Authorization": "Bearer test-only",
                 "Content-Type": "application/json",
@@ -180,6 +180,15 @@ class ProxyTests(unittest.TestCase):
                 "error_categories": {},
             },
         )
+
+    def test_max_completion_tokens_is_admitted_and_bounded(self):
+        with self._post(1024, field="max_completion_tokens") as response:
+            response.read()
+        with self.assertRaises(urllib.error.HTTPError) as rejected:
+            self._post(1025, field="max_completion_tokens")
+        self.assertEqual(rejected.exception.code, 400)
+        rejected.exception.close()
+        self.assertEqual(_FakeUpstreamHandler.calls, 1)
 
     def test_seventh_request_is_402_and_never_reaches_upstream(self):
         for _ in range(6):
