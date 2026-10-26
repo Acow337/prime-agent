@@ -1,0 +1,13 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "reasoning": "off",
+  "input_usd_per_million": 0.15,
+  "output_usd_per_million": 0.60,
+  "context_tokens": 1000000,
+  "response_tokens": 1024,
+  "max_provider_requests": 6,
+  "usd_to_cny": 8.0,
+  "hard_budget_cny": 10.0,
+  "task_timeout_seconds": 180
+}
