@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -431,7 +432,7 @@ def run_experiment(*, mode: str, binary: Path, workspace: Path) -> dict[str, Any
         commit = "unknown"
     summary = {
         "schema_version": 1,
-        "run_date": RESULT_STEM,
+        "run_date": date.today().isoformat(),
         "commit": commit,
         "mode": mode,
         "provider": manifest["provider"],

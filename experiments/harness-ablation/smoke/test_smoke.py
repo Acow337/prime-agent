@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 import urllib.request
 from contextlib import redirect_stdout
+from datetime import date
 from unittest import mock
 from pathlib import Path
 
@@ -487,7 +488,7 @@ class RunnerTests(unittest.TestCase):
             expected_digest = tasks.fixture_digest(root / "fresh-tasks")
         self.assertEqual(summary["mode"], "dry-run")
         self.assertRegex(summary["commit"], r"^[0-9a-f]{40}$")
-        self.assertEqual(summary["run_date"], run_smoke.RESULT_STEM)
+        self.assertEqual(summary["run_date"], date.today().isoformat())
         self.assertEqual(len(summary["tasks"]), 3)
         self.assertTrue(all(row["success"] for row in summary["tasks"]), summary)
         self.assertEqual(summary["fixture_digest"], expected_digest)
