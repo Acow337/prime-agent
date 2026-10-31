@@ -102,6 +102,37 @@ impl HarnessTreatment {
             ) => "r0-s0-m0",
         }
     }
+
+    /// Parse a stable factor ID (the inverse of [`HarnessTreatment::id`]).
+    ///
+    /// Returns `None` for any string outside the eight documented IDs, so an
+    /// experiment harness fails loudly instead of silently running the full
+    /// product.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        let mut parts = id.split('-');
+        let (repl, subagents, harness_state) = (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            repl: match repl {
+                "r1" => ReplPersistence::AcrossTurns,
+                "r0" => ReplPersistence::ResetAfterTurn,
+                _ => return None,
+            },
+            subagents: match subagents {
+                "s1" => SubagentAccess::Enabled,
+                "s0" => SubagentAccess::Disabled,
+                _ => return None,
+            },
+            harness_state: match harness_state {
+                "m1" => HarnessStateAccess::Enabled,
+                "m0" => HarnessStateAccess::Disabled,
+                _ => return None,
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -122,5 +153,39 @@ mod tests {
             harness_state: HarnessStateAccess::Disabled,
         };
         assert_eq!(treatment.id(), "r0-s0-m0");
+    }
+
+    #[test]
+    fn every_factor_id_round_trips_and_unknown_ids_are_rejected() {
+        for repl in [
+            ReplPersistence::AcrossTurns,
+            ReplPersistence::ResetAfterTurn,
+        ] {
+            for subagents in [SubagentAccess::Enabled, SubagentAccess::Disabled] {
+                for harness_state in [HarnessStateAccess::Enabled, HarnessStateAccess::Disabled] {
+                    let treatment = HarnessTreatment {
+                        repl,
+                        subagents,
+                        harness_state,
+                    };
+                    assert_eq!(
+                        HarnessTreatment::from_id(treatment.id()),
+                        Some(treatment),
+                        "{}",
+                        treatment.id()
+                    );
+                }
+            }
+        }
+        for invalid in [
+            "",
+            "r1-s1",
+            "r1-s1-m1-extra",
+            "r2-s1-m1",
+            "R1-S1-M1",
+            "r1-s1-m2",
+        ] {
+            assert_eq!(HarnessTreatment::from_id(invalid), None, "{invalid:?}");
+        }
     }
 }
