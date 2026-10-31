@@ -30,6 +30,7 @@ import run_smoke  # noqa: E402
 
 FAMILIES = {
     "i": "families.i_family",
+    "e": "families.e_family",
 }
 TREATMENTS = (
     "r1-s1-m1",
@@ -245,7 +246,12 @@ def run_matrix(
                     "task_id": case.task_id,
                 }
                 if mode == "dry-run":
-                    verification = module.verify(case, case.reference)
+                    dry_verify = getattr(module, "dry_run_verify", None)
+                    verification = (
+                        dry_verify(case)
+                        if dry_verify is not None
+                        else module.verify(case, case.reference)
+                    )
                     record.update(
                         {
                             "status": "completed",

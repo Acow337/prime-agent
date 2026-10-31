@@ -12,6 +12,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "families"))
 
+import e_family  # noqa: E402
 import i_family  # noqa: E402
 import runner  # noqa: E402
 
@@ -44,6 +45,21 @@ class IFamilyTests(unittest.TestCase):
             one = i_family.materialize(1, root)
             two = i_family.materialize(2, root)
         self.assertNotEqual(one.expected, two.expected)
+
+
+class EFamilyTests(unittest.TestCase):
+    def test_buggy_repo_fails_and_reference_fix_turns_it_green(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = e_family.materialize(1, Path(directory))
+            self.assertEqual(e_family.verify(case, "")["score"], 0.0)
+            self.assertTrue(e_family.dry_run_verify(case)["success"])
+
+    def test_instances_vary_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = (e_family.materialize(1, root).workdir / "config.py").read_text()
+            second = (e_family.materialize(4, root).workdir / "config.py").read_text()
+        self.assertNotEqual(first, second)
 
 
 class MatrixRunnerTests(unittest.TestCase):

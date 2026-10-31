@@ -41,6 +41,8 @@ treatment success rate and mean score plus total usage.
 
 - I-family: implemented (`families/i_family.py`), generated deterministically
   from an instance number.
-- E-family (multi-module bug fixing) and T-family (cross-episode transfer):
-  not implemented yet. The research design sizes them at 30 instances each for
-  the main experiment.
+- E-family: implemented (`families/e_family.py`) as a three-defect orders
+  repository scored by verifier-owned hidden tests (buggy 0/4, reference fix
+  4/4 on all five instances).
+- T-family (cross-episode transfer): not implemented yet. The research design
+  sizes each family at 30 instances for the main experiment.
