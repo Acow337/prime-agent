@@ -39,8 +39,9 @@ treatment success rate and mean score plus total usage.
 
 ## Status
 
-- I-family: implemented (`families/i_family.py`), generated deterministically
-  from an instance number.
+- I-family: implemented (`families/i_family.py`) as three joined tables
+  (orders, customers, refunds) with an authoritative-refunds contradiction rule,
+  a date window, and six checked fields.
 - E-family: implemented (`families/e_family.py`) as a three-defect orders
   repository scored by verifier-owned hidden tests (buggy 0/4, reference fix
   4/4 on all five instances).

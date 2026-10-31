@@ -22,10 +22,11 @@ class IFamilyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             left = i_family.materialize(1, Path(first))
             right = i_family.materialize(1, Path(second))
-            self.assertEqual(
-                (left.workdir / "events.csv").read_bytes(),
-                (right.workdir / "events.csv").read_bytes(),
-            )
+            for name in ("orders.csv", "customers.csv", "refunds.csv"):
+                self.assertEqual(
+                    (left.workdir / name).read_bytes(),
+                    (right.workdir / name).read_bytes(),
+                )
             self.assertEqual(left.expected, right.expected)
             self.assertTrue(i_family.verify(left, left.reference)["success"])
             self.assertEqual(i_family.verify(left, left.reference)["score"], 1.0)
@@ -34,10 +35,10 @@ class IFamilyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             case = i_family.materialize(2, Path(directory))
         self.assertEqual(i_family.verify(case, "not json")["score"], 0.0)
-        wrong = dict(case.expected, total_refunded_eur=case.expected["total_refunded_eur"] + 10)
+        wrong = dict(case.expected, revenue_cents=case.expected["revenue_cents"] + 10)
         result = i_family.verify(case, json.dumps(wrong))
         self.assertFalse(result["success"])
-        self.assertAlmostEqual(result["score"], 0.75)
+        self.assertAlmostEqual(result["score"], 5 / 6)
 
     def test_instances_differ(self):
         with tempfile.TemporaryDirectory() as directory:
