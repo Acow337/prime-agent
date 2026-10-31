@@ -1,14 +1,17 @@
 """E-family pilot tasks: fix a small multi-module repository.
 
-Each instance is a tiny orders package with three independent defects:
+Each instance is a tiny orders package with six independent defects:
 
-1. the CSV-ish parser treats a ``#`` comment line as an order,
+1. comment lines are parsed as orders,
 2. the discount helper truncates instead of rounding half up,
-3. the report drops customers whose net total is zero.
+3. the report drops customers whose net total is zero,
+4. duplicate order ids are kept instead of keeping the last occurrence,
+5. negative amounts and non-positive quantities are accepted,
+6. the report sorts by customer only instead of net descending.
 
-The public test exposes only the parser failure; hidden tests (verifier-owned,
-never left in the working tree) cover all three defects plus an end-to-end
-total. The score is the fraction of hidden test methods that pass.
+The public test exposes only the parser failure; verifier-owned hidden tests
+cover all six defects plus an end-to-end total. The score is the hidden-test
+pass ratio.
 """
 
 from __future__ import annotations
@@ -29,8 +32,9 @@ Line format (one order per line):
     order_id|sku|customer|unit_cents|qty
 
 - Blank lines and lines starting with `#` are comments and are skipped.
-- `unit_cents` and `qty` are positive integers.
-- Any other malformed line raises `ValueError`.
+- `unit_cents` must be >= 0 and `qty` must be >= 1; anything else raises
+  `ValueError`, as does a line that does not have exactly five fields.
+- When the same `order_id` appears more than once, the LAST occurrence wins.
 
 Rules:
 
@@ -46,9 +50,10 @@ Public helpers (do not rename):
 - `pricing.discounted_cents(total_cents, customer) -> int` (total after discount)
 - `pricing.tax_cents(discounted_cents) -> int`
 - `report.build_report(orders) -> list[dict]`
-- `report.build_report(orders)` returns one row per customer (including
-  customers whose net total is zero), sorted by customer name, with the keys
-  `customer`, `gross_cents`, `discount_cents`, `tax_cents`, `net_cents`.
+
+`report.build_report` returns one row per customer (including customers whose
+net total is zero), sorted by `net_cents` DESC and then `customer` ASC, with the
+keys `customer`, `gross_cents`, `discount_cents`, `tax_cents`, `net_cents`.
 """
 
 PARSER = '''"""Parse order lines."""
@@ -145,15 +150,22 @@ if __name__ == "__main__":
 HIDDEN_TESTS = '''import unittest
 
 import config
-from orders.parser import parse_orders
+from orders.parser import parse_line, parse_orders
 from orders.pricing import discounted_cents
 from orders.report import build_report
 
 
+def vip():
+    return sorted(config.VIP_CUSTOMERS)[0]
+
+
 def lines():
-    return "o1|sku|{vip}|105|1\\n# comment line\\n\\no2|sku|other|200|2\\n".format(
-        vip=sorted(config.VIP_CUSTOMERS)[0]
-    )
+    return (
+        "o1|sku|{vip}|105|1\\n"
+        "# comment line\\n"
+        "\\n"
+        "o2|sku|other|200|2\\n"
+    ).format(vip=vip())
 
 
 class OrdersHiddenTests(unittest.TestCase):
@@ -162,15 +174,27 @@ class OrdersHiddenTests(unittest.TestCase):
         self.assertEqual(len(orders), 2)
         self.assertEqual({order["order_id"] for order in orders}, {"o1", "o2"})
 
+    def test_duplicate_order_ids_keep_the_last_occurrence(self):
+        orders = parse_orders(
+            "o1|sku|acme|100|1\\no1|sku|acme|250|3\\n"
+        )
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["unit_cents"], 250)
+        self.assertEqual(orders[0]["qty"], 3)
+
+    def test_negative_amounts_and_bad_quantities_are_rejected(self):
+        for line in ("o1|sku|acme|-5|1", "o1|sku|acme|100|0", "o1|sku|acme|100|-2"):
+            with self.assertRaises(ValueError):
+                parse_line(line)
+
     def test_discount_rounds_half_up(self):
-        vip = sorted(config.VIP_CUSTOMERS)[0]
         amount = next(
             value
             for value in range(100, 400)
             if (value * (100 - config.DISCOUNT_PCT)) % 100 >= 50
         )
         expected = (amount * (100 - config.DISCOUNT_PCT) + 50) // 100
-        self.assertEqual(discounted_cents(amount, vip), expected)
+        self.assertEqual(discounted_cents(amount, vip()), expected)
 
     def test_report_keeps_zero_net_customers(self):
         rows = build_report(
@@ -180,14 +204,23 @@ class OrdersHiddenTests(unittest.TestCase):
         )
         self.assertEqual([row["customer"] for row in rows], ["zero"])
 
+    def test_report_sorts_by_net_descending_then_customer(self):
+        rows = build_report(
+            [
+                {"order_id": "a", "sku": "s", "customer": "alpha", "unit_cents": 100, "qty": 1},
+                {"order_id": "b", "sku": "s", "customer": "beta", "unit_cents": 300, "qty": 1},
+                {"order_id": "c", "sku": "s", "customer": "gamma", "unit_cents": 200, "qty": 1},
+            ]
+        )
+        self.assertEqual([row["customer"] for row in rows], ["beta", "gamma", "alpha"])
+
     def test_end_to_end_totals(self):
-        vip = sorted(config.VIP_CUSTOMERS)[0]
         rows = build_report(parse_orders(lines()))
         by_customer = {row["customer"]: row for row in rows}
         gross = 105 * 1
         discounted = (gross * (100 - config.DISCOUNT_PCT) + 50) // 100
         tax = (discounted * config.TAX_PCT + 50) // 100
-        self.assertEqual(by_customer[vip]["net_cents"], discounted + tax)
+        self.assertEqual(by_customer[vip()]["net_cents"], discounted + tax)
         other_gross = 200 * 2
         other_tax = (other_gross * config.TAX_PCT + 50) // 100
         self.assertEqual(by_customer["other"]["net_cents"], other_gross + other_tax)
@@ -196,8 +229,13 @@ class OrdersHiddenTests(unittest.TestCase):
 FIXES = (
     (
         "orders/parser.py",
-        "        if not line.strip():\n            continue\n",
-        "        if not line.strip() or line.lstrip().startswith(\"#\"):\n            continue\n",
+        '    return {\n        "order_id": parts[0],\n        "sku": parts[1],\n        "customer": parts[2],\n        "unit_cents": int(parts[3]),\n        "qty": int(parts[4]),\n    }\n',
+        '    unit_cents = int(parts[3])\n    qty = int(parts[4])\n    if unit_cents < 0 or qty < 1:\n        raise ValueError(f"invalid amount or quantity: {line!r}")\n    return {\n        "order_id": parts[0],\n        "sku": parts[1],\n        "customer": parts[2],\n        "unit_cents": unit_cents,\n        "qty": qty,\n    }\n',
+    ),
+    (
+        "orders/parser.py",
+        'def parse_orders(text):\n    orders = []\n    for line in text.splitlines():\n        if not line.strip():\n            continue\n        orders.append(parse_line(line))\n    return orders\n',
+        'def parse_orders(text):\n    orders = {}\n    for line in text.splitlines():\n        if not line.strip() or line.lstrip().startswith("#"):\n            continue\n        order = parse_line(line)\n        orders[order["order_id"]] = order\n    return list(orders.values())\n',
     ),
     (
         "orders/pricing.py",
@@ -211,8 +249,8 @@ FIXES = (
     ),
     (
         "orders/report.py",
-        "    return [\n        row\n        for row in sorted(rows.values(), key=lambda item: item[\"customer\"])\n        if row[\"net_cents\"] != 0\n    ]\n",
-        "    return sorted(rows.values(), key=lambda item: item[\"customer\"])\n",
+        '    return [\n        row\n        for row in sorted(rows.values(), key=lambda item: item["customer"])\n        if row["net_cents"] != 0\n    ]\n',
+        '    return sorted(\n        rows.values(), key=lambda item: (-item["net_cents"], item["customer"])\n    )\n',
     ),
 )
 
@@ -233,8 +271,7 @@ def materialize(instance: int, root: Path) -> Case:
     workdir = root / task_id
     if workdir.exists():
         shutil.rmtree(workdir)
-    for directory in ("orders",):
-        (workdir / directory).mkdir(parents=True)
+    (workdir / "orders").mkdir(parents=True)
     vip = VIP_POOL[instance % len(VIP_POOL)]
     config_source = (
         f'"""Instance configuration."""\n\n'
@@ -297,7 +334,7 @@ def _run_hidden(workdir: Path) -> tuple[int, int]:
     failures = len(re.findall(r"\.\.\. (?:FAIL|ERROR)$", output, re.M))
     total = passes + failures
     if completed.returncode != 0 and total == 0:
-        return 0, 4
+        return 0, 7
     return passes, total
 
 
