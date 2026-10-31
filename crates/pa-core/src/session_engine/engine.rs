@@ -111,6 +111,9 @@ pub struct SessionEngine {
     pub prompt_templates: Vec<PromptTemplate>,
     pub agents_files: Vec<crate::resources::ContextFile>,
     pub system_prompt: String,
+    /// The resolved `R/S/M` treatment this session runs under; the
+    /// experiment runner records it without re-reading configuration.
+    pub harness_treatment: super::treatment::HarnessTreatment,
     /// The same instance the kernel `goal.*` host handlers reach, so `/goal`
     /// and `goal.complete()` observe one state machine.
     pub goal_driver: std::sync::Arc<tokio::sync::Mutex<super::goal_driver::GoalDriver>>,
@@ -188,7 +191,27 @@ fn mcp_gating_blocking(
 ///
 /// Panics if the MCP manager mutex is poisoned while wiring telemetry
 /// reporting.
-pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
+pub async fn create_session(config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
+    create_session_inner(config, super::treatment::HarnessTreatment::FULL).await
+}
+
+/// Assemble a session with an explicit Harness treatment for a controlled
+/// evaluation run.
+///
+/// # Errors
+///
+/// Returns an error for the same reasons as [`create_session`].
+pub async fn create_session_with_treatment(
+    config: SessionEngineConfig,
+    harness_treatment: super::treatment::HarnessTreatment,
+) -> anyhow::Result<SessionEngine> {
+    create_session_inner(config, harness_treatment).await
+}
+
+async fn create_session_inner(
+    mut config: SessionEngineConfig,
+    harness_treatment: super::treatment::HarnessTreatment,
+) -> anyhow::Result<SessionEngine> {
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
     // context both come from the session manager.
@@ -869,6 +892,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         prompt_templates: resources.prompts,
         agents_files: resources.agents_files,
         system_prompt,
+        harness_treatment,
         goal_driver,
         queued_goal_context_purge: config.queued_goal_context_purge.clone(),
         mcp_manager,
