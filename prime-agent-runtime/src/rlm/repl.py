@@ -1299,6 +1299,24 @@ async def _handle_list_names(req: dict[str, Any], ns: dict[str, Any]) -> None:
     _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
 
 
+def _reset_namespace(ns: dict[str, Any]) -> list[str]:
+    """Drop user bindings while preserving the runtime bridge and builtins."""
+    preserved = _ALWAYS_SKIP | {"__builtins__"}
+    cleared = sorted(
+        name
+        for name in ns
+        if isinstance(name, str) and not name.startswith("__") and name not in preserved
+    )
+    for name in cleared:
+        ns.pop(name, None)
+    return cleared
+
+
+async def _handle_reset_namespace(req: dict[str, Any], ns: dict[str, Any]) -> None:
+    cleared = _reset_namespace(ns)
+    _send({"event": "done", "id": req["id"], "status": "ok", "cleared": cleared})
+
+
 async def _handle_mcp_status(req: dict[str, Any], ns: dict[str, Any]) -> None:
     from . import mcp as mcp_mod
 
@@ -1414,6 +1432,8 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             await _handle_request(_handle_state, req, ns)
         elif rtype == "list_names":
             await _handle_request(_handle_list_names, req, ns)
+        elif rtype == "reset_namespace":
+            await _handle_request(_handle_reset_namespace, req, ns)
         elif rtype == "mcp_status":
             # The dedicated lane (see `_spawn_mcp_status_lane`): status/open
             # work never occupies the execution queue.
@@ -1471,6 +1491,7 @@ _REQUIRED_FIELDS = {
     "snapshot": ("id", "path", "manifest_path"),
     "restore": ("id", "path"),
     "list_names": ("id",),
+    "reset_namespace": ("id",),
     # mcp_status's server list is a JSON array, so only its id is a
     # string-required field; the handler validates the list itself.
     "mcp_status": ("id",),

@@ -38,6 +38,7 @@ pub enum Request {
         max_variable_bytes: u64,
     },
     ListNames,
+    ResetNamespace,
     McpStatus {
         servers: Vec<String>,
         timeout_ms: u64,
@@ -55,6 +56,7 @@ impl Request {
             Request::Snapshot { .. } => "snapshot",
             Request::Restore { .. } => "restore",
             Request::ListNames => "list_names",
+            Request::ResetNamespace => "reset_namespace",
             Request::McpStatus { .. } => "mcp_status",
             Request::Shutdown => "shutdown",
         }
@@ -91,6 +93,7 @@ impl Request {
                 "max_variable_bytes": max_variable_bytes,
             }),
             Request::ListNames => json!({ "type": "list_names" }),
+            Request::ResetNamespace => json!({ "type": "reset_namespace" }),
             Request::McpStatus {
                 servers,
                 timeout_ms,
@@ -336,6 +339,12 @@ mod tests {
         let v = req.to_json();
         assert_eq!(v["type"], "snapshot");
         assert_eq!(v["prune_oversized"], true);
+
+        assert_eq!(
+            Request::ResetNamespace.to_json(),
+            json!({ "type": "reset_namespace" })
+        );
+        assert_eq!(Request::ResetNamespace.type_name(), "reset_namespace");
     }
 
     #[test]

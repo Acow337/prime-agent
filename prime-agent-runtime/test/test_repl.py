@@ -1568,6 +1568,24 @@ class ReplTest(unittest.TestCase):
         self.assertNotIn("rlm", done["names"])
         self.assertEqual(done["names"], sorted(done["names"]))
 
+    def test_reset_namespace_clears_user_values_and_preserves_runtime_bindings(self):
+        created = self.repl.execute(
+            "reset-1",
+            "import rlm\nimport math\npublic_value = 7\n_private_value = 9",
+        )
+        self.assertEqual(one(created, "done")["status"], "ok")
+
+        self.repl.send({"type": "reset_namespace", "id": "reset-2"})
+        done = one(self.repl.until_done("reset-2"), "done")
+        self.assertEqual(done["status"], "ok")
+        self.assertEqual(done["cleared"], ["_private_value", "math", "public_value"])
+
+        probe = self.repl.execute(
+            "reset-3",
+            "('public_value' in globals(), '_private_value' in globals(), 'rlm' in globals())",
+        )
+        self.assertEqual(one(probe, "result")["text"], "(False, False, True)")
+
     def test_mcp_status_without_servers(self):
         self.repl.send({"type": "mcp_status", "id": "ms1", "servers": []})
         done = one(self.repl.until_done("ms1"), "done")
