@@ -1,0 +1,102 @@
+{
+  "commit": "fb0100b00b7bea1d429f7fd00244ff18c66438bb",
+  "config_sha256": "0828bbd1e9e0cfdfc6ce612aa64af10587c44ad54d331b5eb47a7a18dee14dd6",
+  "families": {
+    "e": "59272a11eb5074ef7901fac18d27d24b0a31beb9a616d8b9666259d57248ad2f",
+    "i": "f6911f7ab326e2b91f9ba3e7028332309ef3aace2fa90fc291dc8de4022d2a1e",
+    "t": "e29a471ec38b22d2094e3f9e95590e950854678a0dbba06a5e2df5cd32000548"
+  },
+  "frozen_at": "2026-10-31T14:34:14+00:00",
+  "instances": {
+    "e-01": "e98fb8a5851ede4b6839c8b19001d879e5ca12ea6c87cc12bc2655550fc6a3d8",
+    "e-02": "259bbaf2936de9a243d3b25d8b2e5b65894cbb1d55d268f98e408241756e18c8",
+    "e-03": "e81cc5ccb1285de8522784ed6e8646a97705477121989449750df3b58be6a232",
+    "e-04": "31310b0e1c495e884f0d050aaa11fc3bacb9b16a9164e2868ca5e8d3d77e6855",
+    "e-05": "c2331d88a0a8f76fc7a292ede0414aa771f624891d7aa2cb5e886d7f386815f1",
+    "i-01": "a332321d48f64c850f97c8b63728a65dc4118a72b8b8025a529918858c73702c",
+    "i-02": "370e386b682957fdbd789c0fc7b42c1c431e61333cf1e9b2628bc52efa8f6abf",
+    "i-03": "8607ac568af1a7462b50dabcdf4419e45cb502ad3b52d5b43a0a5a691d52f0c1",
+    "i-04": "616f91be2e0d5a24565e78fd95ceca0796925e3bda4b2c9af11d74a758fb9c21",
+    "i-05": "48ed28eb49c72e6492a2be4d7ea28190774e625fdd1151f249f120bdd5d22810",
+    "t-01": "9bb3da705cd3c5b5dfe1caed27a5cec784769f8aa934d3a7387c01837b1cf77a",
+    "t-02": "bab3ddd324a62d3a5a7b7696a75e4ad67bb6a102fab33c15d2782421b6307894",
+    "t-03": "43759abb70e93e5905ba7524230738e026bd288928914a2afb1f16090de60f9b",
+    "t-04": "63286499e447a2cea37ed2cd481f1bf8016dea69dd7f3ccf754bbdc326de4c9c",
+    "t-05": "8e82d08cc2580538e761203a216aba7bc01927d645511d3dcf768db761222169"
+  },
+  "limits": {
+    "hard_budget_cny": 3000.0,
+    "max_requests_per_run": 40,
+    "max_total_requests": 2400,
+    "task_timeout_seconds": 360
+  },
+  "models": {
+    "cheap": "deepseek-v4-flash"
+  },
+  "pilot": {
+    "counts": {
+      "completed": 119,
+      "failed": 1,
+      "total": 120
+    },
+    "results_dir": "experiments/harness-ablation/runner/results/pilot-120",
+    "treatments": {
+      "r0-s0-m0": {
+        "mean_score": 0.93,
+        "runs": 15,
+        "success_rate": 0.8
+      },
+      "r0-s0-m1": {
+        "mean_score": 1.0,
+        "runs": 14,
+        "success_rate": 1.0
+      },
+      "r0-s1-m0": {
+        "mean_score": 0.9567,
+        "runs": 15,
+        "success_rate": 0.8667
+      },
+      "r0-s1-m1": {
+        "mean_score": 0.9767,
+        "runs": 15,
+        "success_rate": 0.9333
+      },
+      "r1-s0-m0": {
+        "mean_score": 0.89,
+        "runs": 15,
+        "success_rate": 0.7333
+      },
+      "r1-s0-m1": {
+        "mean_score": 1.0,
+        "runs": 15,
+        "success_rate": 1.0
+      },
+      "r1-s1-m0": {
+        "mean_score": 0.94,
+        "runs": 15,
+        "success_rate": 0.8
+      },
+      "r1-s1-m1": {
+        "mean_score": 1.0,
+        "runs": 15,
+        "success_rate": 1.0
+      }
+    },
+    "usage": {
+      "actual_cost_cny": 26.131954,
+      "completion_tokens": 443027,
+      "prompt_tokens": 20004516
+    }
+  },
+  "runner_sha256": "9af58a2c22a7a9021f9bcc06eae1a25ebe32ce83ba81e216e6ff7856ecd3c60d",
+  "treatments": [
+    "r1-s1-m1",
+    "r1-s1-m0",
+    "r1-s0-m1",
+    "r1-s0-m0",
+    "r0-s1-m1",
+    "r0-s1-m0",
+    "r0-s0-m1",
+    "r0-s0-m0"
+  ]
+}

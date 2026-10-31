@@ -52,3 +52,24 @@ treatment success rate and mean score plus total usage.
   directory across the series, M-off cells get a fresh one per episode, and
   every record reports `harness_state_bytes` so a silent no-op is visible.
 - The research design sizes each family at 30 instances for the main experiment.
+
+## Pilot result (2026-10-31)
+
+120 cells (3 families x 5 instances x 8 treatments), cheap model, ¥26.13 total,
+20.0M prompt tokens. 119 completed, one E-family timeout.
+
+| family | success | mean score |
+| --- | ---: | ---: |
+| I (multi-table) | 40/40 | 1.00 |
+| E (six defects) | 39/40 | 0.98 |
+| T (transfer) | 27/40 | 0.89 |
+
+The T-family carries the treatment signal: every M-on cell wrote harness state
+(2.6-3.1 KB) and scored 1.0 except one 4/5, while M-off cells scored 1/5, 2/5,
+2/5 and 3/5 (19/20 vs 8/20, Fisher p ~ 0.0004). I is at ceiling; E is near it.
+The full-product treatment was both the most accurate (15/15) and the cheapest
+(¥1.87 for its 15 cells).
+
+`frozen-pilot.json` pins the protocol for the main run: config hash, runner and
+family-module hashes, one digest per materialized instance. Note the pilot ran
+with the earlier 240 s task timeout; the frozen config uses 360 s.

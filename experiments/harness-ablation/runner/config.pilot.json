@@ -13,7 +13,7 @@
   "max_total_requests": 2400,
   "max_requests_per_run": 40,
   "max_transport_retries": 2,
-  "task_timeout_seconds": 240,
+  "task_timeout_seconds": 360,
   "families": {
     "i": [
       1,

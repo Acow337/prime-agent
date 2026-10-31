@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import json
 import threading
@@ -326,7 +327,13 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         capture = _SseUsageCapture()
         while True:
-            chunk = response.read(64 * 1024)
+            try:
+                chunk = response.read(64 * 1024)
+            except http.client.HTTPException:
+                # A truncated chunked body is an upstream transport failure;
+                # record it instead of letting the handler thread crash.
+                self.proxy_server.ledger.record_error("upstream_incomplete")
+                break
             if not chunk:
                 break
             self.wfile.write(chunk)
