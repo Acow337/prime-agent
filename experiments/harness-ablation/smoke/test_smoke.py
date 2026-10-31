@@ -118,6 +118,21 @@ class BudgetPolicyTests(unittest.TestCase):
             {"t1-structured": 6, "t2-log-correlation": 1},
         )
 
+    def test_begin_task_quota_override_bounds_one_experiment_run(self):
+        policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
+        ledger = budget_proxy.UsageLedger(policy)
+        ledger.begin_task("run-1", quota=2)
+        ledger.admit({"max_tokens": 1024})
+        ledger.admit({"max_tokens": 1024})
+        with self.assertRaises(budget_proxy.BudgetExceeded) as rejected:
+            ledger.admit({"max_tokens": 1024})
+        self.assertEqual(rejected.exception.category, "task_request_limit")
+        ledger.begin_task("run-2", quota=2)
+        ledger.admit({"max_tokens": 1024})
+        self.assertEqual(
+            ledger.summary()["task_request_counts"], {"run-1": 2, "run-2": 1}
+        )
+
     def test_transport_retries_are_bounded_and_costed(self):
         policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
         ledger = budget_proxy.UsageLedger(policy)

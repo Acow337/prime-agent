@@ -78,12 +78,14 @@ class UsageLedger:
         self._error_categories: dict[str, int] = {}
         self._current_task: str | None = None
         self._task_request_counts: dict[str, int] = {}
+        self._task_quota_override: int | None = None
         self._transport_retries = 0
 
-    def begin_task(self, task_id: str) -> None:
-        """Scope admissions to one task so its own quota bounds it."""
+    def begin_task(self, task_id: str, *, quota: int | None = None) -> None:
+        """Scope admissions to one task, optionally with a run-specific quota."""
         with self._lock:
             self._current_task = task_id
+            self._task_quota_override = quota
 
     def admit(self, payload: Mapping[str, Any]) -> None:
         token_fields = [
@@ -105,7 +107,11 @@ class UsageLedger:
             task_used = 0
             if self._current_task is not None:
                 task_used = self._task_request_counts.get(self._current_task, 0)
-                task_quota = self._policy.task_request_quota.get(self._current_task)
+                task_quota = (
+                    self._task_quota_override
+                    if self._task_quota_override is not None
+                    else self._policy.task_request_quota.get(self._current_task)
+                )
                 if task_quota is not None and task_used >= task_quota:
                     self._reject("task_request_limit", 402)
             projected_cost = (
