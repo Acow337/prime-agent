@@ -292,7 +292,8 @@ def run_matrix(
                     continue
                 if ledger is not None:
                     summary = ledger.summary()
-                    if summary["conservative_cost_cny"] >= config["hard_budget_cny"]:
+                    next_worst = budget_policy(config).worst_case_request_cny()
+                    if summary["actual_cost_cny"] + next_worst > config["hard_budget_cny"]:
                         record["status"] = "budget_stop"
                         records.append(record)
                         append_record(records_path, record)

@@ -115,14 +115,24 @@ class UsageLedger:
                 )
                 if task_quota is not None and task_used >= task_quota:
                     self._reject("task_request_limit", 402)
+            # The design's gate is settled actual cost plus the next request's
+            # worst case, not the cumulative worst case: a pessimistic bound on
+            # every past request would stop long runs far below the real cap.
             projected_cost = (
-                self._request_count + self._transport_retries + 1
-            ) * self._policy.worst_case_request_cny()
+                self._actual_cost_cny_locked() + self._policy.worst_case_request_cny()
+            )
             if projected_cost > self._policy.hard_budget_cny:
                 self._reject("budget_limit", 402)
             self._request_count += 1
             if self._current_task is not None:
                 self._task_request_counts[self._current_task] = task_used + 1
+
+    def _actual_cost_cny_locked(self) -> float:
+        usd = (
+            self._prompt_tokens * self._policy.input_usd_per_million
+            + self._completion_tokens * self._policy.output_usd_per_million
+        ) / 1_000_000
+        return usd * self._policy.usd_to_cny
 
     def record_transport_retry(self) -> None:
         """Count one re-sent request whose first attempt never answered."""

@@ -79,7 +79,7 @@ class TFamilyTests(unittest.TestCase):
         for index, episode in enumerate(case.episodes):
             self.assertTrue(t_family.verify_episode(case, index, episode.reference)["success"])
         self.assertTrue(t_family.dry_run_verify(case)["success"])
-        wrong = {"incidents": {}}
+        wrong = {"items": {}}
         self.assertEqual(t_family.verify_episode(case, 1, json.dumps(wrong))["score"], 0.0)
 
     def test_episode_three_uses_the_changed_threshold(self):
@@ -87,8 +87,8 @@ class TFamilyTests(unittest.TestCase):
             case = t_family.materialize(1, Path(directory))
         import json as _json
 
-        old = _json.loads(case.episodes[1].reference)["incidents"]
-        new = _json.loads(case.episodes[2].reference)["incidents"]
+        old = _json.loads(case.episodes[1].reference)["items"]
+        new = _json.loads(case.episodes[2].reference)["items"]
         self.assertNotEqual(old, new)
 
 
