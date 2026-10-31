@@ -842,6 +842,43 @@ impl ReplKernelManager {
         }
     }
 
+    /// Clear user-defined namespace values while preserving runtime bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the kernel is not running or the reset request fails.
+    pub async fn reset_namespace(&self) -> anyhow::Result<Vec<String>> {
+        if !self.is_running() {
+            anyhow::bail!("Kernel is not running");
+        }
+        let result = self
+            .enqueue_request(
+                Request::ResetNamespace,
+                ExecuteOptions {
+                    internal: true,
+                    ..ExecuteOptions::default()
+                },
+                None,
+            )
+            .await?;
+        if result.result.status != ExecuteStatus::Ok {
+            anyhow::bail!(
+                "namespace reset failed: {}",
+                describe_failure(&result.result)
+            );
+        }
+        Ok(result
+            .done_fields
+            .as_ref()
+            .and_then(|fields| fields.get("cleared"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect())
+    }
+
     /// Per-server MCP tool listing (the runtime `mcp_status` request): one entry per requested
     /// server or the error string when that server failed or timed out. `None` when the kernel
     /// isn't running.

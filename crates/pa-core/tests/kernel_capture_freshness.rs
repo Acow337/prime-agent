@@ -636,3 +636,43 @@ async fn concurrent_settles_keep_the_boundary_invariant() {
     );
     revived.kill();
 }
+
+#[tokio::test]
+async fn namespace_reset_clears_values_and_invalidates_snapshot_freshness() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let manifest_path = manifest_path_in(dir.path());
+    let Some(options) = test_options(Some(dir.path())) else {
+        return;
+    };
+    let manager = ReplKernelManager::new(options);
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+
+    let defined = execute(&manager, "value_kept_only_before_reset = 41").await;
+    assert_eq!(defined.status, ExecuteStatus::Ok);
+    let committed = manager.snapshot_state().await.expect("initial snapshot");
+    assert!(committed
+        .saved
+        .iter()
+        .any(|name| name == "value_kept_only_before_reset"));
+    let committed_manifest = file_bytes(&manifest_path);
+
+    let cleared = manager.reset_namespace().await.expect("reset namespace");
+    assert!(cleared.contains(&"value_kept_only_before_reset".to_string()));
+    let names = manager.list_namespace_names(None).await.expect("names");
+    assert!(!names.contains(&"value_kept_only_before_reset".to_string()));
+
+    let post_reset = manager.snapshot_state().await.expect("post-reset snapshot");
+    assert!(!post_reset
+        .saved
+        .iter()
+        .any(|name| name == "value_kept_only_before_reset"));
+    assert_ne!(
+        file_bytes(&manifest_path),
+        committed_manifest,
+        "reset must invalidate the fresh-capture memo"
+    );
+    manager.kill();
+}

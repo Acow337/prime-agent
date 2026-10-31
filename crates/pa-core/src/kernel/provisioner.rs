@@ -521,6 +521,15 @@ impl IpythonKernelProvisioner {
         manager.list_namespace_names(signal).await
     }
 
+    /// Ensure the kernel is live, then clear its user namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a startup or reset protocol error.
+    pub async fn reset_namespace(&self) -> anyhow::Result<Vec<String>> {
+        self.ensure(None, None).await?.reset_namespace().await
+    }
+
     /// Stop the owned kernel without marking the provisioner disposed (TS
     /// #2483's `stopKernel`): the shutdown flushes the final snapshot, and
     /// the next `ensure()` boots a fresh kernel gated on this stop (the

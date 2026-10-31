@@ -176,9 +176,14 @@ impl ReplKernelManager {
             g.active_execution = None; // reset below with the execution in hand
         }
         let (namespace_code, restores_namespace) = match &request {
-            Request::Execute { .. } => (true, false),
+            Request::Execute { .. } | Request::ResetNamespace => (true, false),
             Request::Restore { .. } => (false, true),
-            _ => (false, false),
+            Request::Interrupt
+            | Request::HostReply { .. }
+            | Request::Snapshot { .. }
+            | Request::ListNames
+            | Request::McpStatus { .. }
+            | Request::Shutdown => (false, false),
         };
         let execution = Arc::new(ActiveExecution {
             request_id: request_id.clone(),
