@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -233,7 +234,33 @@ def run_cases(
     )
     results = []
     for case in cases:
+        if ledger is not None:
+            ledger.begin_task(case.task_id)
         ledger_before = ledger.summary() if ledger is not None else None
+        started_at = time.monotonic()
+
+        def task_row(status: str, **fields: Any) -> dict[str, Any]:
+            """One task record with its own usage delta and latency."""
+            row: dict[str, Any] = {"task_id": case.task_id, "status": status, **fields}
+            row["latency_seconds"] = round(time.monotonic() - started_at, 3)
+            if ledger is not None and ledger_before is not None:
+                after = ledger.summary()
+                row["usage"] = {
+                    "request_count": after["request_count"]
+                    - ledger_before["request_count"],
+                    "prompt_tokens": after["prompt_tokens"]
+                    - ledger_before["prompt_tokens"],
+                    "completion_tokens": after["completion_tokens"]
+                    - ledger_before["completion_tokens"],
+                    "actual_cost_usd": round(
+                        after["actual_cost_usd"] - ledger_before["actual_cost_usd"], 12
+                    ),
+                    "actual_cost_cny": round(
+                        after["actual_cost_cny"] - ledger_before["actual_cost_cny"], 12
+                    ),
+                }
+            return row
+
         task_root = runtime_root / case.task_id
         env = isolated_env(task_root, api_key if mode == "live" else None)
         if mode == "live":
@@ -304,7 +331,7 @@ def run_cases(
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            results.append({"task_id": case.task_id, "status": "timeout"})
+            results.append(task_row("timeout"))
             break
 
         combined = completed.stdout + completed.stderr
@@ -313,7 +340,7 @@ def run_cases(
             if api_key and api_key in combined:
                 raise SecretDetected("exact credential value refused")
         except SecretDetected:
-            results.append({"task_id": case.task_id, "status": "secret_rejected"})
+            results.append(task_row("secret_rejected"))
             break
         if ledger is not None and ledger_before is not None:
             ledger_after = ledger.summary()
@@ -331,6 +358,7 @@ def run_cases(
                 ("upstream_http_402", "balance_or_budget_error"),
                 ("upstream_http_429", "rate_limit_error"),
                 ("request_limit", "proxy_rejected"),
+                ("task_request_limit", "proxy_rejected"),
                 ("budget_limit", "proxy_rejected"),
                 ("response_token_limit", "proxy_rejected"),
                 ("upstream_connection", "upstream_error"),
@@ -340,28 +368,16 @@ def run_cases(
                 "proxy_error" if new_errors else None,
             )
             if stop_status is not None:
-                results.append({"task_id": case.task_id, "status": stop_status})
+                results.append(task_row(stop_status))
                 break
         if completed.returncode != 0:
-            results.append(
-                {
-                    "task_id": case.task_id,
-                    "status": "process_error",
-                    "exit_code": completed.returncode,
-                }
-            )
+            results.append(task_row("process_error", exit_code=completed.returncode))
             break
 
         verification = _sanitized_verification(
             tasks.verify(case, _assistant_text(completed.stdout))
         )
-        results.append(
-            {
-                "task_id": case.task_id,
-                "status": "completed",
-                **verification,
-            }
-        )
+        results.append(task_row("completed", **verification))
     assert_secret_free(results)
     return results
 
@@ -479,11 +495,19 @@ def main(argv: list[str] | None = None) -> int:
         summary_path = results_dir / f"{RESULT_STEM}-summary.json"
         report_path = results_dir / f"{RESULT_STEM}-report.md"
         summary_path.write_text(safe_json_dumps(summary), encoding="utf-8")
-        task_rows = "\n".join(
-            f"- `{row['task_id']}`: status `{row['status']}`, "
-            f"score `{row.get('score', 0.0)}`, success `{row.get('success', False)}`"
-            for row in summary["tasks"]
-        )
+        def describe_row(row: Mapping[str, Any]) -> str:
+            line = (
+                f"- `{row['task_id']}`: status `{row['status']}`, "
+                f"score `{row.get('score', 0.0)}`, success `{row.get('success', False)}`"
+            )
+            usage = row.get("usage")
+            if usage:
+                line += f", requests `{usage['request_count']}`"
+            if row.get("latency_seconds") is not None:
+                line += f", latency `{row['latency_seconds']}s`"
+            return line
+
+        task_rows = "\n".join(describe_row(row) for row in summary["tasks"])
         usage = summary["usage"]
         report = (
             "# DeepSeek baseline smoke report\n\n"

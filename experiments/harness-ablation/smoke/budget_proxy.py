@@ -5,10 +5,13 @@ from __future__ import annotations
 import http.server
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+DEFAULT_MAX_TRANSPORT_RETRIES = 2
 
 
 class BudgetExceeded(RuntimeError):
@@ -27,17 +30,31 @@ class BudgetPolicy:
     context_tokens: int
     response_tokens: int
     max_provider_requests: int
+    task_request_quota: Mapping[str, int]
+    max_transport_retries: int
     usd_to_cny: float
     hard_budget_cny: float
 
     @classmethod
     def from_manifest(cls, manifest: Mapping[str, Any]) -> "BudgetPolicy":
+        quota = manifest.get("task_request_quota") or {}
+        if not isinstance(quota, Mapping):
+            raise ValueError("task_request_quota must be a mapping of task id to limit")
+        parsed_quota: dict[str, int] = {}
+        for task_id, limit in quota.items():
+            if not isinstance(task_id, str) or isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError("task_request_quota values must be positive integers")
+            parsed_quota[task_id] = limit
         return cls(
             input_usd_per_million=float(manifest["input_usd_per_million"]),
             output_usd_per_million=float(manifest["output_usd_per_million"]),
             context_tokens=int(manifest["context_tokens"]),
             response_tokens=int(manifest["response_tokens"]),
             max_provider_requests=int(manifest["max_provider_requests"]),
+            task_request_quota=parsed_quota,
+            max_transport_retries=int(
+                manifest.get("max_transport_retries", DEFAULT_MAX_TRANSPORT_RETRIES)
+            ),
             usd_to_cny=float(manifest["usd_to_cny"]),
             hard_budget_cny=float(manifest["hard_budget_cny"]),
         )
@@ -59,6 +76,14 @@ class UsageLedger:
         self._completion_tokens = 0
         self._rejection_count = 0
         self._error_categories: dict[str, int] = {}
+        self._current_task: str | None = None
+        self._task_request_counts: dict[str, int] = {}
+        self._transport_retries = 0
+
+    def begin_task(self, task_id: str) -> None:
+        """Scope admissions to one task so its own quota bounds it."""
+        with self._lock:
+            self._current_task = task_id
 
     def admit(self, payload: Mapping[str, Any]) -> None:
         token_fields = [
@@ -77,12 +102,25 @@ class UsageLedger:
                 self._reject("response_token_limit", 400)
             if self._request_count >= self._policy.max_provider_requests:
                 self._reject("request_limit", 402)
+            task_used = 0
+            if self._current_task is not None:
+                task_used = self._task_request_counts.get(self._current_task, 0)
+                task_quota = self._policy.task_request_quota.get(self._current_task)
+                if task_quota is not None and task_used >= task_quota:
+                    self._reject("task_request_limit", 402)
             projected_cost = (
-                self._request_count + 1
+                self._request_count + self._transport_retries + 1
             ) * self._policy.worst_case_request_cny()
             if projected_cost > self._policy.hard_budget_cny:
                 self._reject("budget_limit", 402)
             self._request_count += 1
+            if self._current_task is not None:
+                self._task_request_counts[self._current_task] = task_used + 1
+
+    def record_transport_retry(self) -> None:
+        """Count one re-sent request whose first attempt never answered."""
+        with self._lock:
+            self._transport_retries += 1
 
     def _reject(self, category: str, status: int) -> None:
         self._rejection_count += 1
@@ -121,9 +159,13 @@ class UsageLedger:
                     actual_cost_usd * self._policy.usd_to_cny, 12
                 ),
                 "conservative_cost_cny": round(
-                    self._request_count * self._policy.worst_case_request_cny(), 12
+                    (self._request_count + self._transport_retries)
+                    * self._policy.worst_case_request_cny(),
+                    12,
                 ),
                 "rejection_count": self._rejection_count,
+                "transport_retries": self._transport_retries,
+                "task_request_counts": dict(sorted(self._task_request_counts.items())),
                 "error_categories": dict(sorted(self._error_categories.items())),
             }
 
@@ -165,6 +207,36 @@ class _SseUsageCapture:
             return
         if isinstance(event, dict) and isinstance(event.get("usage"), dict):
             self.usage = event["usage"]
+
+
+def open_upstream(
+    ledger: UsageLedger,
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    max_retries: int,
+    opener: Any = urllib.request.urlopen,
+    sleep: Any = time.sleep,
+) -> Any:
+    """Open the upstream request, re-sending only transport-level failures.
+
+    An HTTP error is a provider answer and is never retried here. A connect or
+    read failure that produced no response is retried a bounded number of
+    times; each re-send is charged to the conservative cost bound so a lost
+    first response cannot silently double the spend.
+    """
+    attempt = 0
+    while True:
+        try:
+            return opener(request, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except (OSError, urllib.error.URLError):
+            if attempt >= max_retries:
+                raise
+            ledger.record_transport_retry()
+            attempt += 1
+            sleep(0.5 * attempt)
 
 
 class _ProxyServer(http.server.ThreadingHTTPServer):
@@ -223,7 +295,13 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
+            response = open_upstream(
+                self.proxy_server.ledger,
+                request,
+                timeout=180,
+                max_retries=self.proxy_server.policy.max_transport_retries,
+            )
+            with response:
                 self._forward(response)
         except urllib.error.HTTPError as error:
             category = f"upstream_http_{error.code}"

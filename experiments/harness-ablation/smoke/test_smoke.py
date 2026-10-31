@@ -67,6 +67,11 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["max_provider_requests"], 30)
         self.assertEqual(manifest["response_tokens"], 1024)
         self.assertEqual(manifest["hard_budget_cny"], 40.0)
+        self.assertEqual(
+            manifest["task_request_quota"],
+            {"t1-structured": 6, "t2-log-correlation": 6, "t3-parser-fix": 12},
+        )
+        self.assertEqual(manifest["max_transport_retries"], 2)
 
 
 class BudgetPolicyTests(unittest.TestCase):
@@ -96,6 +101,93 @@ class BudgetPolicyTests(unittest.TestCase):
         summary = ledger.summary()
         self.assertAlmostEqual(summary["actual_cost_usd"], 0.1506)
         self.assertAlmostEqual(summary["actual_cost_cny"], 1.2048)
+
+    def test_task_quota_bounds_one_task_and_resets_per_task(self):
+        policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
+        ledger = budget_proxy.UsageLedger(policy)
+        ledger.begin_task("t1-structured")
+        for _ in range(6):
+            ledger.admit({"max_tokens": 1024})
+        with self.assertRaises(budget_proxy.BudgetExceeded) as rejected:
+            ledger.admit({"max_tokens": 1024})
+        self.assertEqual(rejected.exception.category, "task_request_limit")
+        ledger.begin_task("t2-log-correlation")
+        ledger.admit({"max_tokens": 1024})
+        self.assertEqual(
+            ledger.summary()["task_request_counts"],
+            {"t1-structured": 6, "t2-log-correlation": 1},
+        )
+
+    def test_transport_retries_are_bounded_and_costed(self):
+        policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
+        ledger = budget_proxy.UsageLedger(policy)
+        request = urllib.request.Request(
+            "https://example.invalid", data=b"{}", method="POST"
+        )
+        attempts = {"n": 0}
+
+        def opener(_request, timeout):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise urllib.error.URLError(OSError(51, "Network is unreachable"))
+            return "response"
+
+        self.assertEqual(
+            budget_proxy.open_upstream(
+                ledger,
+                request,
+                timeout=1,
+                max_retries=2,
+                opener=opener,
+                sleep=lambda _seconds: None,
+            ),
+            "response",
+        )
+        summary = ledger.summary()
+        self.assertEqual(summary["transport_retries"], 2)
+        self.assertAlmostEqual(
+            summary["conservative_cost_cny"],
+            policy.worst_case_request_cny() * 2,
+            places=6,
+        )
+
+    def test_transport_retry_gives_up_after_the_limit(self):
+        policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
+        ledger = budget_proxy.UsageLedger(policy)
+
+        def opener(_request, timeout):
+            raise OSError(51, "Network is unreachable")
+
+        with self.assertRaises(OSError):
+            budget_proxy.open_upstream(
+                ledger,
+                urllib.request.Request("https://example.invalid", data=b"{}"),
+                timeout=1,
+                max_retries=1,
+                opener=opener,
+                sleep=lambda _seconds: None,
+            )
+        self.assertEqual(ledger.summary()["transport_retries"], 1)
+
+    def test_http_error_is_never_retried(self):
+        policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
+        ledger = budget_proxy.UsageLedger(policy)
+
+        def opener(_request, timeout):
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 401, "unauthorized", {}, None
+            )
+
+        with self.assertRaises(urllib.error.HTTPError):
+            budget_proxy.open_upstream(
+                ledger,
+                urllib.request.Request("https://example.invalid", data=b"{}"),
+                timeout=1,
+                max_retries=2,
+                opener=opener,
+                sleep=lambda _seconds: None,
+            )
+        self.assertEqual(ledger.summary()["transport_retries"], 0)
 
     def test_authorization_is_removed_case_insensitively(self):
         clean = budget_proxy.redact_headers(
@@ -178,6 +270,8 @@ class ProxyTests(unittest.TestCase):
                 "actual_cost_cny": 0.000084,
                 "conservative_cost_cny": 1.2049152,
                 "rejection_count": 0,
+                "transport_retries": 0,
+                "task_request_counts": {},
                 "error_categories": {},
             },
         )
@@ -471,7 +565,15 @@ class RunnerTests(unittest.TestCase):
                     upstream.shutdown()
                     upstream.server_close()
                     upstream_thread.join()
-                self.assertEqual(results, [{"task_id": case.task_id, "status": expected_status}])
+                self.assertEqual(
+                    [
+                        {key: row[key] for key in ("task_id", "status")}
+                        for row in results
+                    ],
+                    [{"task_id": case.task_id, "status": expected_status}],
+                )
+                self.assertEqual(results[0]["usage"]["request_count"], 1)
+                self.assertGreaterEqual(results[0]["latency_seconds"], 0.0)
                 self.assertEqual(_FakeUpstreamHandler.calls, 1)
         _FakeUpstreamHandler.status_code = 200
         _FakeUpstreamHandler.response_body = _FakeUpstreamHandler.default_response_body

@@ -11,10 +11,16 @@ treatment varies, so the result supports only a single-model baseline check.
   `POST /chat/completions`.
 - At most thirty provider requests are admitted, each with exactly one of
   `max_tokens` or `max_completion_tokens` set to at most 1024.
+- Each task also has its own request quota (t1 6, t2 6, t3 12), so an early
+  task cannot starve the ones after it.
 - The conservative gate assumes the full 1,000,000-token context for every
   admitted request and rejects projected spend at or above the ¥40 limit.
 - Authentication, balance, rate-limit, missing-usage, proxy, and timeout
-  failures stop the run without retrying.
+  failures stop the run without retrying. A connection failure that produced
+  no answer is re-sent at most twice; every re-send is charged to the
+  conservative cost bound, and HTTP answers are never retried.
+- Every task records its own request count, token usage, and wall-clock
+  latency in the summary.
 - Headers, prompts, response bodies, raw stderr, sessions, temporary
   workspaces, and credentials are never written to result artifacts.
 
