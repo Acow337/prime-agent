@@ -6,6 +6,8 @@ use crate::session_engine::tool_bridge::{bridge_tool, ToolDefinitionBridge};
 use crate::tools::tool_definition::{ExecutionMode, ToolDefinition, ToolExecutionResult};
 use pa_agent::scripted::ScriptedProvider;
 
+use crate::session_engine::treatment::ReplPersistence;
+
 fn echo_definition() -> ToolDefinition {
     ToolDefinition {
         name: "echo".to_string(),
@@ -471,4 +473,330 @@ async fn create_session_appends_missing_resume_settings_rows() {
         )),
         "entries: {entries:?}"
     );
+}
+
+/// The R treatment test needs a live kernel; skip when the ambient
+/// environment has none (the same contract the kernel integration tests use).
+fn treatment_kernel_available() -> bool {
+    if let Some(explicit) = std::env::var_os("PRIME_AGENT_KERNEL_PYTHON") {
+        return std::path::Path::new(&explicit).exists();
+    }
+    let fallback = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
+    fallback.exists()
+}
+
+fn treatment_model() -> pa_agent::types::Model {
+    pa_agent::types::Model {
+        id: "treatment-model".into(),
+        name: "Treatment model".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 16_000,
+        max_tokens: 1_000,
+        max_tokens_explicit: false,
+    }
+}
+
+async fn treatment_engine(
+    treatment: super::super::treatment::HarnessTreatment,
+    provider: &std::sync::Arc<ScriptedProvider>,
+    host: Option<std::sync::Arc<dyn super::super::rlm_host::RlmSubagentHost>>,
+) -> (tempfile::TempDir, SessionEngine) {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let engine = create_session_with_treatment(
+        SessionEngineConfig {
+            cwd,
+            agent_dir: tmp.path().join("agent"),
+            model: Some(treatment_model()),
+            stream_fn: Some(provider.stream_fn()),
+            rlm_subagent_host: host,
+            daemonless: true,
+            ..SessionEngineConfig::default()
+        },
+        treatment,
+    )
+    .await
+    .unwrap();
+    (tmp, engine)
+}
+
+fn tool_text(messages: &[pa_agent::types::AgentMessage], tool_call_id: &str) -> String {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(
+                result,
+            )) if result.tool_call_id == tool_call_id => Some(
+                result
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        pa_agent::types::ToolResultContent::Text(text) => Some(text.text.as_str()),
+                        pa_agent::types::ToolResultContent::Image(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+async fn run_two_python_turns(repl: super::super::treatment::ReplPersistence) -> String {
+    let provider = std::sync::Arc::new(ScriptedProvider::new(treatment_model()));
+    provider.push_tool_call_turn(
+        None,
+        vec![(
+            "set-value",
+            "python_repl",
+            serde_json::json!({ "code": "cross_turn_value = 17" }),
+        )],
+    );
+    provider.push_tool_call_turn(
+        None,
+        vec![(
+            "get-value",
+            "python_repl",
+            serde_json::json!({
+                "code": "globals().get('cross_turn_value', 'missing')"
+            }),
+        )],
+    );
+    provider.push_text_turn("done");
+    let (_tmp, engine) = treatment_engine(
+        super::super::treatment::HarnessTreatment {
+            repl,
+            ..super::super::treatment::HarnessTreatment::FULL
+        },
+        &provider,
+        None,
+    )
+    .await;
+    engine
+        .prompt("exercise the two cells", PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let state = engine.session.agent().state().await;
+    tool_text(&state.messages, "get-value")
+}
+
+#[tokio::test]
+async fn repl_treatment_resets_only_between_model_turns() {
+    if !treatment_kernel_available() {
+        eprintln!("no kernel python; skipping the REPL treatment test");
+        return;
+    }
+    let persistent = run_two_python_turns(ReplPersistence::AcrossTurns).await;
+    let stateless = run_two_python_turns(ReplPersistence::ResetAfterTurn).await;
+    assert!(persistent.contains("17"), "persistent: {persistent}");
+    assert!(stateless.contains("missing"), "stateless: {stateless}");
+}
+
+/// A host that must never be reached when S-off removes the spawn surface.
+#[derive(Default)]
+struct CountingHost {
+    spawns: std::sync::atomic::AtomicUsize,
+}
+
+impl super::super::rlm_host::RlmSubagentHost for CountingHost {
+    fn spawn(
+        &self,
+        _request: super::super::rlm_host::RlmSpawnRequest,
+    ) -> super::super::rlm_host::RlmHostFuture<super::super::rlm_host::RlmSpawnHandle> {
+        self.spawns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { anyhow::bail!("counting host must not be called") })
+    }
+
+    fn create_session(
+        &self,
+        _request: super::super::rlm_host::RlmCreateSessionRequest,
+    ) -> super::super::rlm_host::RlmHostFuture<super::super::rlm_host::RlmCreateSessionHandle> {
+        Box::pin(async { anyhow::bail!("counting host must not be called") })
+    }
+
+    fn list_subagents(
+        &self,
+    ) -> super::super::rlm_host::RlmHostFuture<Vec<super::super::rlm_host::RlmSubagentEntry>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn delete_subagent(
+        &self,
+        target: String,
+    ) -> super::super::rlm_host::RlmHostFuture<super::super::rlm_host::RlmDeleteSubagentResult>
+    {
+        Box::pin(async move { anyhow::bail!("unexpected delete for {target}") })
+    }
+
+    fn collect(
+        &self,
+        _targets: Vec<String>,
+        _timeout_ms: u64,
+    ) -> super::super::rlm_host::RlmHostFuture<Vec<super::super::rlm_host::RlmChildResult>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn rename(
+        &self,
+        name: String,
+        _session_id: Option<String>,
+    ) -> super::super::rlm_host::RlmHostFuture<String> {
+        Box::pin(async move { Ok(name) })
+    }
+}
+
+#[tokio::test]
+async fn subagent_treatment_removes_spawn_surface_and_never_calls_host() {
+    if !treatment_kernel_available() {
+        eprintln!("no kernel python; skipping the subagent treatment test");
+        return;
+    }
+    let host = std::sync::Arc::new(CountingHost::default());
+    let provider = std::sync::Arc::new(ScriptedProvider::new(treatment_model()));
+    let (_tmp, engine) = treatment_engine(
+        super::super::treatment::HarnessTreatment {
+            subagents: super::super::treatment::SubagentAccess::Disabled,
+            ..super::super::treatment::HarnessTreatment::FULL
+        },
+        &provider,
+        Some(host.clone()),
+    )
+    .await;
+
+    assert!(engine
+        .system_prompt
+        .contains("Subagent spawning is disabled in this session."));
+    let manager = engine.provisioner.ensure(None, None).await.unwrap();
+    let result = manager
+        .execute(
+            "import rlm\nawait rlm.spawn('work', name='worker')",
+            crate::kernel::shared::ExecuteOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, crate::kernel::shared::ExecuteStatus::Error);
+    assert!(result
+        .error
+        .as_ref()
+        .is_some_and(|error| error.evalue.contains("no RLM child runtime")));
+    assert_eq!(host.spawns.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn experiment_harness_treatment_pins_the_isolated_agent_dir() {
+    if !treatment_kernel_available() {
+        eprintln!("no kernel python; skipping the harness treatment test");
+        return;
+    }
+    let provider = std::sync::Arc::new(ScriptedProvider::new(treatment_model()));
+    let (tmp, engine) = treatment_engine(
+        super::super::treatment::HarnessTreatment {
+            harness_state: super::super::treatment::HarnessStateAccess::Disabled,
+            ..super::super::treatment::HarnessTreatment::FULL
+        },
+        &provider,
+        None,
+    )
+    .await;
+
+    let settings = crate::settings::SettingsManager::create(
+        tmp.path().join("project"),
+        tmp.path().join("agent"),
+    );
+    assert!(!settings.get_harness_refinements());
+    assert!(!engine.session.harness_refinements_enabled());
+    assert!(engine.session.harness_digest_inputs().await.is_none());
+    assert!(!engine.session.auto_refine_allowed());
+    assert!(!engine.skills.iter().any(|skill| skill.name == "refine"));
+    let manager = engine.provisioner.ensure(None, None).await.unwrap();
+    let result = manager
+        .execute(
+            "import rlm\nrlm.harness.create_memory('x', 'y')",
+            crate::kernel::shared::ExecuteOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, crate::kernel::shared::ExecuteStatus::Error);
+    assert!(result
+        .error
+        .as_ref()
+        .is_some_and(|error| error.evalue.contains("disabled in /settings")));
+}
+
+#[tokio::test]
+async fn normal_create_session_preserves_the_users_harness_setting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    let agent_dir = tmp.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let mut settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
+    settings.set_harness_refinements(false).unwrap();
+    let provider = std::sync::Arc::new(ScriptedProvider::new(treatment_model()));
+    let _engine = create_session(SessionEngineConfig {
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
+        model: Some(treatment_model()),
+        stream_fn: Some(provider.stream_fn()),
+        daemonless: true,
+        ..SessionEngineConfig::default()
+    })
+    .await
+    .unwrap();
+    assert!(!crate::settings::SettingsManager::create(&cwd, &agent_dir).get_harness_refinements());
+}
+
+#[tokio::test]
+async fn every_harness_treatment_matches_its_factor_id_and_surfaces() {
+    if !treatment_kernel_available() {
+        eprintln!("no kernel python; skipping the treatment matrix test");
+        return;
+    }
+    for repl in [
+        ReplPersistence::AcrossTurns,
+        ReplPersistence::ResetAfterTurn,
+    ] {
+        for subagents in [
+            super::super::treatment::SubagentAccess::Enabled,
+            super::super::treatment::SubagentAccess::Disabled,
+        ] {
+            for harness_state in [
+                super::super::treatment::HarnessStateAccess::Enabled,
+                super::super::treatment::HarnessStateAccess::Disabled,
+            ] {
+                let treatment = super::super::treatment::HarnessTreatment {
+                    repl,
+                    subagents,
+                    harness_state,
+                };
+                let provider = std::sync::Arc::new(ScriptedProvider::new(treatment_model()));
+                let host = std::sync::Arc::new(CountingHost::default());
+                let (_tmp, engine) = treatment_engine(treatment, &provider, Some(host)).await;
+                assert_eq!(engine.harness_treatment, treatment, "{}", treatment.id());
+                assert_eq!(
+                    engine
+                        .system_prompt
+                        .contains("Subagent spawning is disabled in this session."),
+                    subagents == super::super::treatment::SubagentAccess::Disabled,
+                    "{}",
+                    treatment.id(),
+                );
+                assert_eq!(
+                    engine.session.harness_refinements_enabled(),
+                    harness_state == super::super::treatment::HarnessStateAccess::Enabled,
+                    "{}",
+                    treatment.id(),
+                );
+            }
+        }
+    }
 }

@@ -192,7 +192,12 @@ fn mcp_gating_blocking(
 /// Panics if the MCP manager mutex is poisoned while wiring telemetry
 /// reporting.
 pub async fn create_session(config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
-    create_session_inner(config, super::treatment::HarnessTreatment::FULL).await
+    create_session_inner(
+        config,
+        super::treatment::HarnessTreatment::FULL,
+        TreatmentSettingsPolicy::Preserve,
+    )
+    .await
 }
 
 /// Assemble a session with an explicit Harness treatment for a controlled
@@ -205,12 +210,26 @@ pub async fn create_session_with_treatment(
     config: SessionEngineConfig,
     harness_treatment: super::treatment::HarnessTreatment,
 ) -> anyhow::Result<SessionEngine> {
-    create_session_inner(config, harness_treatment).await
+    create_session_inner(
+        config,
+        harness_treatment,
+        TreatmentSettingsPolicy::Pin(harness_treatment.harness_state),
+    )
+    .await
+}
+
+/// Whether a session build preserves the user's Harness setting or pins the
+/// isolated experiment directory's copy.
+#[derive(Debug, Clone, Copy)]
+enum TreatmentSettingsPolicy {
+    Preserve,
+    Pin(super::treatment::HarnessStateAccess),
 }
 
 async fn create_session_inner(
     mut config: SessionEngineConfig,
     harness_treatment: super::treatment::HarnessTreatment,
+    treatment_settings_policy: TreatmentSettingsPolicy,
 ) -> anyhow::Result<SessionEngine> {
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
@@ -230,8 +249,14 @@ async fn create_session_inner(
                     .map(|path| path.display().to_string())
             })
     };
-    let (settings, trace_consent) =
+    let (mut settings, trace_consent) =
         crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
+    // M-off pins the isolated experiment agent directory's gate; the normal
+    // `create_session` path never touches the user's saved setting.
+    if let TreatmentSettingsPolicy::Pin(access) = treatment_settings_policy {
+        settings
+            .set_harness_refinements(access == super::treatment::HarnessStateAccess::Enabled)?;
+    }
     // Resolve the kernel shell once, before any side effects: an invalid
     // `shellPath` must fail session creation with a clear config error
     // naming the setting, not every kernel `bash()` call later.
@@ -259,12 +284,19 @@ async fn create_session_inner(
     if let Some(traces) = traces {
         session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
     }
+    // S-off: the session never receives a child host, so the kernel's
+    // spawn surface fails closed and prompt construction drops the
+    // capability. The product path keeps the configured host.
+    let subagent_host = match harness_treatment.subagents {
+        super::treatment::SubagentAccess::Enabled => config.rlm_subagent_host.clone(),
+        super::treatment::SubagentAccess::Disabled => None,
+    };
     let wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
         super::runtime_wiring::RlmWiring {
             model_registry: None,
-            subagent_host: config.rlm_subagent_host.clone(),
+            subagent_host: subagent_host.clone(),
             usage_store: config.rlm_usage_store.clone(),
             progress_note_emit: config.progress_note_emit.clone(),
         },
@@ -301,7 +333,7 @@ async fn create_session_inner(
             generic_mcp_servers.push(server);
         }
     }
-    let resources = load_resources(ResourceLoaderOptions {
+    let mut resources = load_resources(ResourceLoaderOptions {
         cwd: cwd.clone(),
         agent_dir: config.agent_dir.clone(),
         settings: Some(settings),
@@ -315,6 +347,12 @@ async fn create_session_inner(
         append_system_prompt: config.prompt_guidelines.clone(),
         ..Default::default()
     })?;
+    // M-off: drop the refine capability surface. Its description advertises
+    // Harness writes the pinned gate refuses, so leaving it in the prompt
+    // would invite turns the session must reject.
+    if harness_treatment.harness_state == super::treatment::HarnessStateAccess::Disabled {
+        resources.skills.retain(|skill| skill.name != "refine");
+    }
 
     let model = config
         .model
@@ -580,12 +618,15 @@ async fn create_session_inner(
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
             ),
-            allow_recursion: config.allow_recursion,
+            allow_recursion: match harness_treatment.subagents {
+                super::treatment::SubagentAccess::Enabled => config.allow_recursion,
+                super::treatment::SubagentAccess::Disabled => Some(false),
+            },
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth,
             daemonless: config.daemonless,
-            can_spawn: config.rlm_subagent_host.is_some(),
+            can_spawn: subagent_host.is_some(),
             generic_mcp_servers,
             append_system_prompt: Some(resources.append_system_prompt.join("\n\n")),
             ..Default::default()
@@ -731,6 +772,30 @@ async fn create_session_inner(
     });
 
     let agent = Arc::new(agent);
+    // R-off: the REPL namespace is cleared at every settled model-turn
+    // boundary, so values cannot survive from one turn to the next. Only
+    // treated runs install this listener; the product path never does.
+    if harness_treatment.repl == super::treatment::ReplPersistence::ResetAfterTurn {
+        // A weak provisioner: the listener lives on the agent the engine
+        // owns, so a strong edge would cycle the graph.
+        let provisioner_at_turn_end = std::sync::Arc::downgrade(&provisioner);
+        agent
+            .subscribe(move |event, _signal| {
+                let provisioner_at_turn_end = provisioner_at_turn_end.clone();
+                Box::pin(async move {
+                    if !matches!(event, pa_agent::types::AgentEvent::TurnEnd { .. }) {
+                        return Ok(());
+                    }
+                    if let Some(provisioner) = provisioner_at_turn_end.upgrade() {
+                        // A failed reset makes the treatment run invalid;
+                        // failing loudly is the contract.
+                        provisioner.reset_namespace().await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+    }
     // TS `_startRlmChildRun`'s spawn anchor: the `rlm.spawn` host handler
     // names the parent's in-flight turn through this weak seam (the
     // bridge is built before the agent exists, and a strong edge would
