@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ import run_smoke  # noqa: E402
 FAMILIES = {
     "i": "families.i_family",
     "e": "families.e_family",
+    "t": "families.t_family",
 }
 TREATMENTS = (
     "r1-s1-m1",
@@ -209,6 +211,29 @@ def summarize(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str
     }
 
 
+def _episodes(case: Any) -> list[Any]:
+    """A case is one episode, or an ordered multi-episode series."""
+    episodes = getattr(case, "episodes", None)
+    if episodes is not None:
+        return list(episodes)
+    return [
+        types.SimpleNamespace(
+            name="main",
+            workdir=case.workdir,
+            prompt=case.prompt,
+            reference=getattr(case, "reference", ""),
+            scored=True,
+        )
+    ]
+
+
+def _verify_episode(module: Any, case: Any, index: int, text: str) -> dict[str, Any]:
+    verify_episode = getattr(module, "verify_episode", None)
+    if verify_episode is not None:
+        return verify_episode(case, index, text)
+    return module.verify(case, text)
+
+
 def run_matrix(
     config: dict[str, Any],
     binary: Path,
@@ -231,13 +256,14 @@ def run_matrix(
     try:
         with tempfile.TemporaryDirectory(prefix="prime-agent-ablation-") as directory:
             root = Path(directory)
-            for run in (runs[:limit] if limit else runs):
+            for run in runs[:limit] if limit else runs:
                 if run["run_id"] in done:
                     continue
                 module = run["module"]
-                instance_root = root / "tasks" / run["task_id"]
-                case = module.materialize(run["instance"], instance_root)
-                started = time.monotonic()
+                case = module.materialize(
+                    run["instance"], root / "tasks" / run["task_id"]
+                )
+                episodes = _episodes(case)
                 record: dict[str, Any] = {
                     "run_id": run["run_id"],
                     "model": run["model"],
@@ -245,12 +271,13 @@ def run_matrix(
                     "family": run["family"],
                     "task_id": case.task_id,
                 }
+                started = time.monotonic()
                 if mode == "dry-run":
                     dry_verify = getattr(module, "dry_run_verify", None)
                     verification = (
                         dry_verify(case)
                         if dry_verify is not None
-                        else module.verify(case, case.reference)
+                        else module.verify(case, getattr(case, "reference", ""))
                     )
                     record.update(
                         {
@@ -271,59 +298,105 @@ def run_matrix(
                         append_record(records_path, record)
                         break
                     ledger.begin_task(run["run_id"], quota=config["max_requests_per_run"])
-                before = ledger.summary() if ledger is not None else None
                 model_id = config["models"][run["model"]]
                 task_root = root / "runs" / run["run_id"]
-                env = run_smoke.isolated_env(task_root, api_key)
-                env["PRIME_AGENT_HARNESS_TREATMENT"] = run["treatment"]
-                write_models_config(
-                    Path(env["PRIME_AGENT_CODING_AGENT_DIR"]), config, model_id,
-                    proxy.base_url if proxy is not None else "",
-                )
-                try:
-                    completed = subprocess.run(
-                        build_command(binary, config, model_id, case.prompt),
-                        cwd=case.workdir,
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        timeout=config["task_timeout_seconds"],
-                        check=False,
+                # M-on shares one agent directory across the series; M-off gives
+                # every episode a fresh one so nothing durable can carry over.
+                shared_agent = run["treatment"].endswith("m1")
+                before_cell = ledger.summary() if ledger is not None else None
+                episode_records: list[dict[str, Any]] = []
+                agent_dirs: list[Path] = []
+                status = "completed"
+                for index, episode in enumerate(episodes):
+                    agent_dir = task_root / (
+                        "agent" if shared_agent else f"agent-ep{index}"
                     )
-                except subprocess.TimeoutExpired:
-                    record["status"] = "timeout"
-                    records.append(record)
-                    append_record(records_path, record)
-                    continue
-                text = run_smoke._assistant_text(completed.stdout)
-                verification = module.verify(case, text)
-                after = ledger.summary() if ledger is not None else None
-                record.update(
-                    {
-                        "status": "completed" if completed.returncode == 0 else "process_error",
-                        "exit_code": completed.returncode,
-                        "success": verification["success"],
+                    agent_dir.mkdir(parents=True, exist_ok=True)
+                    agent_dirs.append(agent_dir)
+                    env = run_smoke.isolated_env(task_root, api_key)
+                    env["PRIME_AGENT_CODING_AGENT_DIR"] = str(agent_dir)
+                    env["PRIME_AGENT_HARNESS_TREATMENT"] = run["treatment"]
+                    env["PRIME_AGENT_SESSION_DIR"] = str(task_root / f"sessions-ep{index}")
+                    write_models_config(
+                        agent_dir,
+                        config,
+                        model_id,
+                        proxy.base_url if proxy is not None else "",
+                    )
+                    before = ledger.summary() if ledger is not None else None
+                    episode_started = time.monotonic()
+                    try:
+                        completed = subprocess.run(
+                            build_command(binary, config, model_id, episode.prompt),
+                            cwd=episode.workdir,
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=config["task_timeout_seconds"],
+                            check=False,
+                        )
+                    except subprocess.TimeoutExpired:
+                        episode_records.append(
+                            {
+                                "name": episode.name,
+                                "status": "timeout",
+                                "scored": episode.scored,
+                                "score": 0.0,
+                                "success": False,
+                                "latency_seconds": round(
+                                    time.monotonic() - episode_started, 3
+                                ),
+                            }
+                        )
+                        status = "timeout"
+                        break
+                    text = run_smoke._assistant_text(completed.stdout)
+                    verification = _verify_episode(module, case, index, text)
+                    episode_row: dict[str, Any] = {
+                        "name": episode.name,
+                        "status": "completed"
+                        if completed.returncode == 0
+                        else "process_error",
+                        "scored": episode.scored,
                         "score": verification["score"],
-                        "details": {
-                            key: value
-                            for key, value in verification.items()
-                            if key not in ("success", "score")
-                        },
-                        "latency_seconds": round(time.monotonic() - started, 3),
+                        "success": verification["success"],
+                        "latency_seconds": round(time.monotonic() - episode_started, 3),
                     }
+                    details = {
+                        key: value
+                        for key, value in verification.items()
+                        if key not in ("success", "score")
+                    }
+                    if details:
+                        episode_row["details"] = details
+                    if before is not None and ledger is not None:
+                        after = ledger.summary()
+                        episode_row["usage"] = _usage_delta(before, after)
+                    episode_records.append(episode_row)
+                    if completed.returncode != 0:
+                        status = "process_error"
+                        break
+                scored = [row for row in episode_records if row["scored"]]
+                record["episodes"] = episode_records
+                record["harness_state_bytes"] = sum(
+                    _file_size(directory / "harness" / "harness_state.json")
+                    for directory in agent_dirs
                 )
-                if before is not None and after is not None:
-                    record["usage"] = {
-                        "request_count": after["request_count"] - before["request_count"],
-                        "prompt_tokens": after["prompt_tokens"] - before["prompt_tokens"],
-                        "completion_tokens": after["completion_tokens"]
-                        - before["completion_tokens"],
-                        "actual_cost_cny": round(
-                            after["actual_cost_cny"] - before["actual_cost_cny"], 6
-                        ),
-                    }
-                    if after["error_categories"] != before["error_categories"]:
-                        record["error_categories"] = after["error_categories"]
+                record["status"] = status
+                record["success"] = bool(scored) and all(
+                    row["success"] for row in scored
+                )
+                record["score"] = (
+                    round(sum(row["score"] for row in scored) / len(scored), 6)
+                    if scored
+                    else 0.0
+                )
+                record["latency_seconds"] = round(time.monotonic() - started, 3)
+                if before_cell is not None and ledger is not None:
+                    after_cell = ledger.summary()
+                    record["usage"] = _usage_delta(before_cell, after_cell)
+                    if after_cell["error_categories"] != before_cell["error_categories"]:
+                        record["error_categories"] = after_cell["error_categories"]
                 records.append(record)
                 append_record(records_path, record)
     finally:
@@ -334,6 +407,25 @@ def run_matrix(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return records
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _usage_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "request_count": after["request_count"] - before["request_count"],
+        "prompt_tokens": after["prompt_tokens"] - before["prompt_tokens"],
+        "completion_tokens": after["completion_tokens"] - before["completion_tokens"],
+        "actual_cost_cny": round(
+            after["actual_cost_cny"] - before["actual_cost_cny"], 6
+        ),
+    }
+
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -45,5 +45,10 @@ treatment success rate and mean score plus total usage.
 - E-family: implemented (`families/e_family.py`) as a three-defect orders
   repository scored by verifier-owned hidden tests (buggy 0/4, reference fix
   4/4 on all five instances).
-- T-family (cross-episode transfer): not implemented yet. The research design
-  sizes each family at 30 instances for the main experiment.
+- T-family: implemented (`families/t_family.py`) as a three-episode triage
+  series. Episode 1 states the rule and asks for a durable harness note (not
+  scored); episode 2 withholds the rule (transfer); episode 3 changes the
+  critical threshold (stale-rule detection). M-on cells share one agent
+  directory across the series, M-off cells get a fresh one per episode, and
+  every record reports `harness_state_bytes` so a silent no-op is visible.
+- The research design sizes each family at 30 instances for the main experiment.

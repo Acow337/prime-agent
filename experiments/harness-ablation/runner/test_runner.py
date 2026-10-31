@@ -13,6 +13,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "families"))
 
 import e_family  # noqa: E402
+import t_family  # noqa: E402
 import i_family  # noqa: E402
 import runner  # noqa: E402
 
@@ -61,6 +62,34 @@ class EFamilyTests(unittest.TestCase):
             first = (e_family.materialize(1, root).workdir / "config.py").read_text()
             second = (e_family.materialize(4, root).workdir / "config.py").read_text()
         self.assertNotEqual(first, second)
+
+
+class TFamilyTests(unittest.TestCase):
+    def test_series_has_three_episodes_with_one_learning_episode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = t_family.materialize(1, Path(directory))
+        self.assertEqual([episode.name for episode in case.episodes], ["ep1", "ep2", "ep3"])
+        self.assertEqual([episode.scored for episode in case.episodes], [False, True, True])
+        self.assertNotIn("error_rate_pct >= 5", case.episodes[1].prompt)
+        self.assertNotIn("Triage rule:", case.episodes[1].prompt)
+
+    def test_reference_answers_score_one_and_wrong_labels_score_lower(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = t_family.materialize(1, Path(directory))
+        for index, episode in enumerate(case.episodes):
+            self.assertTrue(t_family.verify_episode(case, index, episode.reference)["success"])
+        self.assertTrue(t_family.dry_run_verify(case)["success"])
+        wrong = {"incidents": {}}
+        self.assertEqual(t_family.verify_episode(case, 1, json.dumps(wrong))["score"], 0.0)
+
+    def test_episode_three_uses_the_changed_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = t_family.materialize(1, Path(directory))
+        import json as _json
+
+        old = _json.loads(case.episodes[1].reference)["incidents"]
+        new = _json.loads(case.episodes[2].reference)["incidents"]
+        self.assertNotEqual(old, new)
 
 
 class MatrixRunnerTests(unittest.TestCase):
