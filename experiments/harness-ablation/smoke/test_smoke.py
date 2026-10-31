@@ -64,20 +64,20 @@ class TaskFixtureTests(unittest.TestCase):
 class ManifestTests(unittest.TestCase):
     def test_budget_values_match_the_approved_design(self):
         manifest = json.loads((SMOKE_DIR / "manifest.json").read_text())
-        self.assertEqual(manifest["max_provider_requests"], 6)
+        self.assertEqual(manifest["max_provider_requests"], 30)
         self.assertEqual(manifest["response_tokens"], 1024)
-        self.assertEqual(manifest["hard_budget_cny"], 10.0)
+        self.assertEqual(manifest["hard_budget_cny"], 40.0)
 
 
 class BudgetPolicyTests(unittest.TestCase):
     def setUp(self):
         self.manifest = json.loads((SMOKE_DIR / "manifest.json").read_text())
 
-    def test_six_full_context_requests_fit_and_seventh_is_refused(self):
+    def test_thirty_full_context_requests_fit_and_thirty_first_is_refused(self):
         policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
         ledger = budget_proxy.UsageLedger(policy)
-        self.assertLess(policy.worst_case_request_cny() * 6, 10.0)
-        for _ in range(6):
+        self.assertLess(policy.worst_case_request_cny() * 30, 40.0)
+        for _ in range(30):
             ledger.admit({"max_tokens": 1024})
         with self.assertRaises(budget_proxy.BudgetExceeded):
             ledger.admit({"max_tokens": 1024})
@@ -191,15 +191,15 @@ class ProxyTests(unittest.TestCase):
         rejected.exception.close()
         self.assertEqual(_FakeUpstreamHandler.calls, 1)
 
-    def test_seventh_request_is_402_and_never_reaches_upstream(self):
-        for _ in range(6):
+    def test_thirty_first_request_is_402_and_never_reaches_upstream(self):
+        for _ in range(30):
             with self._post(1024) as response:
                 response.read()
         with self.assertRaises(urllib.error.HTTPError) as rejected:
             self._post(1024)
         self.assertEqual(rejected.exception.code, 402)
         rejected.exception.close()
-        self.assertEqual(_FakeUpstreamHandler.calls, 6)
+        self.assertEqual(_FakeUpstreamHandler.calls, 30)
 
     def test_excessive_response_limit_is_400_and_never_reaches_upstream(self):
         with self.assertRaises(urllib.error.HTTPError) as rejected:

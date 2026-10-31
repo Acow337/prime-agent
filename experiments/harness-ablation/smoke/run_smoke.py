@@ -487,10 +487,10 @@ def main(argv: list[str] | None = None) -> int:
         usage = summary["usage"]
         report = (
             "# DeepSeek baseline smoke report\n\n"
-            f"Run date: `{summary['run_date']}`  \n"
-            f"Commit: `{summary['commit']}`  \n"
-            f"Model: `{summary['provider']}/{summary['model']}`  \n"
-            f"Task records: `{len(summary['tasks'])}`\n\n"
+            f"- Run date: `{summary['run_date']}`\n"
+            f"- Commit: `{summary['commit']}`\n"
+            f"- Model: `{summary['provider']}/{summary['model']}`\n"
+            f"- Task records: `{len(summary['tasks'])}`\n\n"
             "## Results\n\n"
             f"{task_rows}\n\n"
             "## Usage and cost\n\n"

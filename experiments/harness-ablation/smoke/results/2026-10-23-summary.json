@@ -1,15 +1,15 @@
 {
-  "commit": "27159d577f228fbf786799b6df03b54a1a224a66",
+  "commit": "64b37d3dc9d9ee3883251164bc0f2255a7aa6029",
   "fixture_digest": "e34c028a3d45b71cccf9ac77db4c4421b0df4e841381cf1d0e7acc0dcffff8ed",
   "limits": {
-    "hard_budget_cny": 10.0,
-    "max_provider_requests": 6,
+    "hard_budget_cny": 40.0,
+    "max_provider_requests": 30,
     "response_tokens": 1024
   },
   "mode": "live",
   "model": "deepseek-v4-flash",
   "provider": "deepseek",
-  "run_date": "2026-10-26",
+  "run_date": "2026-10-31",
   "schema_version": 1,
   "scope": "Single-model baseline smoke; no R/S/M treatment was varied.",
   "tasks": [
@@ -26,20 +26,22 @@
       "task_id": "t2-log-correlation"
     },
     {
-      "status": "proxy_rejected",
+      "hidden": true,
+      "public": true,
+      "score": 1.0,
+      "status": "completed",
+      "success": true,
       "task_id": "t3-parser-fix"
     }
   ],
   "usage": {
-    "actual_cost_cny": 0.0781836,
-    "actual_cost_usd": 0.00977295,
-    "completion_tokens": 1000,
-    "conservative_cost_cny": 7.2294912,
-    "error_categories": {
-      "request_limit": 1
-    },
-    "prompt_tokens": 61153,
-    "rejection_count": 1,
-    "request_count": 6
+    "actual_cost_cny": 0.155364,
+    "actual_cost_usd": 0.0194205,
+    "completion_tokens": 3552,
+    "conservative_cost_cny": 13.2540672,
+    "error_categories": {},
+    "prompt_tokens": 115262,
+    "rejection_count": 0,
+    "request_count": 11
   }
 }
