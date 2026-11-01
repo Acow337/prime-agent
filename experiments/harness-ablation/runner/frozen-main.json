@@ -1,12 +1,12 @@
 {
-  "commit": "d7ce802abd0def4abb47a5572228c4dcd5a1cd96",
+  "commit": "b5aca005717419cca76367e34083838498e7945b",
   "config_sha256": "738de72445221b85f02235f0c9bc921c6edba90024e271e1a4f49112f0c2b660",
   "families": {
     "e": "59272a11eb5074ef7901fac18d27d24b0a31beb9a616d8b9666259d57248ad2f",
     "i": "f6911f7ab326e2b91f9ba3e7028332309ef3aace2fa90fc291dc8de4022d2a1e",
-    "t": "540f068bbac9b4787e5c6df4ed719f28e0585eacabb798e7f1d0ae4b24c59e1e"
+    "t": "aaea513ba2afce0d73773c365b6c61177842e3a2544aa51bfbcfda95711b6e32"
   },
-  "frozen_at": "2026-10-31T14:41:16+00:00",
+  "frozen_at": "2026-11-01T00:36:43+00:00",
   "instances": {
     "e-01": "e98fb8a5851ede4b6839c8b19001d879e5ca12ea6c87cc12bc2655550fc6a3d8",
     "e-02": "259bbaf2936de9a243d3b25d8b2e5b65894cbb1d55d268f98e408241756e18c8",
@@ -108,7 +108,7 @@
   "models": {
     "cheap": "deepseek-v4-flash"
   },
-  "runner_sha256": "b0c163eed51363292666895402a6e2d10c94f96a21dbdbdbe91fa0d5ec78867f",
+  "runner_sha256": "10bf104b610bb3779dfa84e11a8c74a3d3b042260cb518a1ac6c94fba2fd496d",
   "treatments": [
     "r1-s1-m1",
     "r1-s1-m0",

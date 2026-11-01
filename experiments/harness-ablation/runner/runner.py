@@ -163,7 +163,7 @@ def load_done(records_path: Path) -> set[str]:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if record.get("run_id") and record.get("status") not in (None, "pending"):
+        if record.get("run_id") and record.get("status") == "completed":
             done.add(record["run_id"])
     return done
 
@@ -398,6 +398,7 @@ def run_matrix(
                     record["usage"] = _usage_delta(before_cell, after_cell)
                     if after_cell["error_categories"] != before_cell["error_categories"]:
                         record["error_categories"] = after_cell["error_categories"]
+                        record["status"] = "infra_error"
                 records.append(record)
                 append_record(records_path, record)
     finally:

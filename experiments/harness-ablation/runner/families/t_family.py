@@ -285,11 +285,13 @@ TEMPLATES = (
     ),
 )
 
-OUTPUT_SPEC = (
-    "Answer with ONE JSON object and nothing else: "
-    '{"items": {"<id>": {"<label>": "<value>", ...}}}, one entry per row, '
-    "using exactly the label keys named in the rule.\n"
-)
+def _output_spec(labels: dict[str, str]) -> str:
+    example = json.dumps(labels)
+    return (
+        'Answer with ONE JSON object and nothing else: '
+        '{"items": {"<row id>": ' + example + ', ...}} '
+        "with one entry per row, using exactly these field names.\n"
+    )
 
 
 @dataclass(frozen=True)
@@ -338,12 +340,12 @@ def _write_rows(path: Path, rows: list[dict[str, Any]], template: Template) -> N
         writer.writerows(rows)
 
 
-def _rules_prompt(template: Template, row_name: str) -> str:
+def _rules_prompt(template: Template, row_name: str, output_spec: str) -> str:
     return (
         f"You are starting a recurring {template.entity} classification series. "
         f"Read {row_name} and label every row.\n"
         f"Rule:\n{template.rules_text}\n"
-        f"{OUTPUT_SPEC}"
+        f"{output_spec}"
         "If your tools support durable harness notes, record this rule as a memory "
         "before finishing, so later episodes of the series can reuse it."
     )
@@ -355,8 +357,9 @@ def materialize(instance: int, root: Path) -> Case:
     seed = 9000 + instance * 10 + variant
     task_id = f"t-{instance:02d}"
     episodes = []
+    sample_spec = _output_spec(template.label(_rows(template, seed + 1, 1)[0], template.params))
     specs = (
-        ("ep1", EP1_ROWS, template.params, False, _rules_prompt(template, "rows.csv")),
+        ("ep1", EP1_ROWS, template.params, False, _rules_prompt(template, "rows.csv", sample_spec)),
         (
             "ep2",
             EP2_ROWS,
@@ -365,7 +368,7 @@ def materialize(instance: int, root: Path) -> Case:
             "This is episode 2 of the same series. Read rows.csv and label every row "
             "using the convention established in episode 1. The rule text is "
             "deliberately not repeated; reuse your recorded convention. If you have "
-            "no durable record of it, derive the best rule you can.\n" + OUTPUT_SPEC,
+            "no durable record of it, derive the best rule you can.\n" + sample_spec,
         ),
         (
             "ep3",
@@ -380,7 +383,7 @@ def materialize(instance: int, root: Path) -> Case:
                     if template.negative
                     else "The policy is unchanged. Apply the same convention.\n"
                 )
-                + OUTPUT_SPEC
+                + sample_spec
             ),
         ),
     )

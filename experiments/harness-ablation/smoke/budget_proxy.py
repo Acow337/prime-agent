@@ -253,7 +253,7 @@ def open_upstream(
                 raise
             ledger.record_transport_retry()
             attempt += 1
-            sleep(0.5 * attempt)
+            sleep(0.25 * attempt)
 
 
 class _ProxyServer(http.server.ThreadingHTTPServer):
@@ -315,7 +315,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             response = open_upstream(
                 self.proxy_server.ledger,
                 request,
-                timeout=180,
+                timeout=60,
                 max_retries=self.proxy_server.policy.max_transport_retries,
             )
             with response:
