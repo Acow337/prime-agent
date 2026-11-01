@@ -5,6 +5,11 @@ This directory holds the manuscript draft for the harness-ablation study.
 - `paper.md` — the full draft (English), following the section plan in
   `docs/superpowers/specs/2026-10-18-harness-ablation-research-design.md` §13.
 
+The draft is framed as a general study of harness components (R = persistent
+execution, S = recursive delegation, M = durable state). The concrete
+implementation is named only in the artifact appendix, where reproducibility
+requires it; the claims do not depend on the product identity.
+
 ## Status: DRAFT, not submission-ready
 
 The numbers currently in the draft are from:

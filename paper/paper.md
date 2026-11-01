@@ -1,5 +1,5 @@
 # What Does the Harness Buy?
-## A Factorial Ablation of Persistent REPL, Recursive Subagents, and Durable Harness State in a Coding Agent
+## A Factorial Ablation of Persistent Execution, Recursive Delegation, and Durable State in RLM-Style Coding Agents
 
 > **DRAFT — provisional results.** Numbers marked *pilot* come from a 120-cell
 > calibration run; the 720-cell main experiment is in progress and is not yet
@@ -15,14 +15,15 @@ Coding agents are increasingly shipped as *harnesses*: a persistent execution
 environment, recursive subagent spawning, and durable state that the agent can
 read and refine across turns and sessions. Each capability adds prompt surface,
 tokens, and failure modes, yet the causal contribution of each is rarely
-measured in isolation. We study Prime Agent, an RLM-style coding agent, and
-decompose its harness into three orthogonal binary factors: **R** (the Python
-REPL namespace persists across settled turns), **S** (the session may spawn
-recursive child agents), and **M** (persistent harness state may be read,
-injected, and refined). We implement all eight R/S/M configurations behind an
-experiment-only entry point that leaves the product path unchanged, and we
-evaluate them on three task families: multi-table information management (I),
-small multi-module bug fixing (E), and cross-episode transfer (T).
+measured in isolation. We use a production RLM-style coding-agent harness as a
+testbed and decompose the capabilities such harnesses share into three
+orthogonal binary factors: **R** (the execution namespace persists across
+settled turns), **S** (the agent may delegate to recursive child agents), and
+**M** (durable harness state may be read, injected, and refined). We implement
+all eight R/S/M configurations behind an experiment-only entry point that leaves
+the default operating path unchanged, and we evaluate them on three task
+families: multi-table information management (I), small multi-module bug fixing
+(E), and cross-episode transfer (T).
 
 In a 120-cell pilot (one cheap API model, five instances per family), the
 information and engineering families sit at ceiling: all eight treatments solve
@@ -31,7 +32,7 @@ money for the same accuracy). The transfer family separates one factor: every
 M-on cell persisted 2.6–3.1 KB of harness state and scored 1.0 in 19 of 20
 cells, while M-off cells succeeded in only 8 of 20 (Fisher exact
 * p* ≈ 0.0004; bootstrap 95% CI for the mean-score difference ≈ [0.11, 0.28]).
-The full product configuration was simultaneously the most accurate (15/15) and
+The fully enabled configuration was simultaneously the most accurate (15/15) and
 the cheapest (¥1.87 for its 15 cells). We report these provisional findings,
 describe the measurement infrastructure and failure taxonomy that make them
 auditable, and discuss why single-episode benchmarks cannot price a harness.
@@ -47,27 +48,29 @@ added together, benchmarked together, and justified by aggregate scores. That
 practice cannot answer the question a budget-constrained user actually asks:
 *which capability pays for itself, on what kind of task, and at what cost?*
 
-We address the question with a controlled ablation on a production agent. The
-target system, Prime Agent, exposes two abstractions that motivate the factors:
-the **recursive language model (RLM)** pattern treats context as a variable and
-subagents as function calls inside a persistent Python REPL, and the
-**continual harness** stores prompts, memories, skill descriptions, and
+We address the question with a controlled ablation inside a production
+RLM-style harness. Two abstractions that such harnesses instantiate motivate the
+factors: the **recursive language model (RLM)** pattern treats context as a
+variable and subagents as function calls inside a persistent interpreter, and
+the **continual harness** stores prompts, memories, skill descriptions, and
 subagent specifications as durable state refined through small, evidence-backed
-updates.
+updates. The unit of analysis is the harness component, not the tool: we use one
+production implementation as the instrument, keep it unnamed in the claims, and
+name it only where reproducibility requires it (Appendix C).
 
 We make three contributions:
 
-1. **A typed, product-safe treatment layer.** R, S, and M become independent
+1. **A typed, deployment-safe treatment layer.** R, S, and M become independent
    binary switches with stable IDs (`r1-s1-m1` … `r0-s0-m0`). Every switch is
    implemented at the boundary where the capability is admitted, not by prompt
-   text alone, and the default entry point always resolves the full product.
+   text alone, and the default entry point always resolves the fully enabled harness.
 2. **An auditable measurement harness.** An eight-configuration matrix runner
    with per-cell quotas, per-cell usage and latency records, transport-level
    retries with failure classification, resumable JSONL records, and frozen
    protocol hashes.
 3. **A first factorial reading.** On a cheap API model, I and E are at ceiling;
    R costs 40–50% more with no accuracy gain; and M measurably improves
-   cross-episode transfer (19/20 vs 8/20) while the full product is the cheapest
+   cross-episode transfer (19/20 vs 8/20) while the fully enabled harness is the cheapest
    accurate configuration.
 
 The rest of the paper follows the plan in the study design: related work (§2),
@@ -131,7 +134,7 @@ once at session assembly and each has a single admission boundary.
   digest injection, and removes the refine skill so the prompt advertises no
   refused capability. A normal `create_session` never writes this setting.
 
-The product CLI has no treatment flag. Experiment hosts select a treatment
+The shipped CLI has no treatment flag. Experiment hosts select a treatment
 through `create_session_with_treatment`; the headless runner sets
 `PRIME_AGENT_HARNESS_TREATMENT` to one of the eight stable IDs and an unknown
 value fails loudly.
@@ -228,8 +231,8 @@ templates and a five/five positive/negative split; those numbers are
 
 ### 5.3 Cost of a capability
 
-The full product (`r1-s1-m1`) was both the most accurate arm (15/15) and the
-cheapest (¥1.87 for its 15 cells; 9.0 requests per cell). R-off arms paid
+The fully enabled configuration (`r1-s1-m1`) was both the most accurate arm
+(15/15) and the cheapest (¥1.87 for its 15 cells; 9.0 requests per cell). R-off arms paid
 40–50% more (e.g. `r0-s1-m1`: ¥3.73, 12.6 requests per cell) for the same
 accuracy. S-off and M-off changed prompt size only slightly, consistent with the
 removed capability text rather than a behavioural difference on these tasks.
@@ -263,7 +266,7 @@ than stale reuse; M-on cells reconciled the stated change. The main run
 separates positive from negative templates by construction.
 
 Safety framing: a harness that persists state can persist *wrong* state. Our
-treatment layer keeps rollback and provenance in the product, but the experiment
+treatment layer keeps rollback and provenance in the implementation, but the experiment
 does not yet quantify mitigation strategies; we flag this as the most important
 follow-up for deployment.
 
@@ -283,6 +286,10 @@ follow-up for deployment.
   request metadata, not by reproducibility at the token level.
 * **Infrastructure noise.** The pilot's wall-clock was dominated by transport
   stalls; failure classification and retries mitigate but do not eliminate this.
+* **One implementation.** The testbed is a single production harness; we do not
+  claim implementation independence. The factors are defined at capability
+  boundaries that any RLM-style harness exposes, but a second implementation
+  would strengthen the generalization.
 * **Draft status.** The main experiment, repeat runs, strong-model validation,
   selector, and external benchmarks are not yet reflected here.
 
@@ -290,12 +297,12 @@ follow-up for deployment.
 
 ## 9. Conclusion
 
-Decomposing an agent harness into R, S, and M is feasible in a production system
-without changing the product path, and the resulting measurements already show a
+Decomposing an agent harness into R, S, and M is feasible in a production harness
+without changing the default path, and the resulting measurements already show a
 shape that aggregate benchmarks hide: on easy, single-episode tasks the harness
 is pure cost (R-off is 40–50% more expensive for the same accuracy), while on a
 cross-episode task durable state is worth a large accuracy difference. The full
-product configuration was the cheapest accurate arm in the pilot. Whether these
+fully enabled configuration was the cheapest accurate arm in the pilot. Whether these
 effects survive ten templates, a second model, and real-world tasks is the
 subject of the main experiment and follow-up work.
 
@@ -303,7 +310,7 @@ subject of the main experiment and follow-up work.
 
 ## Appendix A — Treatment IDs
 
-`r1-s1-m1` full product; `r1-s1-m0`, `r1-s0-m1`, `r1-s0-m0`, `r0-s1-m1`,
+`r1-s1-m1` fully enabled harness; `r1-s1-m0`, `r1-s0-m1`, `r1-s0-m0`, `r0-s1-m1`,
 `r0-s1-m0`, `r0-s0-m1`, `r0-s0-m0` as defined in §3.1. The normal CLI never
 selects any of them.
 
@@ -318,8 +325,11 @@ selects any of them.
 
 ## Appendix C — Artifact map
 
-See `paper/README.md` for the file list, reproduction commands, and the frozen
-hash files.
+Implementation artifact: the study was instrumented inside Prime Agent, an
+open-source RLM-style coding agent (the implementation is named here only for
+reproducibility; the claims concern harness components, not the product). See
+`paper/README.md` for the file list, reproduction commands, and the frozen hash
+files.
 
 ## Appendix D — Pilot family × treatment table
 
