@@ -1,5 +1,5 @@
-# What Does the Harness Buy?
-## A Factorial Ablation of Persistent Execution, Recursive Delegation, and Durable State in RLM-Style Coding Agents
+# The Harness Ledger
+## What Persistent Execution, Recursive Delegation, and Durable State Cost — and When They Pay Off
 
 > **DRAFT — provisional results.** Numbers marked *pilot* come from a 120-cell
 > calibration run; the 720-cell main experiment is in progress and is not yet
