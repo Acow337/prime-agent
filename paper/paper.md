@@ -25,17 +25,19 @@ the default operating path unchanged, and we evaluate them on three task
 families: multi-table information management (I), small multi-module bug fixing
 (E), and cross-episode transfer (T).
 
-In a 120-cell pilot (one cheap API model, five instances per family), the
-information and engineering families sit at ceiling: all eight treatments solve
-them, and only R's cost is visible (R-off uses ~40–50% more tokens, time, and
-money for the same accuracy). The transfer family separates one factor: every
-M-on cell persisted 2.6–3.1 KB of harness state and scored 1.0 in 19 of 20
-cells, while M-off cells succeeded in only 8 of 20 (Fisher exact
-* p* ≈ 0.0004; bootstrap 95% CI for the mean-score difference ≈ [0.11, 0.28]).
-The fully enabled configuration was simultaneously the most accurate (15/15) and
-the cheapest (¥1.87 for its 15 cells). We report these provisional findings,
-describe the measurement infrastructure and failure taxonomy that make them
-auditable, and discuss why single-episode benchmarks cannot price a harness.
+We evaluate all eight configurations on 30 instances per family (720 cells, one
+cheap API model). On this suite the three capabilities are **accuracy-neutral**:
+every treatment solves 84-88 of 90 cells, and the transfer comparison is 115/120
+for M-on versus 117/120 for M-off (Fisher exact *p* = 0.72; bootstrap 95% CI for
+the mean-score difference [-0.010, 0.015]). What the harness changes is **cost**:
+the fully enabled configuration is the cheapest arm (¥16.87 for its 90 cells),
+turning R off raises provider requests by 14-41% depending on the family, and
+turning M off roughly doubles the transfer family's spend because every episode
+must re-derive the rule. A 120-cell pilot on a single transfer template had
+suggested a large M accuracy effect (19/20 vs 8/20); that effect did not survive
+ten templates, and we report a mechanism check that isolates whether it returns
+when the rule cannot be guessed. The result reframes the harness contract:
+capabilities buy cheaper repeated work, not better single answers.
 
 ---
 
@@ -68,10 +70,13 @@ We make three contributions:
    with per-cell quotas, per-cell usage and latency records, transport-level
    retries with failure classification, resumable JSONL records, and frozen
    protocol hashes.
-3. **A first factorial reading.** On a cheap API model, I and E are at ceiling;
-   R costs 40–50% more with no accuracy gain; and M measurably improves
-   cross-episode transfer (19/20 vs 8/20) while the fully enabled harness is the cheapest
-   accurate configuration.
+3. **A factorial reading of 720 cells.** Across three families the R/S/M
+   factors are accuracy-neutral on this suite; the durable-state comparison is
+   115/120 versus 117/120. Capability costs are large and opposite in sign to the
+   pilot's apparent benefit: the fully enabled harness is the cheapest accurate
+   arm, R-off raises requests by 14-41%, and M-off roughly doubles transfer
+   spend. A single-template pilot's large M effect does not replicate, which
+   motivates a non-guessable-rule mechanism check.
 
 The rest of the paper follows the plan in the study design: related work (§2),
 treatments (§3), benchmark and protocol (§4), component effects (§5),
@@ -197,50 +202,65 @@ comparable only when those hashes match.
 
 ## 5. Component Effects
 
-### 5.1 Pilot
+### 5.1 The main matrix
 
-The 120-cell pilot (3 families × 5 instances × 8 treatments, cheap API model)
-cost ¥26.13 and 20.0M prompt tokens; 119 cells completed and one E cell hit the
-240 s timeout. Family aggregates:
+The main run crosses 30 instances per family with all eight treatments and
+completes after retrying transport failures: 720 cells, 448 infrastructure
+retries, and ¥213.93 of provider spend total (the tables below count completed
+cells only, ¥205.07). The suite is not saturated for the model — E and T still
+fail a few cells — but individual cells differ in weight: the I family uses about
+four requests per cell, T about twenty.
 
-| Family | Success | Mean score |
-| --- | ---: | ---: |
-| I | 40/40 | 1.00 |
-| E | 39/40 | 0.98 |
-| T | 27/40 | 0.89 |
+| treatment | success | mean score | requests/cell | cost (¥) |
+| --- | ---: | ---: | ---: | ---: |
+| `r1-s1-m1` (full) | 85/90 | 0.991 | 10.5 | 16.87 |
+| `r1-s1-m0` | 84/90 | 0.988 | 13.0 | 25.85 |
+| `r1-s0-m1` | 87/90 | 0.995 | 11.6 | 22.97 |
+| `r1-s0-m0` | 88/90 | 0.997 | 12.9 | 26.25 |
+| `r0-s1-m1` | 86/90 | 0.993 | 13.3 | 23.02 |
+| `r0-s1-m0` | 86/90 | 0.989 | 15.7 | 32.12 |
+| `r0-s0-m1` | 87/90 | 0.995 | 13.7 | 25.73 |
+| `r0-s0-m0` | 86/90 | 0.992 | 16.2 | 32.27 |
 
-I is at ceiling for every treatment, so the pilot cannot price R or S from
-accuracy. E is near ceiling. The signal is in T.
+### 5.2 Capabilities are accuracy-neutral on this suite
 
-### 5.2 Transfer
+Across all eight treatments the success spread is 84-88 of 90 cells and the mean
+score spread is 0.988-0.997. The I family is at ceiling in every arm (29/30); E
+ranges 26-30; T is saturated as well. For the transfer family, where the pilot
+had shown a large gap:
 
 | Arm | Success | Mean score |
 | --- | ---: | ---: |
-| M-on (persistent harness) | 19/20 | 0.98 |
-| M-off (fresh state per episode) | 8/20 | 0.79 |
+| M-on | 115/120 | 0.9929 |
+| M-off | 117/120 | 0.9908 |
 
-Fisher exact *p* ≈ 0.0004; bootstrap 95% CI for the mean-score difference
-≈ [0.11, 0.28]. Every M-on cell wrote 2.6–3.1 KB of harness state; M-off cells
-wrote none. This is consistent with the intended mechanism: a stored convention
-is reusable in episode 2 and reconcilable against the changed rule in episode 3,
-while a stateless session must re-derive the rule each time.
+Fisher exact *p* = 0.72; bootstrap 95% CI for the mean-score difference
+[-0.010, 0.015]. On these tasks, then, no factor moves accuracy, and the pilot's
+effect is not replicated.
 
-The pilot T family used a *single* template. The main run replaces it with ten
-templates and a five/five positive/negative split; those numbers are
-`[main run in progress]`.
+### 5.3 Cost is where the harness shows up
 
-### 5.3 Cost of a capability
+The fully enabled harness is the cheapest accurate arm at ¥16.87 per 90 cells
+and 10.5 requests per cell. Disabling R raises requests by 41% (I), 34% (E), and
+14% (T); the most expensive arm (`r0-s0-m0`) costs roughly twice the full one.
+The transfer family shows the same pattern for M: with R on, M-off costs ¥16.79
+versus ¥9.11 for M-on; with R off, ¥22.93 versus ¥10.26. The mechanism is
+mundane and measurable: without durable state every episode re-derives the
+convention, so the model spends more turns to reach the same answer.
 
-The fully enabled configuration (`r1-s1-m1`) was both the most accurate arm
-(15/15) and the cheapest (¥1.87 for its 15 cells; 9.0 requests per cell). R-off arms paid
-40–50% more (e.g. `r0-s1-m1`: ¥3.73, 12.6 requests per cell) for the same
-accuracy. S-off and M-off changed prompt size only slightly, consistent with the
-removed capability text rather than a behavioural difference on these tasks.
+### 5.4 Why the pilot said otherwise
 
-### 5.4 Interactions
+The pilot used a single transfer template and found 19/20 versus 8/20. With ten
+templates the gap disappears. We treat the pilot as calibration, not evidence:
+single-template transfer effects are fragile, and a round threshold (5%, 800 ms)
+is plausibly guessable even without memory. Section 7 reports a mechanism check
+with arbitrary thresholds and no file channel between episodes.
 
-`[main run in progress]` — the main matrix reports R×S, R×M, and S×M cells and
-a paired analysis across the 30 instances per family.
+### 5.5 Interactions
+
+With every cell at or near ceiling, accuracy interactions are not estimable on
+this suite; the matrix's value is the cost decomposition, where R and M compound
+(the two-factor-off arms are the most expensive).
 
 ---
 
@@ -257,54 +277,61 @@ omitted from the present draft's claims.
 
 ## 7. Negative Transfer and Safety
 
-Five of the ten transfer templates change one threshold in episode 3. An agent
-that stored the old rule and blindly reapplies it mislabels the edge cases; the
-verifier reports the per-item expected/actual labels, so stale-rule reuse is
-visible rather than inferred. In the pilot's single negative template, several
-M-off cells lost episode 3 entirely, consistent with rule re-derivation rather
-than stale reuse; M-on cells reconciled the stated change. The main run
-separates positive from negative templates by construction.
+Five of the ten transfer templates change one threshold in episode 3, and the
+prompt states the change explicitly. The main matrix does not show a stale-rule
+penalty: negative-template cells score like positive ones (T mean 0.983-1.0
+across arms), which suggests the agents read the stated change rather than
+blindly reapplying a stored rule. A harness that can persist *wrong* state
+remains a real risk; our verifier reports per-item expected/actual labels so
+stale reuse would be visible if it occurred, and the treatment layer keeps
+rollback and provenance in the implementation.
 
-Safety framing: a harness that persists state can persist *wrong* state. Our
-treatment layer keeps rollback and provenance in the implementation, but the experiment
-does not yet quantify mitigation strategies; we flag this as the most important
-follow-up for deployment.
+The pilot's apparent M effect does not survive template diversity (§5.4), and
+the mechanism check with non-guessable thresholds (§5.4, running) is designed to
+separate "memory helps" from "the rule was inferable all along". We treat any
+positive result there as conditional on non-derivable state, not as a general
+accuracy benefit.
 
 ---
 
 ## 8. Limitations
 
-* **Synthetic tasks.** I and E are self-built and deterministic. They are
-  mechanism tests, not an ecosystem sample; both are at or near ceiling for the
-  cheap model, so they cannot establish R or S accuracy effects.
-* **One model.** All pilot numbers come from `deepseek-v4-flash`. Strong-model
+* **Ceiling effects.** I, E, and T all sit at or near ceiling for the cheap
+  model. Accuracy effects of R and S are therefore not identifiable on this
+  suite; the study prices the capabilities in cost, not accuracy, and any
+  accuracy claim needs harder tasks.
+* **Synthetic tasks.** All three families are self-built and deterministic.
+  They are mechanism tests, not an ecosystem sample; external validity needs
+  public benchmarks.
+* **One model.** All numbers come from `deepseek-v4-flash`. Strong-model
   replication and a second model are pending.
-* **Small n.** Five instances per family in the pilot; the main run uses 30,
-  but treatment-level variance is still estimated from a synthetic generator.
-* **Provider black box.** Token accounting and streaming behaviour come from the
-  provider; service drift is controlled by short time blocks and recorded
-  request metadata, not by reproducibility at the token level.
-* **Infrastructure noise.** The pilot's wall-clock was dominated by transport
-  stalls; failure classification and retries mitigate but do not eliminate this.
 * **One implementation.** The testbed is a single production harness; we do not
-  claim implementation independence. The factors are defined at capability
-  boundaries that any RLM-style harness exposes, but a second implementation
-  would strengthen the generalization.
-* **Draft status.** The main experiment, repeat runs, strong-model validation,
-  selector, and external benchmarks are not yet reflected here.
+  claim implementation independence.
+* **Infrastructure noise.** The main run needed 448 transport retries and the
+  effective spend (¥213.93) is above the completed-cell spend (¥205.07).
+  Failure classification and per-cell retries mitigate but do not eliminate
+  this, and the wall-clock cost was dominated by stalls rather than model
+  compute.
+* **Pending work.** The non-guessable-threshold mechanism check, repeat runs,
+  strong-model validation, the budget-aware selector, and external benchmarks
+  are not yet reported.
 
 ---
 
 ## 9. Conclusion
 
-Decomposing an agent harness into R, S, and M is feasible in a production harness
-without changing the default path, and the resulting measurements already show a
-shape that aggregate benchmarks hide: on easy, single-episode tasks the harness
-is pure cost (R-off is 40–50% more expensive for the same accuracy), while on a
-cross-episode task durable state is worth a large accuracy difference. The full
-fully enabled configuration was the cheapest accurate arm in the pilot. Whether these
-effects survive ten templates, a second model, and real-world tasks is the
-subject of the main experiment and follow-up work.
+Decomposing an agent harness into R, S, and M is feasible in a production system
+without changing the default path, and the full eight-configuration matrix gives
+a result that aggregate benchmarks hide: on a 720-cell suite the capabilities are
+**accuracy-neutral** while their costs differ by a factor of two. The fully
+enabled harness is the cheapest accurate arm; turning R off raises requests by
+14-41%, and turning M off roughly doubles transfer spend because every episode
+must re-derive the convention. A single-template pilot had suggested a large
+accuracy benefit for durable state; it did not replicate across ten templates,
+which is exactly the kind of fragility that single-episode evaluations cannot
+see. Whether non-guessable state restores an accuracy effect is the mechanism
+check we report next; whether the cost effects survive a second model and real
+tasks is the subject of follow-up work.
 
 ---
 
@@ -330,6 +357,25 @@ open-source RLM-style coding agent (the implementation is named here only for
 reproducibility; the claims concern harness components, not the product). See
 `paper/README.md` for the file list, reproduction commands, and the frozen hash
 files.
+
+## Appendix D — Main matrix and pilot tables
+
+Main matrix (720 cells, completed cells only; transfer effect computed on the
+T family):
+
+| treatment | success | mean score | requests/cell | cost (¥) |
+| --- | ---: | ---: | ---: | ---: |
+| `r1-s1-m1` | 85/90 | 0.991 | 10.5 | 16.87 |
+| `r1-s1-m0` | 84/90 | 0.988 | 13.0 | 25.85 |
+| `r1-s0-m1` | 87/90 | 0.995 | 11.6 | 22.97 |
+| `r1-s0-m0` | 88/90 | 0.997 | 12.9 | 26.25 |
+| `r0-s1-m1` | 86/90 | 0.993 | 13.3 | 23.02 |
+| `r0-s1-m0` | 86/90 | 0.989 | 15.7 | 32.12 |
+| `r0-s0-m1` | 87/90 | 0.995 | 13.7 | 25.73 |
+| `r0-s0-m0` | 86/90 | 0.992 | 16.2 | 32.27 |
+
+Pilot (120 cells, single transfer template; generated by
+`python3 experiments/harness-ablation/runner/analyze.py --results .../pilot-120`):
 
 ## Appendix D — Pilot family × treatment table
 

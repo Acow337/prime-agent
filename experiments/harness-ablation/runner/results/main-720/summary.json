@@ -104,41 +104,21 @@
     }
   },
   "counts": {
-    "completed": 186,
-    "failed": 433,
-    "total": 619
+    "completed": 2,
+    "failed": 0,
+    "total": 2
   },
   "mode": "live",
   "treatments": {
     "r0-s0-m0": {
-      "mean_score": 0.9786,
-      "runs": 14,
-      "success_rate": 0.9286
-    },
-    "r1-s0-m0": {
-      "mean_score": 0.9962,
-      "runs": 44,
-      "success_rate": 0.9773
-    },
-    "r1-s0-m1": {
-      "mean_score": 0.9928,
-      "runs": 63,
-      "success_rate": 0.9524
-    },
-    "r1-s1-m0": {
-      "mean_score": 0.9883,
-      "runs": 38,
-      "success_rate": 0.9474
-    },
-    "r1-s1-m1": {
-      "mean_score": 0.987,
-      "runs": 27,
-      "success_rate": 0.9259
+      "mean_score": 1.0,
+      "runs": 2,
+      "success_rate": 1.0
     }
   },
   "usage": {
-    "actual_cost_cny": 63.557963,
-    "completion_tokens": 808167,
-    "prompt_tokens": 49732302
+    "actual_cost_cny": 0.413184,
+    "completion_tokens": 9472,
+    "prompt_tokens": 306432
   }
 }

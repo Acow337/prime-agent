@@ -12,15 +12,11 @@ requires it; the claims do not depend on the product identity.
 
 ## Status: DRAFT, not submission-ready
 
-The numbers currently in the draft are from:
-
-1. the 120-cell pilot (all three families, 8 treatments, cheap model), and
-2. the implementation evidence (treatment validity tests, verifier self-checks).
-
-The 720-cell main experiment is still running; the draft marks those cells as
-`[main run in progress]` and must be updated before any claim is made from it.
-No strong-model replication, no external benchmark, and no selector evaluation
-has been run yet.
+The numbers in the draft are from the completed 720-cell main matrix (three
+families x 30 instances x 8 treatments) and, for contrast, the 120-cell pilot.
+The non-guessable-threshold mechanism check, repeat runs, strong-model
+replication, selector evaluation, and external benchmarks are still pending; the
+draft marks those as pending rather than claiming them.
 
 ## Evidence files
 
