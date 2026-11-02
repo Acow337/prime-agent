@@ -34,6 +34,7 @@ FAMILIES = {
     "e": "families.e_family",
     "t": "families.t_family",
     "tm": "families.t_mech_family",
+    "lb": "families.lb_family",
 }
 TREATMENTS = (
     "r1-s1-m1",
@@ -85,8 +86,9 @@ def planned_runs(config: dict[str, Any]) -> list[dict[str, Any]]:
     """The full matrix: every enabled model x treatment x family instance."""
     runs = []
     loaded = families_for(config)
+    treatments = config.get("treatments") or TREATMENTS
     for model_key in config["models"]:
-        for treatment in TREATMENTS:
+        for treatment in treatments:
             for family_key, instances in config["families"].items():
                 if not instances:
                     continue

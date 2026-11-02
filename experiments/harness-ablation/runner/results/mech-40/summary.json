@@ -1,0 +1,29 @@
+{
+  "config": {
+    "families": {
+      "tm": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    "hard_budget_cny": 400.0,
+    "models": {
+      "cheap": "deepseek-v4-flash"
+    }
+  },
+  "counts": {
+    "completed": 0,
+    "failed": 0,
+    "total": 0
+  },
+  "mode": "live",
+  "treatments": {},
+  "usage": {
+    "actual_cost_cny": 0,
+    "completion_tokens": 0,
+    "prompt_tokens": 0
+  }
+}
