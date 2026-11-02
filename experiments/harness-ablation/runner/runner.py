@@ -33,6 +33,7 @@ FAMILIES = {
     "i": "families.i_family",
     "e": "families.e_family",
     "t": "families.t_family",
+    "tm": "families.t_mech_family",
 }
 TREATMENTS = (
     "r1-s1-m1",
@@ -314,7 +315,11 @@ def run_matrix(
                     )
                     agent_dir.mkdir(parents=True, exist_ok=True)
                     agent_dirs.append(agent_dir)
-                    env = run_smoke.isolated_env(task_root, api_key)
+                    # M-off must have no durable channel at all, so even HOME,
+                    # TMPDIR and the session dir are fresh per episode; M-on
+                    # shares the episode root with the series.
+                    episode_root = task_root if shared_agent else task_root / f"ep{index}"
+                    env = run_smoke.isolated_env(episode_root, api_key)
                     env["PRIME_AGENT_CODING_AGENT_DIR"] = str(agent_dir)
                     env["PRIME_AGENT_HARNESS_TREATMENT"] = run["treatment"]
                     env["PRIME_AGENT_SESSION_DIR"] = str(task_root / f"sessions-ep{index}")

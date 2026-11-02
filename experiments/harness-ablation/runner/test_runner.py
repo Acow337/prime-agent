@@ -14,6 +14,7 @@ sys.path.insert(0, str(HERE / "families"))
 
 import e_family  # noqa: E402
 import t_family  # noqa: E402
+import t_mech_family  # noqa: E402
 import i_family  # noqa: E402
 import runner  # noqa: E402
 
@@ -90,6 +91,32 @@ class TFamilyTests(unittest.TestCase):
         old = _json.loads(case.episodes[1].reference)["items"]
         new = _json.loads(case.episodes[2].reference)["items"]
         self.assertNotEqual(old, new)
+
+
+class MechFamilyTests(unittest.TestCase):
+    def test_thresholds_are_arbitrary_and_instance_specific(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = t_mech_family.materialize(1, root)
+            second = t_mech_family.materialize(2, root)
+            first_rule = first.episodes[0].prompt
+            second_rule = second.episodes[0].prompt
+        first_thresholds = t_mech_family._thresholds(1)
+        second_thresholds = t_mech_family._thresholds(2)
+        self.assertIn(str(first_thresholds.high_error), first_rule)
+        self.assertIn(str(first_thresholds.high_latency), first_rule)
+        self.assertNotIn(str(first_thresholds.high_error), second_rule)
+        self.assertNotIn(str(second_thresholds.high_error), first_rule)
+        self.assertNotIn("800", first_rule)
+
+    def test_reference_answers_verify_and_episodes_are_scored_like_t(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = t_mech_family.materialize(1, Path(directory))
+        self.assertEqual([e.scored for e in case.episodes], [False, True, True])
+        for index, episode in enumerate(case.episodes):
+            self.assertTrue(t_mech_family.verify_episode(case, index, episode.reference)["success"])
+        self.assertFalse(any(str(t_mech_family._thresholds(1).high_error) in e.prompt for e in case.episodes[1:]))
+        self.assertTrue(t_mech_family.dry_run_verify(case)["success"])
 
 
 class MatrixRunnerTests(unittest.TestCase):
