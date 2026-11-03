@@ -35,6 +35,7 @@ FAMILIES = {
     "t": "families.t_family",
     "tm": "families.t_mech_family",
     "lb": "families.lb_family",
+    "lme": "families.lme_family",
 }
 TREATMENTS = (
     "r1-s1-m1",

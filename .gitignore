@@ -11,3 +11,7 @@ fmt-*.log
 tests-*.log
 test-compile-*.log
 
+
+# SWE-bench working trees and agent state (large, reproducible)
+experiments/harness-ablation/external/results-*/repos/
+experiments/harness-ablation/external/results-*/agents/

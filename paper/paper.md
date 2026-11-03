@@ -253,8 +253,17 @@ convention, so the model spends more turns to reach the same answer.
 The pilot used a single transfer template and found 19/20 versus 8/20. With ten
 templates the gap disappears. We treat the pilot as calibration, not evidence:
 single-template transfer effects are fragile, and a round threshold (5%, 800 ms)
-is plausibly guessable even without memory. Section 7 reports a mechanism check
-with arbitrary thresholds and no file channel between episodes.
+is plausibly guessable even without memory.
+
+A 40-cell mechanism check replaced the round thresholds with arbitrary
+per-instance values (e.g. 716 bp / 744 ms), repeated them in no episode after the
+first, and gave M-off episodes a fresh HOME, TMPDIR, and session directory so a
+note could not be smuggled through files. Accuracy is again at ceiling in all
+eight arms (40/40), but the cost split holds: M-on arms use 14-20 requests and
+¥0.95-2.31 per five tasks, M-off arms 22-27 requests and ¥2.04-4.05. The
+remaining confound is the row distribution: most rows sit far from the
+thresholds, so an approximate rule still labels them correctly; an accuracy
+effect would need rows concentrated at the decision boundary.
 
 ### 5.5 Interactions
 

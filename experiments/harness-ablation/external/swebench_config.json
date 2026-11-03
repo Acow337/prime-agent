@@ -1,0 +1,14 @@
+{
+  "provider": "deepseek",
+  "models": {
+    "cheap": "deepseek-v4-flash"
+  },
+  "input_usd_per_million": 0.15,
+  "output_usd_per_million": 0.6,
+  "context_tokens": 1000000,
+  "response_tokens": 1024,
+  "usd_to_cny": 8.0,
+  "max_requests": 4000,
+  "max_transport_retries": 2,
+  "hard_budget_cny": 3000.0
+}
