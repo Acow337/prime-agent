@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -323,6 +324,15 @@ def run_matrix(
                     # TMPDIR and the session dir are fresh per episode; M-on
                     # shares the episode root with the series.
                     episode_root = task_root if shared_agent else task_root / f"ep{index}"
+                    if shared_agent:
+                        workdir = episode.workdir
+                    else:
+                        # M-off must not see sibling episodes on disk either:
+                        # copy this episode's inputs into its own directory.
+                        workdir = task_root / "work" / f"ep{index}"
+                        if workdir.exists():
+                            shutil.rmtree(workdir)
+                        shutil.copytree(episode.workdir, workdir)
                     env = run_smoke.isolated_env(episode_root, api_key)
                     env["PRIME_AGENT_CODING_AGENT_DIR"] = str(agent_dir)
                     env["PRIME_AGENT_HARNESS_TREATMENT"] = run["treatment"]
@@ -338,7 +348,7 @@ def run_matrix(
                     try:
                         completed = subprocess.run(
                             build_command(binary, config, model_id, episode.prompt),
-                            cwd=episode.workdir,
+                            cwd=workdir,
                             env=env,
                             capture_output=True,
                             text=True,
