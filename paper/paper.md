@@ -39,7 +39,7 @@ ten templates, and we report a mechanism check that isolates whether it returns
 when the rule cannot be guessed. Three external checks agree: on LongBench-v2
 the arms range 0.65-0.79 with no significant ordering; on SWE-bench Verified the
 full harness and the all-off harness each resolve 10 of 12 repositories (same
-unresolved pair); and on LongMemEval the M-off arm is not worse (6/9 versus
+unresolved pair); and on LongMemEval the M-off arm is not worse (7/10 versus
 5/10). The result reframes the harness contract: capabilities buy cheaper
 repeated work, not better single answers.
 
@@ -266,8 +266,14 @@ note could not be smuggled through files. Accuracy is again at ceiling in all
 eight arms (40/40), but the cost split holds: M-on arms use 14-20 requests and
 ¥0.95-2.31 per five tasks, M-off arms 22-27 requests and ¥2.04-4.05. The
 remaining confound is the row distribution: most rows sit far from the
-thresholds, so an approximate rule still labels them correctly; an accuracy
-effect would need rows concentrated at the decision boundary.
+thresholds, so an approximate rule still labels them correctly. A 20-cell
+boundary variant put every row within two basis points of a threshold; M-off
+still scored at ceiling (19/20 cells at 1.0). The reason is that the row
+values themselves bracket the thresholds: an agent that can label the data
+can recover the boundary from the inputs, so the exact convention is
+identifiable without memory. Making memory necessary would require the rule
+to depend on information absent from the inputs, not merely on fine-grained
+thresholds.
 
 ### 5.5 Interactions
 
@@ -286,14 +292,14 @@ outside the self-built suite.
 | --- | --- | ---: | ---: |
 | LongBench-v2 | 20 long-context multiple-choice questions, contexts 57k-170k chars, four arms | 0.700 | 0.650 |
 | SWE-bench Verified | 12 repositories, agent patch scored by the official harness | 10/12 resolved | 10/12 resolved |
-| LongMemEval | 10 memory questions, read/read/QA episodes | 5/10 (M-on) | 6/9 (M-off) |
+| LongMemEval | 10 memory questions, read/read/QA episodes | 5/10 (M-on) | 7/10 (M-off) |
 
 SWE-bench's resolved sets are identical: both arms fix astropy, matplotlib,
 seaborn, flask, requests, xarray, pylint, scikit-learn, sphinx, and sympy, and
 both miss django and pytest. LongMemEval is the proxy for M: the two reading
 episodes ask the agent to record durable facts, the QA episode withholds the
-transcripts, and the normalized-containment score is 0.50 for M-on versus 0.67
-for M-off. LongBench differences (0.65-0.79 across four arms) are within noise
+transcripts, and the normalized-containment score is 0.50 for M-on versus 0.70
+for M-off (40/40 cells completed). LongBench differences (0.65-0.79 across four arms) are within noise
 at n=20.
 
 The consistent picture is that on these distributions the capabilities do not
@@ -304,14 +310,26 @@ re-derived state expensive enough for persistence to pay off in correctness.
 
 ## 6. Budget-Aware Selection
 
-Planned, not yet evaluated. The selector takes a task description and a budget
-and predicts the cheapest configuration whose expected success exceeds a
-threshold; baselines are the eight fixed configurations plus an oracle and a
-random-choice baseline. We will report success-versus-cost Pareto curves on
-held-out instances and on the ten unseen transfer templates. This section is
-omitted from the present draft's claims.
+The selector takes a budget and chooses one treatment per family. With the main
+matrix we can evaluate the policy class directly: estimate each family-treatment
+success and cost, enumerate all 512 per-family policies, and keep the Pareto
+frontier. This is in-sample (the policy is scored on the instances that produced
+the estimates), so it describes the trade-off's shape rather than a held-out
+gain.
 
----
+| policy | cost (¥/90 tasks) | mean score |
+| --- | ---: | ---: |
+| always full | 16.87 | 0.9911 |
+| always off | 32.27 | 0.9916 |
+| oracle per family | 26.04 | 0.9981 |
+
+The frontier has seven points. Its cheapest point, ¥16.82, is the full harness
+minus S on the information family, and it matches the full harness score; the
+most expensive point (¥25.98) reaches 0.9981. In other words, the configuration
+that is already the default is cost-optimal, and spending up to 54% more buys at
+most 0.7 percentage points of mean score, which is inside the noise of 90 cells.
+A held-out selector would therefore be predicting cost, not accuracy — the same
+conclusion as the component analysis.
 
 ## 7. Negative Transfer and Safety
 

@@ -37,8 +37,8 @@
   "mode": "live",
   "treatments": {},
   "usage": {
-    "actual_cost_cny": 0.246804,
-    "completion_tokens": 2604,
-    "prompt_tokens": 195254
+    "actual_cost_cny": 0.339135,
+    "completion_tokens": 5168,
+    "prompt_tokens": 261941
   }
 }
