@@ -39,8 +39,8 @@ ten templates, and we report a mechanism check that isolates whether it returns
 when the rule cannot be guessed. Three external checks agree: on LongBench-v2
 the arms range 0.65-0.79 with no significant ordering; on SWE-bench Verified the
 full harness and the all-off harness each resolve 10 of 12 repositories (same
-unresolved pair); and on LongMemEval the M-off arm is not worse (7/10 versus
-5/10). The result reframes the harness contract: capabilities buy cheaper
+unresolved pair); and on LongMemEval the M-off arm is not worse (10/15 versus
+11/20). The result reframes the harness contract: capabilities buy cheaper
 repeated work, not better single answers.
 
 ---
@@ -292,14 +292,14 @@ outside the self-built suite.
 | --- | --- | ---: | ---: |
 | LongBench-v2 | 20 long-context multiple-choice questions, contexts 57k-170k chars, four arms | 0.700 | 0.650 |
 | SWE-bench Verified | 12 repositories, agent patch scored by the official harness | 10/12 resolved | 10/12 resolved |
-| LongMemEval | 10 memory questions, read/read/QA episodes | 5/10 (M-on) | 7/10 (M-off) |
+| LongMemEval | 10 memory questions, read/read/QA episodes | 11/20 (M-on) | 10/15 (M-off) |
 
 SWE-bench's resolved sets are identical: both arms fix astropy, matplotlib,
 seaborn, flask, requests, xarray, pylint, scikit-learn, sphinx, and sympy, and
 both miss django and pytest. LongMemEval is the proxy for M: the two reading
 episodes ask the agent to record durable facts, the QA episode withholds the
-transcripts, and the normalized-containment score is 0.50 for M-on versus 0.70
-for M-off (40/40 cells completed). LongBench differences (0.65-0.79 across four arms) are within noise
+transcripts, and the normalized-containment score is 0.55 for M-on versus 0.67
+for M-off (35/40 cells; the rest were transport losses). LongBench differences (0.65-0.79 across four arms) are within noise
 at n=20.
 
 The consistent picture is that on these distributions the capabilities do not
