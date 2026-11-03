@@ -1,0 +1,56 @@
+2026-11-03 18:55:58,127 - INFO - Creating container for sympy__sympy-11618...
+2026-11-03 18:55:58,151 - INFO - Container for sympy__sympy-11618 created: 5aee2959b65fc2cbf2ca68d60e797397d566e5ec8ed498e9efe211fee35ee157
+2026-11-03 18:55:58,215 - INFO - Container for sympy__sympy-11618 started: 5aee2959b65fc2cbf2ca68d60e797397d566e5ec8ed498e9efe211fee35ee157
+2026-11-03 18:55:58,215 - INFO - Intermediate patch for sympy__sympy-11618 written to logs/run_evaluation/main-prime-agent-r1-s1-m1/prime-agent-r1-s1-m1/sympy__sympy-11618/patch.diff, now applying to container...
+2026-11-03 18:55:58,307 - INFO - >>>>> Applied Patch:
+Checking patch sympy/geometry/point.py...
+Applied patch sympy/geometry/point.py cleanly.
+
+2026-11-03 18:55:58,534 - INFO - Git diff before:
+diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py
+index 593048464..00d3c534e 100644
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -266,8 +266,11 @@ def distance(self, p):
+         sqrt(x**2 + y**2)
+ 
+         """
+-        return sqrt(sum([(a - b)**2 for a, b in zip(
+-            self.args, p.args if isinstance(p, Point) else p)]))
++        p = tuple(p.args if isinstance(p, Point) else p)
++        n = max(len(self.args), len(p))
++        a = self.args + (S.Zero,)*(n - len(self.args))
++        b = p + (S.Zero,)*(n - len(p))
++        return sqrt(sum([(x - y)**2 for x, y in zip(a, b)]))
+ 
+     def taxicab_distance(self, p):
+         """The Taxicab Distance from self to point p.
+2026-11-03 18:55:58,534 - INFO - Eval script for sympy__sympy-11618 written to logs/run_evaluation/main-prime-agent-r1-s1-m1/prime-agent-r1-s1-m1/sympy__sympy-11618/eval.sh; copying to container...
+2026-11-03 18:56:03,314 - INFO - Test runtime: 4.74 seconds
+2026-11-03 18:56:03,314 - INFO - Test output for sympy__sympy-11618 written to logs/run_evaluation/main-prime-agent-r1-s1-m1/prime-agent-r1-s1-m1/sympy__sympy-11618/test_output.txt
+2026-11-03 18:56:03,380 - INFO - Git diff after:
+diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py
+index 593048464..00d3c534e 100644
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -266,8 +266,11 @@ def distance(self, p):
+         sqrt(x**2 + y**2)
+ 
+         """
+-        return sqrt(sum([(a - b)**2 for a, b in zip(
+-            self.args, p.args if isinstance(p, Point) else p)]))
++        p = tuple(p.args if isinstance(p, Point) else p)
++        n = max(len(self.args), len(p))
++        a = self.args + (S.Zero,)*(n - len(self.args))
++        b = p + (S.Zero,)*(n - len(p))
++        return sqrt(sum([(x - y)**2 for x, y in zip(a, b)]))
+ 
+     def taxicab_distance(self, p):
+         """The Taxicab Distance from self to point p.
+2026-11-03 18:56:03,380 - INFO - Grading answer for sympy__sympy-11618...
+2026-11-03 18:56:03,385 - INFO - report: {'sympy__sympy-11618': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'infra_failure': False, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_issue_11617'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_point3D', 'test_Point2D', 'test_issue_9214', 'test_transform'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sympy__sympy-11618: resolved: True
+2026-11-03 18:56:03,385 - INFO - Attempting to stop container sweb.eval.sympy__sympy-11618.main-prime-agent-r1-s1-m1...
+2026-11-03 18:56:18,638 - INFO - Container sweb.eval.sympy__sympy-11618.main-prime-agent-r1-s1-m1 stopped successfully.
+2026-11-03 18:56:18,638 - INFO - Attempting to remove container sweb.eval.sympy__sympy-11618.main-prime-agent-r1-s1-m1...
+2026-11-03 18:56:18,715 - INFO - Container sweb.eval.sympy__sympy-11618.main-prime-agent-r1-s1-m1 removed successfully.

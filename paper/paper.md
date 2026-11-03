@@ -36,8 +36,12 @@ turning M off roughly doubles the transfer family's spend because every episode
 must re-derive the rule. A 120-cell pilot on a single transfer template had
 suggested a large M accuracy effect (19/20 vs 8/20); that effect did not survive
 ten templates, and we report a mechanism check that isolates whether it returns
-when the rule cannot be guessed. The result reframes the harness contract:
-capabilities buy cheaper repeated work, not better single answers.
+when the rule cannot be guessed. Three external checks agree: on LongBench-v2
+the arms range 0.65-0.79 with no significant ordering; on SWE-bench Verified the
+full harness and the all-off harness each resolve 10 of 12 repositories (same
+unresolved pair); and on LongMemEval the M-off arm is not worse (6/9 versus
+5/10). The result reframes the harness contract: capabilities buy cheaper
+repeated work, not better single answers.
 
 ---
 
@@ -273,6 +277,31 @@ this suite; the matrix's value is the cost decomposition, where R and M compound
 
 ---
 
+### 5.6 External benchmarks
+
+Three public benchmarks test whether the accuracy-neutral result survives
+outside the self-built suite.
+
+| Benchmark | Setup | Full harness | All off |
+| --- | --- | ---: | ---: |
+| LongBench-v2 | 20 long-context multiple-choice questions, contexts 57k-170k chars, four arms | 0.700 | 0.650 |
+| SWE-bench Verified | 12 repositories, agent patch scored by the official harness | 10/12 resolved | 10/12 resolved |
+| LongMemEval | 10 memory questions, read/read/QA episodes | 5/10 (M-on) | 6/9 (M-off) |
+
+SWE-bench's resolved sets are identical: both arms fix astropy, matplotlib,
+seaborn, flask, requests, xarray, pylint, scikit-learn, sphinx, and sympy, and
+both miss django and pytest. LongMemEval is the proxy for M: the two reading
+episodes ask the agent to record durable facts, the QA episode withholds the
+transcripts, and the normalized-containment score is 0.50 for M-on versus 0.67
+for M-off. LongBench differences (0.65-0.79 across four arms) are within noise
+at n=20.
+
+The consistent picture is that on these distributions the capabilities do not
+move accuracy; the largest cost differences still come from the synthetic
+matrix (R-off +14-41% requests, M-off about double the transfer spend). We read
+this as a property of the tasks as much as of the harness: none of them make
+re-derived state expensive enough for persistence to pay off in correctness.
+
 ## 6. Budget-Aware Selection
 
 Planned, not yet evaluated. The selector takes a task description and a budget
@@ -338,9 +367,12 @@ enabled harness is the cheapest accurate arm; turning R off raises requests by
 must re-derive the convention. A single-template pilot had suggested a large
 accuracy benefit for durable state; it did not replicate across ten templates,
 which is exactly the kind of fragility that single-episode evaluations cannot
-see. Whether non-guessable state restores an accuracy effect is the mechanism
-check we report next; whether the cost effects survive a second model and real
-tasks is the subject of follow-up work.
+see, and three external benchmarks (LongBench-v2, SWE-bench Verified, and
+LongMemEval) repeat the same shape: no accuracy difference between the full
+harness and the all-off configuration, including on a benchmark built to test
+durable memory. The harness's measured value is cheaper repeated work; whether
+any task distribution converts that into correctness, and whether the cost
+effects survive a second model, are the open questions.
 
 ---
 

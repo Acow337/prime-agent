@@ -1,0 +1,68 @@
+2026-11-03 19:06:55,760 - INFO - Creating container for sympy__sympy-11618...
+2026-11-03 19:06:55,793 - INFO - Container for sympy__sympy-11618 created: d34ecdbea52a49742fab8e1a9681918bf072e85d16f552c7adcfd8a29d4a35ca
+2026-11-03 19:06:55,860 - INFO - Container for sympy__sympy-11618 started: d34ecdbea52a49742fab8e1a9681918bf072e85d16f552c7adcfd8a29d4a35ca
+2026-11-03 19:06:55,860 - INFO - Intermediate patch for sympy__sympy-11618 written to logs/run_evaluation/main-prime-agent-r0-s0-m0/prime-agent-r0-s0-m0/sympy__sympy-11618/patch.diff, now applying to container...
+2026-11-03 19:06:55,961 - INFO - >>>>> Applied Patch:
+Checking patch sympy/geometry/point.py...
+Applied patch sympy/geometry/point.py cleanly.
+
+2026-11-03 19:06:56,273 - INFO - Git diff before:
+diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py
+index 593048464..5b0c3aafe 100644
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -266,6 +266,20 @@ def distance(self, p):
+         sqrt(x**2 + y**2)
+ 
+         """
++        if type(p) is not type(self):
++            if len(p) == len(self):
++                return sqrt(sum([(a - b)**2 for a, b in zip(
++                    self.args, p.args if isinstance(p, Point) else p)]))
++            else:
++                p1 = [0] * max(len(p), len(self))
++                p2 = p.args if len(p.args) > len(self.args) else self.args
++
++                for i in range(min(len(p), len(self))):
++                    p1[i] = p.args[i] if len(p) < len(self) else self.args[i]
++
++                return sqrt(sum([(a - b)**2 for a, b in zip(
++                    p1, p2)]))
++
+         return sqrt(sum([(a - b)**2 for a, b in zip(
+             self.args, p.args if isinstance(p, Point) else p)]))
+2026-11-03 19:06:56,273 - INFO - Eval script for sympy__sympy-11618 written to logs/run_evaluation/main-prime-agent-r0-s0-m0/prime-agent-r0-s0-m0/sympy__sympy-11618/eval.sh; copying to container...
+2026-11-03 19:07:00,245 - INFO - Test runtime: 3.92 seconds
+2026-11-03 19:07:00,245 - INFO - Test output for sympy__sympy-11618 written to logs/run_evaluation/main-prime-agent-r0-s0-m0/prime-agent-r0-s0-m0/sympy__sympy-11618/test_output.txt
+2026-11-03 19:07:00,342 - INFO - Git diff after:
+diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py
+index 593048464..5b0c3aafe 100644
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -266,6 +266,20 @@ def distance(self, p):
+         sqrt(x**2 + y**2)
+ 
+         """
++        if type(p) is not type(self):
++            if len(p) == len(self):
++                return sqrt(sum([(a - b)**2 for a, b in zip(
++                    self.args, p.args if isinstance(p, Point) else p)]))
++            else:
++                p1 = [0] * max(len(p), len(self))
++                p2 = p.args if len(p.args) > len(self.args) else self.args
++
++                for i in range(min(len(p), len(self))):
++                    p1[i] = p.args[i] if len(p) < len(self) else self.args[i]
++
++                return sqrt(sum([(a - b)**2 for a, b in zip(
++                    p1, p2)]))
++
+         return sqrt(sum([(a - b)**2 for a, b in zip(
+             self.args, p.args if isinstance(p, Point) else p)]))
+2026-11-03 19:07:00,342 - INFO - Grading answer for sympy__sympy-11618...
+2026-11-03 19:07:00,346 - INFO - report: {'sympy__sympy-11618': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'infra_failure': False, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_issue_11617'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_point3D', 'test_Point2D', 'test_issue_9214', 'test_transform'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sympy__sympy-11618: resolved: True
+2026-11-03 19:07:00,347 - INFO - Attempting to stop container sweb.eval.sympy__sympy-11618.main-prime-agent-r0-s0-m0...
+2026-11-03 19:07:15,539 - INFO - Container sweb.eval.sympy__sympy-11618.main-prime-agent-r0-s0-m0 stopped successfully.
+2026-11-03 19:07:15,539 - INFO - Attempting to remove container sweb.eval.sympy__sympy-11618.main-prime-agent-r0-s0-m0...
+2026-11-03 19:07:15,603 - INFO - Container sweb.eval.sympy__sympy-11618.main-prime-agent-r0-s0-m0 removed successfully.
