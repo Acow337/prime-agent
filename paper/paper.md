@@ -2,9 +2,9 @@
 ## What Persistent Execution, Recursive Delegation, and Durable State Cost — and When They Pay Off
 
 > **DRAFT — complete results, pending submission.** The numbers come from the
-> 720-cell main matrix, a 60-cell repeat, and four external benchmarks
-> (LongBench-v2, SWE-bench Verified, LongMemEval, and a boundary-sensitivity
-> check). Strong-model replication is pending. This draft is an artifact of an
+> 720-cell main matrix, a 60-cell repeat, three external benchmarks
+> (LongBench-v2, SWE-bench Verified, LongMemEval), and a boundary-sensitivity
+> check. Strong-model replication is pending. This draft is an artifact of an
 > ongoing study, not a submission.
 
 **Anonymous authors — under review.**

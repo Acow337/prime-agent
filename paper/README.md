@@ -14,8 +14,8 @@ requires it; the claims do not depend on the product identity.
 
 The numbers come from the completed 720-cell main matrix (three families x 30
 instances x 8 treatments), a 60-cell repeat, the mechanism and boundary checks,
-the selector analysis, and four external benchmarks (LongBench-v2, SWE-bench
-Verified, LongMemEval, plus the boundary check). Strong-model replication is the
+the selector analysis, three external benchmarks (LongBench-v2, SWE-bench
+Verified, LongMemEval) plus the boundary check. Strong-model replication is the
 remaining experiment; the draft states resolution limits rather than claiming
 effects the samples cannot support.
 
