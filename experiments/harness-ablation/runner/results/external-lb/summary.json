@@ -31,14 +31,14 @@
   },
   "counts": {
     "completed": 0,
-    "failed": 2,
-    "total": 2
+    "failed": 0,
+    "total": 0
   },
   "mode": "live",
   "treatments": {},
   "usage": {
-    "actual_cost_cny": 0.339135,
-    "completion_tokens": 5168,
-    "prompt_tokens": 261941
+    "actual_cost_cny": 0,
+    "completion_tokens": 0,
+    "prompt_tokens": 0
   }
 }

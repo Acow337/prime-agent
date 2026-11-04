@@ -15,26 +15,15 @@
     }
   },
   "counts": {
-    "completed": 8,
-    "failed": 2,
-    "total": 10
+    "completed": 0,
+    "failed": 0,
+    "total": 0
   },
   "mode": "live",
-  "treatments": {
-    "r0-s1-m0": {
-      "mean_score": 1.0,
-      "runs": 4,
-      "success_rate": 1.0
-    },
-    "r1-s1-m0": {
-      "mean_score": 1.0,
-      "runs": 4,
-      "success_rate": 1.0
-    }
-  },
+  "treatments": {},
   "usage": {
-    "actual_cost_cny": 5.973893,
-    "completion_tokens": 87130,
-    "prompt_tokens": 4629724
+    "actual_cost_cny": 0,
+    "completion_tokens": 0,
+    "prompt_tokens": 0
   }
 }

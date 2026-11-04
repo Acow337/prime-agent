@@ -10,8 +10,8 @@
   "response_tokens": 1024,
   "usd_to_cny": 8.0,
   "hard_budget_cny": 300.0,
-  "max_total_requests": 400,
-  "max_requests_per_run": 8,
+  "max_total_requests": 1200,
+  "max_requests_per_run": 30,
   "max_transport_retries": 2,
   "task_timeout_seconds": 900,
   "families": {
