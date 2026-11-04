@@ -324,11 +324,12 @@ def run_matrix(
                     # TMPDIR and the session dir are fresh per episode; M-on
                     # shares the episode root with the series.
                     episode_root = task_root if shared_agent else task_root / f"ep{index}"
-                    if shared_agent:
+                    # Only multi-episode M-off runs need a private copy of the
+                    # inputs: a single-episode task has no sibling to leak, and
+                    # its verifier may inspect the original working directory.
+                    if shared_agent or len(episodes) == 1:
                         workdir = episode.workdir
                     else:
-                        # M-off must not see sibling episodes on disk either:
-                        # copy this episode's inputs into its own directory.
                         workdir = task_root / "work" / f"ep{index}"
                         if workdir.exists():
                             shutil.rmtree(workdir)

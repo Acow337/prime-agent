@@ -246,7 +246,10 @@ Fisher exact *p* = 0.72; bootstrap 95% CI for the mean-score difference
 rejects a difference of that size, and the minimum detectable effect is 1.3
 points: this comparison rules out effects larger than about 1.5 points, which is
 a real bound rather than just a non-significant test. Smaller effects are not
-excluded, and the pilot's effect is not replicated.
+excluded, and the pilot's effect is not replicated. A 60-cell repeat of the
+full-versus-off contrast (ten instances per family) reproduced 55 of 60 scores
+exactly; the five changes were partial-credit shifts, not success flips, and the
+means are 0.9897 ± 0.039 (full) versus 0.9917 ± 0.046 (off).
 
 ### 5.3 Cost is where the harness shows up
 
@@ -383,9 +386,10 @@ accuracy benefit.
   effect near 30 points at n=20, and SWE-bench's twelve paired instances span
   roughly ±27 points. "No detected effect" is therefore a bounded statement, not
   a proof of equivalence on those benchmarks.
-* **Pending work.** Repeat runs for run-to-run variance and strong-model
-  replication are pending; the selector here is in-sample and the external
-  benchmarks are small subsets.
+* **Pending work.** Strong-model replication is pending; run-to-run variance is
+  bounded by the 60-cell repeat (55/60 identical, five partial-credit changes),
+  but that repeat covers only the full-versus-off contrast. The selector here is
+  in-sample and the external benchmarks are small subsets.
 
 ---
 
