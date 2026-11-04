@@ -10,13 +10,14 @@ execution, S = recursive delegation, M = durable state). The concrete
 implementation is named only in the artifact appendix, where reproducibility
 requires it; the claims do not depend on the product identity.
 
-## Status: DRAFT, not submission-ready
+## Status: DRAFT, complete results, pending submission
 
-The numbers in the draft are from the completed 720-cell main matrix (three
-families x 30 instances x 8 treatments) and, for contrast, the 120-cell pilot.
-The non-guessable-threshold mechanism check, repeat runs, strong-model
-replication, selector evaluation, and external benchmarks are still pending; the
-draft marks those as pending rather than claiming them.
+The numbers come from the completed 720-cell main matrix (three families x 30
+instances x 8 treatments), a 60-cell repeat, the mechanism and boundary checks,
+the selector analysis, and four external benchmarks (LongBench-v2, SWE-bench
+Verified, LongMemEval, plus the boundary check). Strong-model replication is the
+remaining experiment; the draft states resolution limits rather than claiming
+effects the samples cannot support.
 
 ## Evidence files
 
@@ -30,13 +31,30 @@ draft marks those as pending rather than claiming them.
 | Pilot records | `experiments/harness-ablation/runner/results/pilot-120/` |
 | Pilot analysis | `python3 experiments/harness-ablation/runner/analyze.py --results .../pilot-120` |
 | Frozen protocol | `experiments/harness-ablation/runner/frozen-pilot.json`, `frozen-main.json` |
+| Main analysis | `experiments/harness-ablation/runner/results/main-720/analysis.md` |
+| Selector | `experiments/harness-ablation/runner/selector.py`, `results/main-720/selector.md` |
+| Equivalence summary | `experiments/harness-ablation/runner/equivalence.py`, `results/equivalence.md` |
+| Repeats | `experiments/harness-ablation/runner/results/repeats-60/` |
+| Boundary check | `experiments/harness-ablation/runner/results/boundary-20/` |
+| LongBench-v2 | `experiments/harness-ablation/runner/families/lb_family.py`, `results/external-lb/` |
+| LongMemEval | `experiments/harness-ablation/runner/families/lme_family.py`, `results/external-lme/` |
+| SWE-bench | `experiments/harness-ablation/external/swebench_driver.py`, `external/results-12/` |
 
-## Reproducing the pilot
+## Reproducing
 
 ```bash
+# main matrix (720 cells)
 python3 experiments/harness-ablation/runner/runner.py \
-  --config experiments/harness-ablation/runner/config.pilot.json \
+  --config experiments/harness-ablation/runner/config.main.json \
   --binary target/debug/prime-agent \
-  --results /tmp/pilot --mode live
-python3 experiments/harness-ablation/runner/analyze.py --results /tmp/pilot
+  --results experiments/harness-ablation/runner/results/main-720 --mode live
+python3 experiments/harness-ablation/runner/analyze.py \
+  --results experiments/harness-ablation/runner/results/main-720
+
+# external benchmarks
+python3 experiments/harness-ablation/runner/runner.py \
+  --config experiments/harness-ablation/runner/config.external.json \
+  --binary target/debug/prime-agent \
+  --results experiments/harness-ablation/runner/results/external-lb --mode live
+# LongBench-v2 and LongMemEval data files are fetched per the module docstrings.
 ```
