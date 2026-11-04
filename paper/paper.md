@@ -26,22 +26,25 @@ families: multi-table information management (I), small multi-module bug fixing
 (E), and cross-episode transfer (T).
 
 We evaluate all eight configurations on 30 instances per family (720 cells, one
-cheap API model). On this suite the three capabilities are **accuracy-neutral**:
+cheap API model). On this suite we detect **no accuracy effect** from any capability:
 every treatment solves 84-88 of 90 cells, and the transfer comparison is 115/120
 for M-on versus 117/120 for M-off (Fisher exact *p* = 0.72; bootstrap 95% CI for
-the mean-score difference [-0.010, 0.015]). What the harness changes is **cost**:
+the mean-score difference [-0.010, 0.015], so effects above 1.5 points are
+ruled out). What the harness changes is **cost**:
 the fully enabled configuration is the cheapest arm (¥16.87 for its 90 cells),
 turning R off raises provider requests by 14-41% depending on the family, and
 turning M off roughly doubles the transfer family's spend because every episode
 must re-derive the rule. A 120-cell pilot on a single transfer template had
 suggested a large M accuracy effect (19/20 vs 8/20); that effect did not survive
 ten templates, and we report a mechanism check that isolates whether it returns
-when the rule cannot be guessed. Three external checks agree: on LongBench-v2
-the arms range 0.65-0.79 with no significant ordering; on SWE-bench Verified the
-full harness and the all-off harness each resolve 10 of 12 repositories (same
-unresolved pair); and on LongMemEval the M-off arm is not worse (12/20 versus
-11/20). The result reframes the harness contract: capabilities buy cheaper
-repeated work, not better single answers.
+when the rule cannot be guessed. Three external checks are consistent with the
+same picture, though coarser: on LongBench-v2 the arms range 0.65-0.80 with no
+significant ordering; on SWE-bench Verified the full harness and the all-off
+harness each resolve 10 of 12 repositories (same unresolved pair); and on
+LongMemEval the M-off arm is not worse (12/20 versus 11/20). At n=20 the external
+minimum detectable effect is about 30 points, so they rule out only large
+effects. The result reframes the harness contract for this task distribution:
+capabilities buy cheaper repeated work, not better single answers.
 
 ---
 
@@ -75,7 +78,7 @@ We make three contributions:
    retries with failure classification, resumable JSONL records, and frozen
    protocol hashes.
 3. **A factorial reading of 720 cells.** Across three families the R/S/M
-   factors are accuracy-neutral on this suite; the durable-state comparison is
+   factors show no detected accuracy effect on this suite; the durable-state comparison is
    115/120 versus 117/120. Capability costs are large and opposite in sign to the
    pilot's apparent benefit: the fully enabled harness is the cheapest accurate
    arm, R-off raises requests by 14-41%, and M-off roughly doubles transfer
@@ -226,7 +229,7 @@ four requests per cell, T about twenty.
 | `r0-s0-m1` | 87/90 | 0.995 | 13.7 | 25.73 |
 | `r0-s0-m0` | 86/90 | 0.992 | 16.2 | 32.27 |
 
-### 5.2 Capabilities are accuracy-neutral on this suite
+### 5.2 No detected accuracy effect, with stated resolution
 
 Across all eight treatments the success spread is 84-88 of 90 cells and the mean
 score spread is 0.988-0.997. The I family is at ceiling in every arm (29/30); E
@@ -239,8 +242,11 @@ had shown a large gap:
 | M-off | 117/120 | 0.9908 |
 
 Fisher exact *p* = 0.72; bootstrap 95% CI for the mean-score difference
-[-0.010, 0.015]. On these tasks, then, no factor moves accuracy, and the pilot's
-effect is not replicated.
+[-0.010, 0.015]. A two one-sided test against a 2-point equivalence margin
+rejects a difference of that size, and the minimum detectable effect is 1.3
+points: this comparison rules out effects larger than about 1.5 points, which is
+a real bound rather than just a non-significant test. Smaller effects are not
+excluded, and the pilot's effect is not replicated.
 
 ### 5.3 Cost is where the harness shows up
 
@@ -285,7 +291,7 @@ this suite; the matrix's value is the cost decomposition, where R and M compound
 
 ### 5.6 External benchmarks
 
-Three public benchmarks test whether the accuracy-neutral result survives
+Three public benchmarks test whether the no-detected-effect result survives
 outside the self-built suite.
 
 | Benchmark | Setup | Full harness | All off |
@@ -302,11 +308,15 @@ transcripts, and the normalized-containment score is 0.55 for M-on versus 0.60
 for M-off (40/40 cells completed). LongBench differences (0.65-0.80 across four arms) are within noise
 at n=20.
 
-The consistent picture is that on these distributions the capabilities do not
-move accuracy; the largest cost differences still come from the synthetic
-matrix (R-off +14-41% requests, M-off about double the transfer spend). We read
-this as a property of the tasks as much as of the harness: none of them make
-re-derived state expensive enough for persistence to pay off in correctness.
+The consistent picture is that on these distributions we detect no accuracy
+effect; the largest cost differences still come from the synthetic matrix (R-off
++14-41% requests, M-off about double the transfer spend). The external samples
+are small, though, and the resolution is correspondingly coarse: at n=20 the
+minimum detectable effect is about 30 points on LongBench and LongMemEval, so
+those two rule out only large differences and are consistent with, not
+confirmatory of, equivalence. We read the pattern as a property of the tasks as
+much as of the harness: none of them make re-derived state expensive enough for
+persistence to pay off in correctness.
 
 ## 6. Budget-Aware Selection
 
@@ -368,9 +378,14 @@ accuracy benefit.
   Failure classification and per-cell retries mitigate but do not eliminate
   this, and the wall-clock cost was dominated by stalls rather than model
   compute.
-* **Pending work.** The non-guessable-threshold mechanism check, repeat runs,
-  strong-model validation, the budget-aware selector, and external benchmarks
-  are not yet reported.
+* **Resolution of the null.** The transfer comparison rules out effects larger
+  than about 1.5 points, but the external benchmarks have a minimum detectable
+  effect near 30 points at n=20, and SWE-bench's twelve paired instances span
+  roughly ±27 points. "No detected effect" is therefore a bounded statement, not
+  a proof of equivalence on those benchmarks.
+* **Pending work.** Repeat runs for run-to-run variance and strong-model
+  replication are pending; the selector here is in-sample and the external
+  benchmarks are small subsets.
 
 ---
 
@@ -379,7 +394,7 @@ accuracy benefit.
 Decomposing an agent harness into R, S, and M is feasible in a production system
 without changing the default path, and the full eight-configuration matrix gives
 a result that aggregate benchmarks hide: on a 720-cell suite the capabilities are
-**accuracy-neutral** while their costs differ by a factor of two. The fully
+**no detected accuracy effect** while their costs differ by a factor of two. The fully
 enabled harness is the cheapest accurate arm; turning R off raises requests by
 14-41%, and turning M off roughly doubles transfer spend because every episode
 must re-derive the convention. A single-template pilot had suggested a large
@@ -475,3 +490,20 @@ Transfer-effect section of the same report:
 - M-off: 8/20 success, mean score 0.7875
 - Fisher exact p = 0.00043
 - bootstrap 95% CI for the mean-score difference: [0.108, 0.280]
+## Appendix E — Equivalence summary
+
+Bootstrap 95% intervals (4000 resamples); the minimum detectable effect (MDE) is
+the interval half-width. A two one-sided test is applied against the margin.
+
+| comparison | n (a/b) | mean a | mean b | diff | 95% CI | MDE | margin | equivalent |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |
+| T: M-on vs M-off | 120/120 | 0.993 | 0.991 | +0.002 | [-0.009, +0.015] | 0.013 | 0.02 | yes |
+| LongBench: full vs all-off | 20/20 | 0.700 | 0.650 | +0.050 | [-0.250, +0.350] | 0.300 | 0.10 | no |
+| LongMemEval: M-on vs M-off | 20/20 | 0.550 | 0.600 | -0.050 | [-0.350, +0.250] | 0.300 | 0.10 | no |
+| SWE-bench: full vs all-off | 12/12 | 10/12 | 10/12 | 0 | (exact) | 0.27 | — | not tested |
+
+The transfer comparison is the only one with enough cells to support an
+equivalence claim; the external benchmarks are directional checks.
+
+---
+
