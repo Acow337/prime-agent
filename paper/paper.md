@@ -50,7 +50,8 @@ capabilities buy cheaper repeated work, not better single answers. A
 hidden-policy probe pins down the exception: when the mapping is stated once,
 cannot be inferred from the inputs, and must survive across episodes, M-on
 scores 0.936 against M-off's 0.414 (95% CI [0.352, 0.720]). The accuracy
-benefit is real, but conditional on non-derivable state.
+benefit is real, but conditional on non-derivable state and on the model: with
+`deepseek-v4-pro` the transfer gap reopens (0.975 versus 0.710).
 
 ---
 
@@ -362,6 +363,24 @@ state is not derivable from the inputs *and* must survive across episodes. The
 external results are not contradicted; they sit on the other side of that
 boundary.
 
+### 5.8 Model dependence
+
+The null on the cheap model does not transfer to a stronger one. Running the
+transfer family with `deepseek-v4-pro` (ten instances, the same templates):
+
+| model | full harness | all off |
+| --- | ---: | ---: |
+| `deepseek-v4-flash` | 0.993 (120 cells) | 0.991 (120 cells) |
+| `deepseek-v4-pro` | 0.975 (10) | 0.710 (10) |
+
+For the strong model the gap is 0.265 (bootstrap 95% CI [0.080, 0.470]), and the
+all-off arm also costs four times more (¥10.04 versus ¥2.50 for ten tasks). The
+failure pattern is not confined to the negative templates: without memory the
+strong model also misses positive-transfer rules (0.05, 0.30, and 0.70 on three
+of them), which suggests it does not reconstruct the withheld conventions as
+readily as the cheap model does. Whether a capability pays therefore depends on
+the task *and* the model, not only on the task.
+
 ## 6. Budget-Aware Selection
 
 The selector takes a budget and chooses one treatment per family. With the main
@@ -428,8 +447,9 @@ general accuracy benefit.
   roughly ±27 points. "No detected effect" is therefore a bounded statement, not
   a proof of equivalence on those benchmarks.
 * **Probe caveats.** The hidden-policy result is a custom probe with six cells
-  per arm and timeouts counted as failures; its size, not its direction, is the
-  weak point.
+  per arm and timeouts counted as failures; the strong-model replication covers
+  only ten transfer instances. Their sizes, not their directions, are the weak
+  point.
 * **Pending work.** Strong-model replication is pending; run-to-run variance is
   bounded by the 60-cell repeat (55/60 identical, five partial-credit changes),
   but that repeat covers only the full-versus-off contrast. The selector here is
@@ -455,8 +475,9 @@ full harness and the all-off configuration, including on a benchmark built to
 test durable memory, though their samples are too small to confirm equivalence. On tasks whose state can be re-derived, the harness's measured value is cheaper
 repeated work; when the same state cannot be derived and must survive episodes,
 the capability converts into a large accuracy difference (0.936 versus 0.414 in
-the hidden-policy probe). Whether the cost effects survive a second model is the
-open question.
+the hidden-policy probe, and 0.975 versus 0.710 for a strong model on transfer).
+The boundary is therefore drawn by both the task and the model, not by the
+harness alone.
 
 ---
 

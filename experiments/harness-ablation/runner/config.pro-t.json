@@ -11,9 +11,9 @@
   "usd_to_cny": 8.0,
   "hard_budget_cny": 300.0,
   "max_total_requests": 1500,
-  "max_requests_per_run": 120,
+  "max_requests_per_run": 160,
   "max_transport_retries": 2,
-  "task_timeout_seconds": 360,
+  "task_timeout_seconds": 900,
   "families": {
     "t": [
       1,
