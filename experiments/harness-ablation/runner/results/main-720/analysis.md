@@ -1,6 +1,6 @@
 # Matrix run analysis
 
-- completed cells: 720
+- counted cells: 720
 
 ## Family x treatment
 
@@ -28,21 +28,21 @@
 | t | r0-s1-m1 | 30 | 29/30 | 0.9933 | 18.1 | 8105175 | 10.2624 |
 | t | r1-s0-m0 | 30 | 30/30 | 1.0 | 22.63 | 13331229 | 16.6902 |
 | t | r1-s0-m1 | 30 | 30/30 | 1.0 | 19.27 | 11258740 | 14.0861 |
-| t | r1-s1-m0 | 30 | 29/30 | 0.99 | 23.37 | 13375491 | 16.785 |
+| t | r1-s1-m0 | 30 | 28/30 | 0.9733 | 24 | 13687872 | 17.1851 |
 | t | r1-s1-m1 | 30 | 28/30 | 0.9883 | 16.53 | 7174998 | 9.1119 |
 
 ## Transfer effect inside T
 
 - M-on: 115/120 success, mean score 0.9929
-- M-off: 117/120 success, mean score 0.9908
-- Fisher exact p = 0.72190
-- bootstrap 95% CI for mean-score difference: [-0.010, 0.015]
+- M-off: 116/120 success, mean score 0.9867
+- Fisher exact p = 1.00000
+- bootstrap 95% CI for mean-score difference: [-0.007, 0.022]
 
 ### By template
 
 | template | polarity | M-on | M-off | M-on score | M-off score |
 | --- | --- | ---: | ---: | ---: | ---: |
-| capacity | negative | 12/12 | 12/12 | 1.0 | 1.0 |
+| capacity | negative | 12/12 | 11/12 | 1.0 | 0.96 |
 | compliance | positive | 12/12 | 12/12 | 1.0 | 1.0 |
 | escalation | negative | 11/12 | 12/12 | 0.99 | 1.0 |
 | fraud | positive | 12/12 | 12/12 | 1.0 | 1.0 |

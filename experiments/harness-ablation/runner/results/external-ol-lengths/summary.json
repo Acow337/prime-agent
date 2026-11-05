@@ -16,26 +16,33 @@
       ]
     },
     "hard_budget_cny": 400.0,
+    "max_requests_per_run": 100,
     "models": {
       "cheap": "deepseek-v4-flash"
     }
   },
   "counts": {
-    "completed": 1,
-    "failed": 0,
-    "total": 1
+    "budget_exhausted": 0,
+    "completed": 22,
+    "failed": 1,
+    "total": 23
   },
   "mode": "live",
   "treatments": {
+    "r0-s1-m1": {
+      "mean_score": 1.0,
+      "runs": 11,
+      "success_rate": 1.0
+    },
     "r1-s1-m1": {
       "mean_score": 1.0,
-      "runs": 1,
+      "runs": 11,
       "success_rate": 1.0
     }
   },
   "usage": {
-    "actual_cost_cny": 5.858678,
-    "completion_tokens": 55802,
-    "prompt_tokens": 4659024
+    "actual_cost_cny": 22.696017,
+    "completion_tokens": 258674,
+    "prompt_tokens": 17878651
   }
 }

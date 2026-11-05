@@ -99,26 +99,63 @@
       ]
     },
     "hard_budget_cny": 5000.0,
+    "max_requests_per_run": 40,
     "models": {
       "cheap": "deepseek-v4-flash"
     }
   },
   "counts": {
-    "completed": 2,
-    "failed": 0,
-    "total": 2
+    "budget_exhausted": 1,
+    "completed": 719,
+    "failed": 448,
+    "total": 1168
   },
   "mode": "live",
   "treatments": {
     "r0-s0-m0": {
-      "mean_score": 1.0,
-      "runs": 2,
-      "success_rate": 1.0
+      "mean_score": 0.9916,
+      "runs": 90,
+      "success_rate": 0.9556
+    },
+    "r0-s0-m1": {
+      "mean_score": 0.9948,
+      "runs": 90,
+      "success_rate": 0.9667
+    },
+    "r0-s1-m0": {
+      "mean_score": 0.9894,
+      "runs": 90,
+      "success_rate": 0.9556
+    },
+    "r0-s1-m1": {
+      "mean_score": 0.9928,
+      "runs": 90,
+      "success_rate": 0.9556
+    },
+    "r1-s0-m0": {
+      "mean_score": 0.9966,
+      "runs": 90,
+      "success_rate": 0.9778
+    },
+    "r1-s0-m1": {
+      "mean_score": 0.995,
+      "runs": 90,
+      "success_rate": 0.9667
+    },
+    "r1-s1-m0": {
+      "mean_score": 0.9829,
+      "runs": 90,
+      "success_rate": 0.9222
+    },
+    "r1-s1-m1": {
+      "mean_score": 0.9911,
+      "runs": 90,
+      "success_rate": 0.9444
     }
   },
   "usage": {
-    "actual_cost_cny": 0.413184,
-    "completion_tokens": 9472,
-    "prompt_tokens": 306432
+    "actual_cost_cny": 213.931083,
+    "completion_tokens": 3260368,
+    "prompt_tokens": 165234433
   }
 }

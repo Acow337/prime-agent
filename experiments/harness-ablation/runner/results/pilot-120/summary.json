@@ -24,11 +24,13 @@
       ]
     },
     "hard_budget_cny": 3000.0,
+    "max_requests_per_run": 40,
     "models": {
       "cheap": "deepseek-v4-flash"
     }
   },
   "counts": {
+    "budget_exhausted": 0,
     "completed": 119,
     "failed": 1,
     "total": 120

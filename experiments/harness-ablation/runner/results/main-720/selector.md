@@ -1,6 +1,6 @@
 # Budget-aware treatment selection
 
-In-sample estimates from the completed main matrix; 90 tasks total (30 per family).
+In-sample estimates from the main matrix's counted cells; 90 tasks total (30 per family).
 
 ## Family x treatment
 
@@ -23,7 +23,7 @@ In-sample estimates from the completed main matrix; 90 tasks total (30 per famil
 | e | `r0-s0-m1` | 30 | 1.000 | 1.0000 | 0.342 | 15.3 |
 | e | `r0-s0-m0` | 30 | 0.933 | 0.9905 | 0.337 | 16.7 |
 | t | `r1-s1-m1` | 30 | 0.933 | 0.9883 | 0.304 | 16.5 |
-| t | `r1-s1-m0` | 30 | 0.967 | 0.9900 | 0.559 | 23.4 |
+| t | `r1-s1-m0` | 30 | 0.933 | 0.9733 | 0.573 | 24.0 |
 | t | `r1-s0-m1` | 30 | 1.000 | 1.0000 | 0.470 | 19.3 |
 | t | `r1-s0-m0` | 30 | 1.000 | 1.0000 | 0.556 | 22.6 |
 | t | `r0-s1-m1` | 30 | 0.967 | 0.9933 | 0.342 | 18.1 |

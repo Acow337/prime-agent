@@ -1,6 +1,6 @@
 # Matrix run analysis
 
-- completed cells: 80
+- counted cells: 80
 
 ## Family x treatment
 

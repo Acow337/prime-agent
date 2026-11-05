@@ -15,11 +15,13 @@
       ]
     },
     "hard_budget_cny": 300.0,
+    "max_requests_per_run": 120,
     "models": {
       "cheap": "deepseek-v4-pro"
     }
   },
   "counts": {
+    "budget_exhausted": 0,
     "completed": 18,
     "failed": 2,
     "total": 20
