@@ -2,7 +2,8 @@
 
 Runs every (model, R/S/M treatment, task instance) cell, verifies the model's
 answer with the task family's verifier, and writes one JSONL record per cell so
-an interrupted run resumes without repeating completed cells.
+an interrupted run resumes without repeating counted cells (completed, or out of
+request budget); infrastructure failures are retried.
 
 Live runs go through the bounded loopback proxy from the smoke harness: one
 global cost gate, a per-run request quota, and transport-level retries. Nothing
@@ -162,18 +163,55 @@ def build_command(binary: Path, config: dict[str, Any], model_id: str, prompt: s
     ]
 
 
-def load_done(records_path: Path) -> set[str]:
+def read_records(records_path: Path) -> list[dict[str, Any]]:
     if not records_path.is_file():
-        return set()
-    done = set()
+        return []
+    records = []
     for line in records_path.read_text(encoding="utf-8").splitlines():
         try:
-            record = json.loads(line)
+            records.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-        if record.get("run_id") and record.get("status") == "completed":
-            done.add(record["run_id"])
-    return done
+    return records
+
+
+def counted_records(records: list[dict[str, Any]], quota: int) -> list[dict[str, Any]]:
+    """Each cell's counted attempt under the paper's §4.2 failure accounting.
+
+    A cell counts its first attempt that completed or exhausted the per-cell
+    request quota (an agent failure). Transport errors and timeouts are
+    infrastructure failures: those attempts are retried, never counted. An
+    attempt that exhausted a quota smaller than ``quota`` ran under a budget the
+    run later raised, so it is superseded rather than counted.
+    """
+    counted: dict[str, dict[str, Any]] = {}
+    for record in records:
+        run_id = record.get("run_id")
+        if not run_id or run_id in counted:
+            continue
+        status = record.get("status")
+        # Records written before the runner classified budget exhaustion mark
+        # it `infra_error` without per-cell error categories; in them only
+        # quota exhaustion ever reached the quota, so the admitted request
+        # count identifies it.
+        exhausted = status == "budget_exhausted" or (
+            status == "infra_error" and "cell_error_categories" not in record
+        )
+        if status == "completed" or (
+            exhausted and record.get("usage", {}).get("request_count", 0) >= quota
+        ):
+            counted[run_id] = record
+    return list(counted.values())
+
+
+def load_counted(results_dir: Path, config_path: Path) -> list[dict[str, Any]]:
+    """The counted cells of a results directory under its run's final quota."""
+    quota = load_config(config_path)["max_requests_per_run"]
+    return counted_records(read_records(results_dir / "records.jsonl"), quota)
+
+
+def load_done(records_path: Path, quota: int) -> set[str]:
+    return {record["run_id"] for record in counted_records(read_records(records_path), quota)}
 
 
 def append_record(records_path: Path, record: dict[str, Any]) -> None:
@@ -183,10 +221,10 @@ def append_record(records_path: Path, record: dict[str, Any]) -> None:
 
 
 def summarize(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    counted = counted_records(records, config["max_requests_per_run"])
     cells: dict[str, list[dict[str, Any]]] = {}
-    for record in records:
-        if record.get("status") == "completed":
-            cells.setdefault(record["treatment"], []).append(record)
+    for record in counted:
+        cells.setdefault(record["treatment"], []).append(record)
     treatments = {}
     for treatment in TREATMENTS:
         rows = cells.get(treatment, [])
@@ -206,12 +244,17 @@ def summarize(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str
             sum(float(row.get("usage", {}).get("actual_cost_cny", 0)) for row in records), 6
         ),
     }
+    completed = sum(1 for row in counted if row.get("status") == "completed")
     return {
         "mode": config["mode"],
-        "config": {key: config[key] for key in ("models", "families", "hard_budget_cny")},
+        "config": {
+            key: config[key]
+            for key in ("models", "families", "hard_budget_cny", "max_requests_per_run")
+        },
         "counts": {
-            "completed": sum(1 for row in records if row.get("status") == "completed"),
-            "failed": sum(1 for row in records if row.get("status") not in (None, "completed")),
+            "completed": completed,
+            "budget_exhausted": len(counted) - completed,
+            "failed": len(records) - len(counted),
             "total": len(records),
         },
         "treatments": treatments,
@@ -251,7 +294,7 @@ def run_matrix(
 ) -> list[dict[str, Any]]:
     results_dir.mkdir(parents=True, exist_ok=True)
     records_path = results_dir / "records.jsonl"
-    done = load_done(records_path)
+    done = load_done(records_path, config["max_requests_per_run"])
     runs = planned_runs(config)
     api_key = None
     proxy = None
@@ -429,15 +472,31 @@ def run_matrix(
                 if before_cell is not None and ledger is not None:
                     after_cell = ledger.summary()
                     record["usage"] = _usage_delta(before_cell, after_cell)
-                    if after_cell["error_categories"] != before_cell["error_categories"]:
-                        record["error_categories"] = after_cell["error_categories"]
-                        record["status"] = "infra_error"
+                    # The ledger counts errors for the whole invocation; keep
+                    # only this cell's. A quota rejection alone is the agent
+                    # running out of budget (an agent failure); any other proxy
+                    # error makes the cell an infrastructure failure.
+                    before_errors = before_cell["error_categories"]
+                    errors = {
+                        category: count - before_errors.get(category, 0)
+                        for category, count in after_cell["error_categories"].items()
+                        if count > before_errors.get(category, 0)
+                    }
+                    if errors:
+                        record["cell_error_categories"] = errors
+                        record["status"] = (
+                            "budget_exhausted"
+                            if set(errors) == {"task_request_limit"}
+                            else "infra_error"
+                        )
                 records.append(record)
                 append_record(records_path, record)
     finally:
         if proxy is not None:
             proxy.close()
-    summary = summarize(records, config)
+    # Summarize every recorded cell, not only this invocation's: a resumed run
+    # would otherwise overwrite the summary with just the cells it re-ran.
+    summary = summarize(read_records(records_path), config)
     (results_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

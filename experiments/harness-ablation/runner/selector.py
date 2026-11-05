@@ -1,7 +1,7 @@
 """Budget-aware selector: pick one treatment per family under a budget.
 
-Reads the completed main matrix, estimates each family x treatment success and
-cost, enumerates all per-family policies (8^3 = 512), and reports the Pareto
+Reads the main matrix's counted cells, estimates each family x treatment success
+and cost, enumerates all per-family policies (8^3 = 512), and reports the Pareto
 frontier together with the always-full, always-off, and oracle policies.
 
 This is an in-sample exercise: the estimates come from the same 30 instances the
@@ -17,6 +17,8 @@ from collections import defaultdict
 from pathlib import Path
 from statistics import mean
 
+import runner
+
 FAMILIES = ("i", "e", "t")
 TREATMENTS = (
     "r1-s1-m1",
@@ -30,14 +32,9 @@ TREATMENTS = (
 )
 
 
-def load(results: Path) -> dict[tuple[str, str], list[dict]]:
+def load(results: Path, config: Path) -> dict[tuple[str, str], list[dict]]:
     cells: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for line in (results / "records.jsonl").read_text().splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        if record["status"] != "completed":
-            continue
+    for record in runner.load_counted(results, config):
         cells[(record["family"], record["treatment"])].append(record)
     return cells
 
@@ -80,11 +77,12 @@ def pareto(points: list[tuple[float, float, dict[str, str]]]) -> list[tuple[floa
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
 
-    summary = summarize(load(args.results))
+    summary = summarize(load(args.results, args.config))
     candidates = []
     for policy in itertools.product(TREATMENTS, repeat=len(FAMILIES)):
         mapping = dict(zip(FAMILIES, policy))
@@ -99,7 +97,7 @@ def main() -> int:
     }
 
     lines = ["# Budget-aware treatment selection", ""]
-    lines.append("In-sample estimates from the completed main matrix; 90 tasks total (30 per family).")
+    lines.append("In-sample estimates from the main matrix's counted cells; 90 tasks total (30 per family).")
     lines.append("")
     lines.append("## Family x treatment")
     lines.append("")

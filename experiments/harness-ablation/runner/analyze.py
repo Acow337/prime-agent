@@ -1,7 +1,8 @@
 """Analyze a matrix run: accuracy, cost, transfer split, and effect sizes.
 
-Reads the runner's records.jsonl (duplicate run ids collapse to their completed
-record; infrastructure retries are ignored) and prints a markdown report with:
+Reads the runner's records.jsonl (each cell collapses to its counted attempt
+under the runner's failure accounting: completed, or out of request budget;
+infrastructure retries are ignored) and prints a markdown report with:
 
 - per family x treatment success rate, mean score, requests, tokens, cost,
 - the transfer effect: M-on versus M-off inside the T family, with a Fisher
@@ -12,7 +13,6 @@ record; infrastructure retries are ignored) and prints a markdown report with:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import random
 import statistics
@@ -20,20 +20,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import runner
+
 HERE = Path(__file__).resolve().parent
-
-
-def load_records(path: Path) -> list[dict[str, Any]]:
-    by_id: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("status") != "completed":
-            continue
-        by_id[record["run_id"]] = record
-    return list(by_id.values())
 
 
 def fisher_exact(a: int, n1: int, b: int, n2: int) -> float:
@@ -100,7 +89,7 @@ def template_of(task_id: str) -> tuple[str, bool]:
 
 def report(records: list[dict[str, Any]]) -> str:
     lines = ["# Matrix run analysis", ""]
-    lines += [f"- completed cells: {len(records)}", ""]
+    lines += [f"- counted cells: {len(records)}", ""]
     lines += ["## Family x treatment", ""]
     lines += [
         "| family | treatment | n | success | mean score | requests | prompt tok | cost CNY |",
@@ -163,10 +152,11 @@ def report(records: list[dict[str, Any]]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
-    records = load_records(args.results / "records.jsonl")
+    records = runner.load_counted(args.results, args.config)
     text = report(records)
     if args.out is not None:
         args.out.write_text(text, encoding="utf-8")

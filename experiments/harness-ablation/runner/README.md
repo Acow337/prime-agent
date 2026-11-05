@@ -34,8 +34,20 @@ runs; those families are still to be built.
 
 Each record carries `run_id` (`model__treatment__task`), `status`, `success`,
 `score`, verifier `details`, wall-clock `latency_seconds`, and the run's own
-`usage` delta (requests, tokens, actual cost). `summary.json` aggregates per
-treatment success rate and mean score plus total usage.
+`usage` delta (requests, tokens, actual cost). A cell that hit proxy errors also
+carries them as `cell_error_categories`: a quota rejection alone makes the
+status `budget_exhausted` (an agent failure, counted and not retried); any other
+proxy error makes it `infra_error` (retried). Records written before this
+classification store the invocation's cumulative `error_categories` and mark
+budget exhaustion as `infra_error`; `counted_records` recognizes those by their
+request count reaching the quota.
+
+A cell's counted attempt is its first `completed` or `budget_exhausted` one
+under the run's final `max_requests_per_run`; analysis scripts take the run's
+config for that reason (`analyze.py --config ... --results ...`). `summary.json`
+aggregates per treatment success rate and mean score over the counted cells,
+plus total usage over every record in `records.jsonl`, including cells written by
+earlier invocations of a resumed run.
 
 ## Status
 

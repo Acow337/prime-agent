@@ -10,21 +10,14 @@ not evidence of absence.
 from __future__ import annotations
 
 import argparse
-import json
 import random
 from pathlib import Path
 from statistics import mean
 
+import runner
+
 BOOTSTRAP = 4000
 SEED = 7
-
-
-def load(results: Path) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in (results / "records.jsonl").read_text().splitlines()
-        if line.strip() and json.loads(line)["status"] == "completed"
-    ]
 
 
 def means_diff(a: list[float], b: list[float]) -> float:
@@ -70,20 +63,23 @@ def compare(name: str, a: list[float], b: list[float], margin: float, rng: rando
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--main", required=True, type=Path)
+    parser.add_argument("--main-config", required=True, type=Path)
     parser.add_argument("--longbench", required=True, type=Path)
+    parser.add_argument("--longbench-config", required=True, type=Path)
     parser.add_argument("--longmemeval", required=True, type=Path)
+    parser.add_argument("--longmemeval-config", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     rng = random.Random(SEED)
 
-    rows = load(args.main)
+    rows = runner.load_counted(args.main, args.main_config)
     t = [row for row in rows if row["family"] == "t"]
     t_m1 = [row["score"] for row in t if row["treatment"].endswith("m1")]
     t_m0 = [row["score"] for row in t if row["treatment"].endswith("m0")]
-    rows_lb = load(args.longbench)
+    rows_lb = runner.load_counted(args.longbench, args.longbench_config)
     lb_full = [row["score"] for row in rows_lb if row["treatment"] == "r1-s1-m1"]
     lb_off = [row["score"] for row in rows_lb if row["treatment"] == "r0-s0-m0"]
-    rows_lme = load(args.longmemeval)
+    rows_lme = runner.load_counted(args.longmemeval, args.longmemeval_config)
     m_m1 = [row["score"] for row in rows_lme if row["treatment"].endswith("m1")]
     m_m0 = [row["score"] for row in rows_lme if row["treatment"].endswith("m0")]
 

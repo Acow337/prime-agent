@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -155,6 +158,18 @@ class MatrixRunnerTests(unittest.TestCase):
             lines = (results / "records.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 16)
 
+    def test_resumed_run_summarizes_every_recorded_cell(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory) / "results"
+            runner.run_matrix(config, Path("unused"), results, "dry-run", limit=3)
+            runner.run_matrix(config, Path("unused"), results, "dry-run")
+            summary = json.loads((results / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                summary["counts"],
+                {"completed": 16, "budget_exhausted": 0, "failed": 0, "total": 16},
+            )
+
     def test_planned_matrix_covers_models_treatments_and_instances(self):
         config = self._config()
         config["models"] = {"cheap": "deepseek-v4-flash", "strong": "deepseek-v4-pro"}
@@ -164,6 +179,127 @@ class MatrixRunnerTests(unittest.TestCase):
             {run["treatment"] for run in runs}, set(runner.TREATMENTS)
         )
         self.assertEqual({run["task_id"] for run in runs}, {"i-01", "i-02"})
+
+
+class FailureAccountingTests(unittest.TestCase):
+    def test_each_cell_counts_its_first_completed_or_budget_exhausted_attempt(self):
+        def attempt(run_id: str, status: str, requests: int, **errors: dict) -> dict:
+            return {"run_id": run_id, "status": status, "usage": {"request_count": requests}, **errors}
+
+        records = [
+            # Written before the runner classified budget exhaustion: the
+            # exhausted quota is the agent's failure, so the retry is ignored.
+            attempt("a", "infra_error", 40, error_categories={"task_request_limit": 1}),
+            attempt("a", "completed", 9),
+            # Old-format transport failure below the quota: retried.
+            attempt("b", "infra_error", 12, error_categories={"upstream_connection": 3}),
+            attempt("b", "completed", 10),
+            attempt("c", "infra_error", 40, cell_error_categories={"upstream_connection": 1}),
+            attempt("c", "completed", 11),
+            # Out of a smaller quota the run later raised: superseded.
+            attempt("d", "budget_exhausted", 8, cell_error_categories={"task_request_limit": 1}),
+            attempt("d", "completed", 12),
+            attempt("e", "timeout", 5),
+            attempt("e", "completed", 7),
+            attempt("f", "budget_exhausted", 40, cell_error_categories={"task_request_limit": 2}),
+            attempt(
+                "g",
+                "infra_error",
+                40,
+                cell_error_categories={"task_request_limit": 1, "upstream_connection": 1},
+            ),
+        ]
+        self.assertEqual(
+            runner.counted_records(records, quota=40),
+            [records[0], records[3], records[5], records[7], records[9], records[10]],
+        )
+
+
+class _ProviderHandler(http.server.BaseHTTPRequestHandler):
+    """Answers every chat request with one streamed chunk and its usage."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(
+            b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+
+    def log_message(self, *_args):
+        pass
+
+
+# Sends three requests through the runner's proxy, one more than the test quota.
+_THREE_REQUEST_AGENT = """#!/usr/bin/env python3
+import json, os, pathlib, urllib.error, urllib.request
+agent = pathlib.Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"])
+provider = json.loads((agent / "settings.json").read_text())["defaultProvider"]
+base = json.loads((agent / "models.json").read_text())["providers"][provider]["baseUrl"]
+for _ in range(3):
+    request = urllib.request.Request(
+        base + "/chat/completions",
+        data=json.dumps({"max_tokens": 64, "stream": True}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        error.read()
+print(json.dumps({"type": "message_end", "message": {"role": "assistant",
+    "content": [{"type": "text", "text": "{}"}]}}))
+"""
+
+
+class LiveAccountingTests(unittest.TestCase):
+    def test_a_cell_out_of_request_budget_is_counted_and_not_retried(self):
+        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        upstream_thread.start()
+        upstream_url = f"http://127.0.0.1:{upstream.server_port}/chat/completions"
+        real_start_proxy = runner.budget_proxy.start_proxy
+        config = json.loads((HERE / "config.pilot.json").read_text(encoding="utf-8"))
+        config.update(
+            families={"i": [1]}, treatments=["r1-s1-m1"], max_requests_per_run=2, mode="live"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                runner.run_smoke, "read_keychain_key", return_value="credential"
+            ), mock.patch.object(
+                runner.budget_proxy,
+                "start_proxy",
+                side_effect=lambda policy: real_start_proxy(policy, upstream=upstream_url),
+            ):
+                agent = Path(directory) / "synthetic-agent"
+                agent.write_text(_THREE_REQUEST_AGENT, encoding="utf-8")
+                agent.chmod(0o700)
+                results = Path(directory) / "results"
+                runner.run_matrix(config, agent, results, "live")
+                runner.run_matrix(config, agent, results, "live")
+                records = [
+                    json.loads(line)
+                    for line in (results / "records.jsonl").read_text(encoding="utf-8").splitlines()
+                ]
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            upstream_thread.join()
+        self.assertEqual(
+            [
+                {
+                    "status": record["status"],
+                    "errors": record.get("cell_error_categories"),
+                    "requests": record["usage"]["request_count"],
+                }
+                for record in records
+            ],
+            [{"status": "budget_exhausted", "errors": {"task_request_limit": 1}, "requests": 2}],
+        )
 
 
 if __name__ == "__main__":
