@@ -1,0 +1,1531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Harness Ledger — research progress</title>
+<style>
+/* ---------- Tokens (light = Claude ivory; dark = Claude night) ---------- */
+:root {
+  color-scheme: light;
+  --bg: #FAF9F5;
+  --bg-2: #F0EEE6;
+  --card: #FFFFFF;          /* chart surface; palette validated against it */
+  --ink: #141413;
+  --ink-2: #3D3D3A;
+  --muted: #66655F;
+  --hair: #E8E6DC;
+  --rule: #DEDCD1;
+  --baseline: #C9C7BE;
+  --accent: #D97757;
+  --accent-ink: #B4532F;    /* clay for small text, >= 4.5:1 */
+  --accent-wash: rgba(217, 119, 87, 0.10);
+  --s1: #D97757;            /* enabled / full harness */
+  --s2: #4F86C6;            /* ablated */
+  --s3: #6B8E3A;
+  --deemph: #8E8C84;        /* context marks, 3.4:1 on the chart surface */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --shadow: 0 1px 2px rgba(20, 20, 19, .05), 0 12px 32px rgba(20, 20, 19, .06);
+  --serif: ui-serif, "New York", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1F1E1D;
+  --bg-2: #262624;
+  --card: #2A2927;
+  --ink: #F5F4EE;
+  --ink-2: #D6D4CC;
+  --muted: #A3A199;
+  --hair: #3A3936;
+  --rule: #45443F;
+  --baseline: #55534E;
+  --accent: #D57454;
+  --accent-ink: #E3906F;
+  --accent-wash: rgba(213, 116, 84, 0.14);
+  --s1: #D57454;
+  --s2: #5A8ED0;
+  --s3: #7A9E45;
+  --deemph: #77756F;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 12px 32px rgba(0, 0, 0, .28);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); }
+body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow: hidden; }
+b, strong { font-weight: 600; }
+code, .mono { font-family: var(--mono); font-size: .86em; }
+code { background: var(--bg-2); border-radius: 5px; padding: .08em .38em; color: var(--ink); }
+
+/* ---------- Stage: a fixed 1280x720 canvas scaled to the window ---------- */
+#viewport { position: fixed; inset: 0; display: grid; place-items: center; overflow: hidden; }
+#stage { width: 1280px; height: 720px; position: relative; transform-origin: center center; flex: none; }
+
+.slide {
+  position: absolute; inset: 0; opacity: 0; visibility: hidden; transform: translateY(16px);
+  transition: opacity .5s ease, transform .65s cubic-bezier(.2, .7, .2, 1), visibility 0s linear .65s;
+}
+.slide.past { transform: translateY(-16px); }
+.slide.active {
+  opacity: 1; visibility: visible; transform: none;
+  transition: opacity .5s ease .05s, transform .65s cubic-bezier(.2, .7, .2, 1), visibility 0s;
+}
+.pad { position: absolute; inset: 0; padding: 52px 72px 84px; display: flex; flex-direction: column; }
+
+/* ---------- Type ---------- */
+.kicker {
+  font: 600 13px/1 var(--sans); letter-spacing: .12em; text-transform: uppercase; color: var(--accent-ink);
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.kicker::before { content: ""; width: 9px; height: 9px; border-radius: 2px; background: var(--accent); }
+h1, h2, h3 { font-family: var(--serif); font-weight: 500; letter-spacing: -.012em; margin: 0; color: var(--ink); }
+h2 { font-size: 40px; line-height: 1.12; margin-bottom: 10px; }
+h3 { font-size: 22px; line-height: 1.2; }
+.lead { font-size: 20px; line-height: 1.5; color: var(--ink-2); margin: 6px 0 0; max-width: 980px; }
+.small { font-size: 14px; line-height: 1.5; color: var(--muted); }
+.accent { color: var(--accent-ink); }
+p { margin: 0; }
+
+/* ---------- Building blocks ---------- */
+.card { background: var(--card); border: 1px solid var(--hair); border-radius: 16px; box-shadow: var(--shadow); }
+.panel { background: var(--bg-2); border-radius: 14px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 8px; font: 500 14px/1 var(--sans); color: var(--ink-2);
+  border: 1px solid var(--rule); border-radius: 999px; padding: 8px 13px; background: var(--card);
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.s1 { background: var(--s1); } .dot.s2 { background: var(--s2); } .dot.s3 { background: var(--s3); }
+.dot.de { background: var(--deemph); }
+.row-gap { display: flex; gap: 12px; flex-wrap: wrap; }
+.grow-1 { flex: 1; min-height: 0; }
+
+/* Fragments, revealed one step at a time */
+[data-step] { opacity: 0; transform: translateY(10px); transition: opacity .45s ease, transform .55s cubic-bezier(.2, .7, .2, 1); }
+[data-step].shown { opacity: 1; transform: none; }
+
+/* Entrance stagger, final state is the default so no-motion modes stay readable */
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.slide.active .stagger > * { animation: rise .6s cubic-bezier(.2, .7, .2, 1) both; animation-delay: calc(var(--i, 0) * 90ms + 180ms); }
+
+/* ---------- Stat tiles ---------- */
+.tiles { display: grid; gap: 14px; }
+.tile { padding: 18px 20px; }
+.tile .t-label { font: 500 14px/1.35 var(--sans); color: var(--muted); }
+.tile .t-value { font: 600 34px/1.1 var(--sans); color: var(--ink); margin-top: 8px; letter-spacing: -.01em; }
+.tile .t-note { font: 400 14px/1.4 var(--sans); color: var(--ink-2); margin-top: 6px; }
+
+/* ---------- Charts ---------- */
+figure.chart { margin: 0; padding: 16px 18px 12px; display: flex; flex-direction: column; }
+figure.chart figcaption { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+figure.chart .c-title { font: 600 15px/1.3 var(--sans); color: var(--ink); }
+figure.chart .c-sub { font: 400 13px/1.35 var(--sans); color: var(--muted); margin-bottom: 6px; }
+.tbl-toggle {
+  font: 500 12px/1 var(--sans); color: var(--muted); background: transparent; border: 1px solid var(--rule);
+  border-radius: 999px; padding: 6px 10px; cursor: pointer; flex: none;
+}
+.tbl-toggle:hover, .tbl-toggle:focus-visible { color: var(--ink); border-color: var(--baseline); outline: none; }
+.legend { display: flex; gap: 16px; font: 500 13px/1 var(--sans); color: var(--ink-2); margin: 4px 0 6px; flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend .key-rect { width: 12px; height: 12px; border-radius: 3px; }
+.legend .key-dot { width: 10px; height: 10px; border-radius: 50%; }
+.plot svg { display: block; overflow: visible; }
+.tablewrap { display: none; overflow: auto; }
+figure.chart.show-table .plot { display: none; }
+figure.chart.show-table .tablewrap { display: block; }
+table.dtable { border-collapse: collapse; width: 100%; font: 400 14px/1.4 var(--sans); color: var(--ink); }
+table.dtable th { text-align: left; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--rule); padding: 6px 8px; }
+table.dtable td { border-bottom: 1px solid var(--hair); padding: 6px 8px; font-variant-numeric: tabular-nums; }
+
+svg .grid { stroke: var(--hair); stroke-width: 1; shape-rendering: crispEdges; }
+svg .axis { stroke: var(--baseline); stroke-width: 1; shape-rendering: crispEdges; }
+svg .tick { font: 400 12px var(--sans); fill: var(--muted); font-variant-numeric: tabular-nums; }
+svg .axis-title { font: 500 12px var(--sans); fill: var(--muted); }
+svg .rowlabel { font: 400 14px var(--sans); fill: var(--ink-2); }
+svg .rowlabel.strong { font-weight: 600; fill: var(--ink); }
+svg .rowsub { font: 400 12px var(--sans); fill: var(--muted); }
+svg .grouphead { font: 600 13px var(--sans); fill: var(--ink); }
+svg .val { font: 600 13px var(--sans); fill: var(--ink); font-variant-numeric: tabular-nums; }
+svg .val.light { font-weight: 500; fill: var(--ink-2); }
+svg .note { font: 500 12px var(--sans); fill: var(--ink-2); }
+svg .mono { font-family: var(--mono); }
+.c-s1 { fill: var(--s1); } .c-s2 { fill: var(--s2); } .c-s3 { fill: var(--s3); } .c-de { fill: var(--deemph); }
+.k-s1 { stroke: var(--s1); } .k-s2 { stroke: var(--s2); } .k-de { stroke: var(--deemph); }
+svg .ring { stroke: var(--card); stroke-width: 2; }
+svg .link { stroke: var(--baseline); stroke-width: 2; stroke-linecap: round; fill: none; }
+svg .hit { fill: transparent; }
+svg .hit:focus { outline: none; }
+svg .row:hover .mark, svg .row:focus-within .mark { opacity: .8; }
+svg .row:focus-within .hitring { stroke: var(--accent); }
+svg .hitring { fill: none; stroke: transparent; stroke-width: 1.5; }
+
+/* Chart motion */
+.anim .grow { transform: scaleX(0); transform-box: fill-box; transform-origin: 0 50%; transition: transform .95s cubic-bezier(.2, .7, .2, 1) var(--d, 0ms); }
+.anim .grow.from-right { transform-origin: 100% 50%; }
+.anim.play .grow { transform: scaleX(1); }
+.anim .fadein { opacity: 0; transition: opacity .55s ease var(--d, 0ms); }
+.anim.play .fadein { opacity: 1; }
+.anim .slide-x { transition: transform 1.1s cubic-bezier(.2, .7, .2, 1) var(--d, 0ms); }
+.anim.play .slide-x { transform: translateX(0) !important; }
+.anim .draw { transition: stroke-dashoffset 1.1s cubic-bezier(.4, .1, .2, 1) var(--d, 0ms); }
+.anim.play .draw { stroke-dashoffset: 0 !important; }
+.anim .pop { transform: scale(0); transform-box: fill-box; transform-origin: center; transition: transform .5s cubic-bezier(.3, 1.4, .5, 1) var(--d, 0ms); }
+.anim.play .pop { transform: scale(1); }
+
+/* ---------- Tooltip ---------- */
+#tip {
+  position: fixed; z-index: 50; pointer-events: none; background: var(--ink); color: var(--bg);
+  border-radius: 9px; padding: 8px 11px; font: 400 13px/1.35 var(--sans); max-width: 280px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+}
+#tip strong { display: block; font: 600 15px/1.3 var(--sans); font-variant-numeric: tabular-nums; }
+#tip .tk { display: inline-block; width: 12px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 6px; }
+#tip[hidden] { display: none; }
+
+/* ---------- Chrome: footer, progress, help ---------- */
+.chrome { position: absolute; left: 0; right: 0; bottom: 0; height: 56px; padding: 0 72px; display: flex; align-items: center; gap: 18px; font: 500 13px/1 var(--sans); color: var(--muted); z-index: 5; }
+.chrome .brand { color: var(--ink-2); }
+.chrome .sep { width: 1px; height: 14px; background: var(--rule); }
+.chrome .spacer { flex: 1; }
+.chrome button {
+  font: 500 13px/1 var(--sans); color: var(--muted); background: transparent; border: 1px solid transparent;
+  border-radius: 8px; padding: 7px 9px; cursor: pointer;
+}
+.chrome button:hover, .chrome button:focus-visible { color: var(--ink); border-color: var(--rule); outline: none; }
+.chrome .count { font-variant-numeric: tabular-nums; color: var(--ink-2); min-width: 54px; text-align: right; }
+.progress { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); transition: width .6s cubic-bezier(.2, .7, .2, 1); z-index: 6; }
+#help {
+  position: absolute; right: 72px; bottom: 64px; width: 330px; padding: 18px 20px; z-index: 8;
+  font: 400 14px/1.6 var(--sans); color: var(--ink-2);
+}
+#help[hidden] { display: none; }
+#help kbd { font: 500 12px var(--mono); background: var(--bg-2); border: 1px solid var(--rule); border-radius: 5px; padding: 1px 6px; color: var(--ink); }
+#help h3 { font-size: 18px; margin-bottom: 8px; }
+
+/* ---------- Slide-specific layouts ---------- */
+/* 1. Title */
+.title-slide { flex-direction: row; align-items: center; gap: 56px; padding-top: 40px; }
+.title-left { flex: 1; }
+.display { font-size: 76px; line-height: 1.02; letter-spacing: -.02em; margin: 6px 0 22px; }
+.subtitle { font: 400 27px/1.38 var(--serif); color: var(--ink-2); max-width: 600px; }
+.meta { font: 400 17px/1.5 var(--sans); color: var(--muted); margin-top: 22px; max-width: 560px; }
+.title-left .row-gap { margin-top: 28px; }
+.switchboard { width: 420px; padding: 24px 26px 20px; flex: none; }
+.sb-head { font: 600 13px/1 var(--sans); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.sw-list { margin: 18px 0 16px; display: grid; gap: 12px; }
+.sw { display: grid; grid-template-columns: 26px 52px 1fr; align-items: center; gap: 12px; }
+.sw-name { font: 600 20px/1 var(--serif); color: var(--ink); }
+.sw-track { width: 52px; height: 30px; border-radius: 999px; background: var(--rule); position: relative; transition: background .45s ease; }
+.sw-knob { position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--card); box-shadow: 0 1px 3px rgba(0, 0, 0, .2); transition: transform .45s cubic-bezier(.3, 1.3, .5, 1); }
+.sw.on .sw-track { background: var(--accent); }
+.sw.on .sw-knob { transform: translateX(22px); }
+.sw-desc { font: 400 15px/1.3 var(--sans); color: var(--ink-2); }
+.sb-id { display: flex; align-items: baseline; justify-content: space-between; border-top: 1px solid var(--hair); padding-top: 14px; }
+.sb-id code { font-size: 20px; background: none; padding: 0; }
+.sb-id span { font: 500 13px/1 var(--sans); color: var(--muted); }
+.meter { margin-top: 14px; }
+.m-head { display: flex; justify-content: space-between; font: 500 13px/1 var(--sans); color: var(--muted); margin-bottom: 7px; }
+.m-head b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.m-track { height: 10px; border-radius: 999px; overflow: hidden; }
+.m-track.s1 { background: color-mix(in srgb, var(--s1) 18%, transparent); }
+.m-track.s2 { background: color-mix(in srgb, var(--s2) 18%, transparent); }
+.m-fill { height: 100%; border-radius: 999px; transition: width .8s cubic-bezier(.2, .7, .2, 1); }
+.m-fill.s1 { background: var(--s1); } .m-fill.s2 { background: var(--s2); }
+.sb-foot { font: 400 12px/1.4 var(--sans); color: var(--muted); margin-top: 14px; }
+
+/* 2. Agenda */
+.agenda { list-style: none; padding: 0; margin: 22px 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; }
+.agenda li { display: grid; grid-template-columns: 54px 1fr auto; align-items: center; gap: 14px; padding: 20px 22px; }
+.ag-n { font: 500 30px/1 var(--serif); color: var(--accent-ink); }
+.agenda b { display: block; font: 600 18px/1.3 var(--sans); }
+.agenda .ag-sub { display: block; font: 400 15px/1.4 var(--sans); color: var(--muted); margin-top: 3px; }
+.state { font: 600 12px/1 var(--sans); letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); border-radius: 999px; padding: 7px 10px; background: var(--bg-2); white-space: nowrap; }
+.state.now { background: var(--accent-wash); color: var(--accent-ink); }
+
+/* 3. Background */
+.bg-grid { display: grid; grid-template-columns: 1.05fr 1fr; gap: 40px; margin-top: 18px; flex: 1; min-height: 0; }
+.cap-list { display: grid; gap: 14px; margin-top: 22px; }
+.cap { display: grid; grid-template-columns: 44px 1fr; gap: 14px; align-items: start; }
+.cap-badge { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; font: 600 20px/1 var(--serif); color: var(--accent-ink); background: var(--accent-wash); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.cap b { font-size: 18px; } .cap p { font-size: 16px; line-height: 1.45; color: var(--ink-2); margin-top: 2px; }
+.problem { margin-top: 22px; padding: 16px 18px; border-left: 3px solid var(--accent); background: var(--accent-wash); border-radius: 4px 12px 12px 4px; font-size: 17px; line-height: 1.5; color: var(--ink); }
+.rings-wrap { display: grid; place-items: center; }
+@keyframes ringIn { from { opacity: 0; transform: scale(.82); } to { opacity: 1; transform: none; } }
+.slide.active .ring-g { animation: ringIn .8s cubic-bezier(.2, .7, .2, 1) both; transform-box: fill-box; transform-origin: center; animation-delay: calc(var(--i) * 160ms + 200ms); }
+@keyframes pulseQ { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+.slide.active .qmark { animation: pulseQ 2.4s ease-in-out infinite 1.2s; }
+
+/* 4. Testbed */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 22px; }
+.tb-card { padding: 24px 26px; display: flex; flex-direction: column; gap: 12px; }
+.tb-card h3 { display: flex; align-items: center; gap: 12px; }
+.tb-card p { font-size: 17px; line-height: 1.5; color: var(--ink-2); }
+.repl { font: 400 13px/1.8 var(--mono); background: var(--bg-2); border-radius: 12px; padding: 14px 16px; color: var(--ink); white-space: pre; overflow: hidden; }
+.strip-panel { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; margin-top: 18px; }
+.strip-panel .small { margin-right: 4px; }
+.repl .pr { color: var(--accent-ink); } .repl .cm { color: var(--muted); }
+.state-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.state-item { background: var(--bg-2); border-radius: 10px; padding: 10px 12px; font: 500 15px/1.3 var(--sans); }
+.state-item span { display: block; font: 400 13px/1.35 var(--sans); color: var(--muted); margin-top: 2px; }
+.footnote { margin-top: auto; padding-top: 16px; font-size: 15px; line-height: 1.5; color: var(--muted); }
+
+/* 5. Question */
+.quote { font: 400 44px/1.18 var(--serif); letter-spacing: -.015em; color: var(--ink); max-width: 1000px; margin: 8px 0 30px; }
+.quote em { font-style: normal; color: var(--accent-ink); }
+.factors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.factor { padding: 20px 22px; }
+.factor .f-top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.factor .f-name { font: 600 16px/1.25 var(--sans); }
+.factor dl { margin: 0; display: grid; grid-template-columns: 34px 1fr; gap: 8px 10px; font-size: 15px; line-height: 1.4; }
+.factor dt { font: 600 12px/1.6 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.factor dd { margin: 0; color: var(--ink-2); }
+
+/* 6. Design */
+.design { display: grid; grid-template-columns: 600px 1fr; gap: 36px; margin-top: 6px; flex: 1; min-height: 0; align-items: center; }
+.cube text { font: 500 13px var(--mono); fill: var(--ink-2); }
+.cube .axis-name { font: 600 14px var(--sans); fill: var(--ink); }
+.cube .axis-desc { font: 400 13px var(--sans); fill: var(--muted); }
+.cube .edge { stroke: var(--baseline); stroke-width: 1.6; fill: none; }
+.cube .edge.back { stroke-dasharray: 4 5; }
+.cube .v { fill: var(--card); stroke: var(--ink-2); stroke-width: 1.6; }
+.cube .v.full { fill: var(--s1); stroke: var(--card); stroke-width: 2.5; }
+.cube .v.off { fill: var(--s2); stroke: var(--card); stroke-width: 2.5; }
+.cube .lab-strong { font-weight: 700; fill: var(--ink); }
+.cube .arrow { stroke: var(--ink-2); stroke-width: 1.4; fill: none; }
+.bullets { display: grid; gap: 16px; }
+.bullets .b { display: grid; grid-template-columns: 22px 1fr; gap: 10px; font-size: 18px; line-height: 1.45; color: var(--ink-2); }
+.bullets .b::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); margin-top: 10px; }
+
+/* 7. Treatment layer */
+.tl { display: grid; grid-template-columns: 1fr 340px; gap: 24px; margin-top: 18px; }
+.tl-rows { display: grid; gap: 12px; }
+.tl-row { display: grid; grid-template-columns: 112px 1fr; gap: 18px; padding: 16px 20px; align-items: start; }
+.tl-row .off-tag { font: 600 15px/1 var(--sans); display: flex; align-items: center; gap: 9px; padding-top: 3px; }
+.tl-row .off-tag .mini { width: 28px; height: 16px; border-radius: 999px; background: var(--rule); position: relative; }
+.tl-row .off-tag .mini::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--card); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.tl-row p { font-size: 16px; line-height: 1.5; color: var(--ink-2); }
+.tl-row .where { font: 500 13px/1.4 var(--sans); color: var(--muted); margin-top: 6px; }
+.side-box { padding: 18px 20px; }
+.side-box h3 { font-size: 18px; margin-bottom: 8px; }
+.side-box p { font-size: 15px; line-height: 1.5; color: var(--ink-2); }
+.side-box + .side-box { margin-top: 14px; }
+.check { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; font-size: 14.5px; line-height: 1.45; color: var(--ink-2); margin-top: 8px; }
+.check::before { content: "✓"; color: var(--good); font-weight: 700; }
+
+/* 8. Measurement */
+.pipeline text { font-family: var(--sans); }
+.pipeline .box { fill: var(--card); stroke: var(--hair); stroke-width: 1; }
+.pipeline .box.hl { stroke: var(--accent); stroke-width: 1.5; }
+.pipeline .bt { font: 600 15px var(--sans); fill: var(--ink); }
+.pipeline .bs { font: 400 13px var(--sans); fill: var(--muted); }
+.pipeline .wire { stroke: var(--baseline); stroke-width: 1.5; fill: none; }
+.pipeline .head { fill: var(--baseline); }
+.pipeline .pulse { fill: var(--accent); opacity: 0; }
+@keyframes travel { 0% { transform: translate(0, 0); opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { transform: translate(var(--dx), var(--dy)); opacity: 0; } }
+.slide.active .pipeline .pulse { animation: travel 2.6s linear infinite; animation-delay: var(--delay, 0s); }
+.accounting { display: grid; grid-template-columns: 1fr 1fr 1.25fr; gap: 14px; margin-top: 16px; }
+.acc { padding: 14px 18px; }
+.acc h3 { font: 600 15px/1.3 var(--sans); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.acc ul { margin: 0; padding-left: 18px; font-size: 15px; line-height: 1.55; color: var(--ink-2); }
+.acc p { font-size: 15px; line-height: 1.5; color: var(--ink-2); }
+
+/* 9. Suite */
+.suite { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 16px; }
+.fam { padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; }
+.fam .f-head { display: flex; align-items: center; justify-content: space-between; }
+.fam .f-letter { font: 500 30px/1 var(--serif); color: var(--accent-ink); }
+.fam .prim { font: 600 12px/1 var(--sans); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); background: var(--bg-2); padding: 6px 9px; border-radius: 999px; }
+.fam b { font-size: 16px; }
+.fam p { font-size: 14.5px; line-height: 1.5; color: var(--ink-2); }
+.strip { display: grid; grid-template-columns: 1.15fr 1fr .9fr; gap: 14px; margin-top: 14px; }
+.strip .card { padding: 14px 18px; }
+.strip h3 { font: 600 13px/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+.strip ul { margin: 0; padding-left: 18px; font-size: 14.5px; line-height: 1.55; color: var(--ink-2); }
+
+/* 10. Timeline */
+.kpis { grid-template-columns: repeat(4, 1fr); margin-top: 16px; }
+.timeline text { font-family: var(--sans); }
+.timeline .tl-date { font: 600 13px var(--sans); fill: var(--accent-ink); letter-spacing: .02em; }
+.timeline .tl-what { font: 400 14px var(--sans); fill: var(--ink-2); }
+.timeline .spine { stroke: var(--baseline); stroke-width: 2; }
+.timeline .ms { fill: var(--card); stroke: var(--accent); stroke-width: 2.5; }
+.timeline .ms.last { fill: var(--accent); }
+.timeline .stem { stroke: var(--rule); stroke-width: 1; }
+
+/* Result slides */
+.res { display: grid; gap: 22px; margin-top: 14px; flex: 1; min-height: 0; align-items: start; }
+.res.cols-2 { grid-template-columns: 1.35fr 1fr; }
+.res.cols-2b { grid-template-columns: 1.1fr 1fr; }
+.notes { display: grid; gap: 12px; align-content: start; }
+.note-card { padding: 15px 18px; }
+.note-card .n-big { font: 600 26px/1.15 var(--sans); color: var(--ink); }
+.note-card .n-txt { font: 400 15px/1.5 var(--sans); color: var(--ink-2); margin-top: 4px; }
+.note-card.accent-left { border-left: 3px solid var(--accent); }
+.takeaway { font: 400 21px/1.45 var(--serif); color: var(--ink); margin-top: 14px; }
+.takeaway b { font-weight: 600; }
+table.ext { border-collapse: collapse; width: 100%; font: 400 15px/1.4 var(--sans); }
+table.ext th { text-align: left; font: 600 12px/1 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 0 10px 10px; border-bottom: 1px solid var(--rule); }
+table.ext td { padding: 11px 10px; border-bottom: 1px solid var(--hair); vertical-align: top; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+table.ext td.num { font-weight: 600; color: var(--ink); white-space: nowrap; }
+table.ext td b { color: var(--ink); }
+table.ext .sub { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+
+/* 17. Synthesis map */
+.map { display: grid; grid-template-columns: 36px 1fr 1fr; grid-template-rows: 1fr 1fr 34px; gap: 10px; height: 100%; }
+.map .yl { grid-row: 1 / 3; writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; font: 600 13px/1 var(--sans); color: var(--muted); letter-spacing: .04em; }
+.map .xl { grid-column: 2 / 4; text-align: center; font: 600 13px/34px var(--sans); color: var(--muted); letter-spacing: .04em; }
+.quad { border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; position: relative; }
+.quad.cost { background: var(--bg-2); }
+.quad.acc { background: var(--accent-wash); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+.quad.na { border: 1px dashed var(--rule); }
+.quad .q-axis { font: 600 11px/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.quad .q-head { font: 500 20px/1.25 var(--serif); color: var(--ink); }
+.quad .q-ev { font: 400 14px/1.45 var(--sans); color: var(--ink-2); }
+.quad .q-ev b { color: var(--ink); }
+
+/* 18. Audit */
+.audit { display: grid; gap: 10px; margin-top: 14px; }
+.audit-row { display: grid; grid-template-columns: 132px 1fr 1fr; gap: 20px; padding: 13px 18px; align-items: start; }
+.badge { display: inline-flex; align-items: center; gap: 7px; font: 600 13px/1 var(--sans); color: var(--ink); background: var(--bg-2); border-radius: 999px; padding: 7px 11px; white-space: nowrap; }
+.badge .ic { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font: 700 11px/1 var(--sans); color: #fff; }
+.badge.fixed .ic { background: var(--good); }
+.badge.disclosed .ic { background: var(--warning); color: #141413; }
+.audit-row .what { font-size: 15.5px; line-height: 1.45; color: var(--ink); }
+.audit-row .impact { font-size: 15px; line-height: 1.45; color: var(--ink-2); }
+.audit-head { display: grid; grid-template-columns: 132px 1fr 1fr; gap: 20px; padding: 0 18px; font: 600 12px/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+/* 19. Next steps */
+.lanes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 18px; align-items: start; }
+.lane { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+.lane .l-head { display: flex; align-items: baseline; gap: 10px; }
+.lane .l-when { font: 500 28px/1 var(--serif); color: var(--accent-ink); }
+.lane .l-goal { font: 600 15px/1.3 var(--sans); color: var(--ink); }
+.task { border-top: 1px solid var(--hair); padding-top: 11px; font-size: 15px; line-height: 1.45; color: var(--ink-2); }
+.task .cost { display: inline-block; margin-top: 6px; font: 600 12.5px/1 var(--sans); color: var(--ink); background: var(--bg-2); padding: 5px 8px; border-radius: 6px; }
+.task .why { display: block; font-size: 13.5px; color: var(--muted); margin-top: 4px; }
+
+/* 20. Closing */
+.close-list { display: grid; gap: 18px; margin-top: 22px; max-width: 1080px; }
+.close-item { display: grid; grid-template-columns: 56px 1fr; gap: 16px; align-items: start; }
+.close-item .ci-n { font: 500 38px/1 var(--serif); color: var(--accent-ink); }
+.close-item p { font: 400 22px/1.42 var(--serif); color: var(--ink); }
+.close-item p span { color: var(--ink-2); }
+.thanks { margin-top: auto; display: flex; align-items: baseline; justify-content: space-between; border-top: 1px solid var(--rule); padding-top: 18px; }
+.thanks .t1 { font: 400 30px/1 var(--serif); }
+
+/* ---------- Static / reduced motion / print ---------- */
+html.static *, html.static *::before, html.static *::after { transition: none !important; animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 1ms !important; animation: none !important; }
+}
+@media print {
+  @page { size: 1280px 720px; margin: 0; }
+  html, body { overflow: visible; height: auto; }
+  #viewport { position: static; display: block; }
+  #stage { transform: none !important; height: auto; }
+  .slide { position: relative; height: 720px; opacity: 1 !important; visibility: visible !important; transform: none !important; break-after: page; }
+  [data-step] { opacity: 1 !important; transform: none !important; }
+  .chrome, .progress, #tip, #help, .tbl-toggle { display: none !important; }
+}
+</style>
+</head>
+<body>
+<div id="viewport">
+<main id="stage" aria-roledescription="carousel" aria-label="Research progress slides">
+
+<!-- 1 · Title -->
+<section class="slide" data-section="Title" aria-roledescription="slide">
+  <div class="pad title-slide">
+    <div class="title-left stagger">
+      <div class="kicker" style="--i:0">Research progress · November 5, 2026</div>
+      <h1 class="display" style="--i:1">The Harness Ledger</h1>
+      <p class="subtitle" style="--i:2">What persistent execution, recursive delegation, and durable state cost — and when they pay off</p>
+      <p class="meta" style="--i:3">A controlled R / S / M ablation inside a production RLM-style coding agent.</p>
+      <div class="row-gap" style="--i:4">
+        <span class="chip">1,222 scored cells</span>
+        <span class="chip">8 harness configurations</span>
+        <span class="chip">Draft complete · audit applied</span>
+      </div>
+    </div>
+    <div class="switchboard card" id="switchboard" aria-label="Animated switchboard cycling through the eight harness configurations">
+      <div class="sb-head">One ledger, eight harnesses</div>
+      <div class="sw-list">
+        <div class="sw on" data-f="r"><span class="sw-name">R</span><span class="sw-track"><span class="sw-knob"></span></span><span class="sw-desc">Persistent execution</span></div>
+        <div class="sw on" data-f="s"><span class="sw-name">S</span><span class="sw-track"><span class="sw-knob"></span></span><span class="sw-desc">Recursive delegation</span></div>
+        <div class="sw on" data-f="m"><span class="sw-name">M</span><span class="sw-track"><span class="sw-knob"></span></span><span class="sw-desc">Durable state</span></div>
+      </div>
+      <div class="sb-id"><code id="sb-id">r1-s1-m1</code><span id="sb-note">shipped default</span></div>
+      <div class="meter">
+        <div class="m-head"><span>Accuracy · cells solved</span><b id="m-acc-v">85 / 90</b></div>
+        <div class="m-track s1"><div class="m-fill s1" id="m-acc" style="width:94.4%"></div></div>
+      </div>
+      <div class="meter">
+        <div class="m-head"><span>Cost · ¥ per 90 cells</span><b id="m-cost-v">¥16.87</b></div>
+        <div class="m-track s2"><div class="m-fill s2" id="m-cost" style="width:48.2%"></div></div>
+      </div>
+      <div class="sb-foot">Main matrix values, deepseek-v4-flash. Accuracy barely moves; cost nearly doubles.</div>
+    </div>
+  </div>
+</section>
+
+<!-- 2 · Agenda -->
+<section class="slide" data-section="Overview" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Overview</div>
+    <h2>Where things stand</h2>
+    <ol class="agenda stagger">
+      <li class="card" style="--i:0"><span class="ag-n">01</span><div><b>Background &amp; question</b><span class="ag-sub">Why harness components need their own ledger</span></div><span class="state">Framed</span></li>
+      <li class="card" style="--i:1"><span class="ag-n">02</span><div><b>Method</b><span class="ag-sub">Typed treatment layer + metered measurement harness</span></div><span class="state">Built</span></li>
+      <li class="card" style="--i:2"><span class="ag-n">03</span><div><b>Experiments</b><span class="ag-sub">Main matrix, probes, public benchmarks, strong model</span></div><span class="state">Complete</span></li>
+      <li class="card" style="--i:3"><span class="ag-n">04</span><div><b>Results</b><span class="ag-sub">Cost moves, accuracy mostly doesn't — with one clear exception</span></div><span class="state">Drafted</span></li>
+      <li class="card" style="--i:4"><span class="ag-n">05</span><div><b>Validity audit</b><span class="ag-sub">Accounting, budget, and isolation issues found and fixed</span></div><span class="state now">This week</span></li>
+      <li class="card" style="--i:5"><span class="ag-n">06</span><div><b>Next steps</b><span class="ag-sub">Close the caveats, scale the exception, then submit</span></div><span class="state">Planned</span></li>
+    </ol>
+  </div>
+</section>
+
+<!-- 3 · Background -->
+<section class="slide" data-section="Background" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Background</div>
+    <h2>Coding agents now ship as harnesses</h2>
+    <div class="bg-grid">
+      <div>
+        <p class="lead">A harness wraps a model in capabilities that persist and compose across turns, agents, and sessions.</p>
+        <div class="cap-list">
+          <div class="cap" data-step="1"><div class="cap-badge r">R</div><div><b>Persistent execution</b><p>A live Python namespace the agent keeps working in, turn after turn.</p></div></div>
+          <div class="cap" data-step="1"><div class="cap-badge s">S</div><div><b>Recursive delegation</b><p>Child agents spawned like function calls, for parallel or background work.</p></div></div>
+          <div class="cap" data-step="1"><div class="cap-badge m">M</div><div><b>Durable state</b><p>Memories, skills, and refinements that outlive a single session.</p></div></div>
+        </div>
+        <div class="problem" data-step="2">Each capability adds prompt surface, tokens, and failure modes. They are <b>added together, benchmarked together, and justified by one aggregate score</b> — which cannot say which part earned it.</div>
+      </div>
+      <div class="rings-wrap">
+        <svg viewBox="0 0 520 430" width="520" height="430" role="img" aria-label="Diagram: a model wrapped in three capability rings feeds a single aggregate score">
+          <g class="ring-g" style="--i:3"><circle cx="190" cy="215" r="168" fill="none" stroke="var(--accent)" stroke-width="22" opacity=".14"/><text x="190" y="40" text-anchor="middle" font-family="var(--sans)" font-size="14" font-weight="600" fill="var(--ink-2)">M · durable state</text></g>
+          <g class="ring-g" style="--i:2"><circle cx="190" cy="215" r="122" fill="none" stroke="var(--accent)" stroke-width="22" opacity=".22"/><text x="190" y="86" text-anchor="middle" font-family="var(--sans)" font-size="14" font-weight="600" fill="var(--ink-2)">S · delegation</text></g>
+          <g class="ring-g" style="--i:1"><circle cx="190" cy="215" r="76" fill="none" stroke="var(--accent)" stroke-width="22" opacity=".34"/><text x="190" y="132" text-anchor="middle" font-family="var(--sans)" font-size="14" font-weight="600" fill="var(--ink-2)">R · REPL</text></g>
+          <g class="ring-g" style="--i:0"><circle cx="190" cy="215" r="40" fill="var(--ink)"/><text x="190" y="220" text-anchor="middle" font-family="var(--sans)" font-size="15" font-weight="600" fill="var(--bg)">model</text></g>
+          <g class="ring-g" style="--i:4">
+            <path d="M372 215 H432" stroke="var(--baseline)" stroke-width="2" fill="none"/>
+            <path d="M432 209 L442 215 L432 221 Z" fill="var(--baseline)"/>
+            <rect x="446" y="176" width="74" height="78" rx="12" fill="var(--card)" stroke="var(--rule)"/>
+            <text x="483" y="207" text-anchor="middle" font-family="var(--sans)" font-size="13" fill="var(--muted)">one</text>
+            <text x="483" y="226" text-anchor="middle" font-family="var(--sans)" font-size="13" fill="var(--muted)">score</text>
+            <text class="qmark" x="483" y="290" text-anchor="middle" font-family="var(--serif)" font-size="40" fill="var(--accent)">?</text>
+            <text x="483" y="318" text-anchor="middle" font-family="var(--sans)" font-size="12.5" fill="var(--muted)">which ring</text>
+            <text x="483" y="334" text-anchor="middle" font-family="var(--sans)" font-size="12.5" fill="var(--muted)">earned it?</text>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 4 · Testbed -->
+<section class="slide" data-section="Background" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Testbed</div>
+    <h2>An RLM-style harness with a continual memory</h2>
+    <div class="two stagger">
+      <div class="card tb-card" style="--i:0">
+        <h3>Recursive Language Model</h3>
+        <p>Context lives in variables and sub-agents are function calls, all inside one persistent Python REPL.</p>
+        <div class="repl"><span class="pr">&gt;&gt;&gt;</span> rows = open("orders.csv").read()   <span class="cm"># context as data</span>
+<span class="pr">&gt;&gt;&gt;</span> job = rlm.spawn(…)                 <span class="cm"># a sub-agent as a call</span>
+<span class="pr">&gt;&gt;&gt;</span> rlm.collect(…)                     <span class="cm"># results as values</span></div>
+      </div>
+      <div class="card tb-card" style="--i:1">
+        <h3>Continual harness</h3>
+        <p>Supplemental prompts, memories, skill descriptions, and sub-agent specs persist as durable state, refined by small, evidence-backed updates.</p>
+        <div class="state-list">
+          <div class="state-item">Memories<span>facts and conventions</span></div>
+          <div class="state-item">Skill descriptions<span>reusable workflows</span></div>
+          <div class="state-item">Supplemental prompts<span>never the base prompt</span></div>
+          <div class="state-item">Sub-agent specs<span>refined via <code>/refine</code>, with rollback</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel strip-panel" data-step="1">
+      <span class="small">The study turns three of these into switches:</span>
+      <span class="chip"><b>R</b>&nbsp;the REPL namespace persists</span>
+      <span class="chip"><b>S</b>&nbsp;<code>rlm.spawn</code> may create children</span>
+      <span class="chip"><b>M</b>&nbsp;harness state is read and refined</span>
+    </div>
+    <p class="footnote">Instrument: <b>Prime Agent</b>, an open-source coding agent (Rust, daemon-supervised workers). The study names it only for reproducibility — the claims are about harness components, not the product.</p>
+  </div>
+</section>
+
+<!-- 5 · Question -->
+<section class="slide" data-section="Question" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Research question</div>
+    <p class="quote">Which capability <em>pays for itself</em> — on what kind of task, and at what cost?</p>
+    <div class="factors">
+      <div class="card factor" data-step="1">
+        <div class="f-top"><div class="cap-badge r">R</div><div class="f-name">Persistent execution</div></div>
+        <dl><dt>On</dt><dd>The REPL namespace survives each settled turn.</dd><dt>Off</dt><dd>Cleared after every turn; within-turn execution unchanged.</dd></dl>
+      </div>
+      <div class="card factor" data-step="2">
+        <div class="f-top"><div class="cap-badge s">S</div><div class="f-name">Recursive delegation</div></div>
+        <dl><dt>On</dt><dd>The agent may spawn child agents.</dd><dt>Off</dt><dd>Child admission is refused at the host boundary.</dd></dl>
+      </div>
+      <div class="card factor" data-step="3">
+        <div class="f-top"><div class="cap-badge m">M</div><div class="f-name">Durable state</div></div>
+        <dl><dt>On</dt><dd>Harness state is read, injected, and refined.</dd><dt>Off</dt><dd>A pinned empty harness; writes are refused.</dd></dl>
+      </div>
+    </div>
+    <div class="panel strip-panel" data-step="4" style="margin-top:22px">
+      <span class="small">Design expectation — each task family stresses one factor:</span>
+      <span class="chip">I · information management → <b>R</b></span>
+      <span class="chip">E · engineering → <b>S</b></span>
+      <span class="chip">T · cross-episode transfer → <b>M</b></span>
+    </div>
+  </div>
+</section>
+
+<!-- 6 · Design -->
+<section class="slide" data-section="Method" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Design</div>
+    <h2>A 2 × 2 × 2 factorial: eight harnesses from one codebase</h2>
+    <div class="design">
+      <svg class="cube anim" id="cube" viewBox="0 0 600 400" width="600" height="400" role="img" aria-label="Cube diagram: the eight R/S/M configurations as cube vertices; r1-s1-m1 is the full product, r0-s0-m0 turns everything off"></svg>
+      <div class="bullets">
+        <div class="b" data-step="1"><span><code>r1-s1-m1</code> is the shipped product; <code>r0-s0-m0</code> turns every capability off.</span></div>
+        <div class="b" data-step="2"><span>Same model, prompt layers, tools, compaction, fixtures, verifier, and per-cell request quota in every arm.</span></div>
+        <div class="b" data-step="3"><span>Paired blocks: every task instance runs under all eight treatments, in a fixed order.</span></div>
+        <div class="b" data-step="4"><span>A stable treatment ID is written into every record; an unknown ID fails the run instead of silently running the full product.</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 7 · Treatment layer -->
+<section class="slide" data-section="Method" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Method · treatment layer</div>
+    <h2>Each switch lives where the capability is admitted</h2>
+    <div class="tl">
+      <div class="tl-rows">
+        <div class="card tl-row" data-step="1">
+          <div class="off-tag"><span class="cap-badge r" style="width:30px;height:30px;font-size:15px;border-radius:8px">R</span>off</div>
+          <div><p>A <code>TurnEnd</code> hook calls the kernel's <code>reset_namespace</code>: user bindings are cleared, runtime bindings (<code>rlm</code>, <code>bash</code>, <code>asyncio</code>) kept. A failed reset fails the run.</p><div class="where">Kernel protocol + session engine</div></div>
+        </div>
+        <div class="card tl-row" data-step="2">
+          <div class="off-tag"><span class="cap-badge s" style="width:30px;height:30px;font-size:15px;border-radius:8px">S</span>off</div>
+          <div><p>The child host is withheld, <code>allow_recursion</code> is forced false, and the spawn capability leaves the system prompt; the kernel answers “no RLM child runtime”.</p><div class="where">Session wiring + layered system prompt</div></div>
+        </div>
+        <div class="card tl-row" data-step="3">
+          <div class="off-tag"><span class="cap-badge m" style="width:30px;height:30px;font-size:15px;border-radius:8px">M</span>off</div>
+          <div><p>The experiment's agent directory pins the harness gate off: no digest is injected, the refine skill is removed, and direct writes are refused.</p><div class="where">Agent directory settings + skill inventory</div></div>
+        </div>
+      </div>
+      <div>
+        <div class="card side-box" data-step="4">
+          <h3>Deployment-safe</h3>
+          <p>The CLI has no treatment flag. Experiments set <code>PRIME_AGENT_HARNESS_TREATMENT</code>; the product path always resolves <code>r1-s1-m1</code>.</p>
+        </div>
+        <div class="card side-box" data-step="5">
+          <h3>Checked where the model sees it</h3>
+          <div class="check"><span>R off: a value set last turn reads <code>missing</code></span></div>
+          <div class="check"><span>S off: a counting host records zero spawns</span></div>
+          <div class="check"><span>M off: <code>create_memory</code> is refused</span></div>
+          <div class="check"><span>All eight IDs built in one matrix test</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 8 · Measurement -->
+<section class="slide" data-section="Method" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Method · measurement</div>
+    <h2>Every cell is metered, verified, and accounted for</h2>
+    <svg class="pipeline" id="pipeline" viewBox="0 0 1136 236" width="1136" height="236" role="img" aria-label="Pipeline: task fixture, agent under treatment, budget proxy, provider API; the agent's answer goes to a verifier, a JSONL record, and analysis" style="margin-top:12px"></svg>
+    <div class="accounting">
+      <div class="card acc" data-step="1"><h3>Counted · agent failures</h3><ul><li>Wrong or partial answer</li><li>Request budget exhausted</li></ul></div>
+      <div class="card acc" data-step="1"><h3>Retried · infrastructure</h3><ul><li>Transport errors</li><li>Timeouts</li></ul></div>
+      <div class="card acc" data-step="2" style="border-left:3px solid var(--accent)"><h3>The accounting rule</h3><p>A cell's outcome is its <b>first attempt that completed or exhausted its quota</b>. Protocol hashes are frozen before the main run; records are resumable JSONL.</p></div>
+    </div>
+    <div class="panel strip-panel" data-step="3" style="margin-top:14px">
+      <span class="small">Main matrix, after the audit:</span>
+      <span class="chip">1,168 attempts</span><span class="small">→</span><span class="chip"><b>720 counted cells</b></span>
+      <span class="chip">447 infrastructure retries</span>
+      <span class="chip">1 budget-exhausted cell counted, its retry discarded</span>
+    </div>
+  </div>
+</section>
+
+<!-- 9 · Suite -->
+<section class="slide" data-section="Experiments" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Experiments · task suite</div>
+    <h2>Three families, three probes, four public benchmarks</h2>
+    <div class="suite stagger">
+      <div class="card fam" style="--i:0">
+        <div class="f-head"><span class="f-letter">I</span><span class="prim">primary: R</span></div>
+        <b>Information management</b>
+        <p>Three joined tables (orders, customers, refunds), a date window, weekday aggregation, a contradiction count. Six checked fields.</p>
+      </div>
+      <div class="card fam" style="--i:1">
+        <div class="f-head"><span class="f-letter">E</span><span class="prim">primary: S</span></div>
+        <b>Engineering</b>
+        <p>An orders package with six independent defects. Verifier-owned hidden tests; score = pass ratio (reference fix 7/7, unmodified 0/7).</p>
+      </div>
+      <div class="card fam" style="--i:2">
+        <div class="f-head"><span class="f-letter">T</span><span class="prim">primary: M</span></div>
+        <b>Transfer</b>
+        <p>Three-episode series: episode 1 states a rule, episodes 2–3 withhold it. Ten templates — six keep the rule, four change a threshold.</p>
+      </div>
+    </div>
+    <div class="strip stagger">
+      <div class="card" style="--i:3"><h3>Probes</h3><ul><li><b>Mechanism</b> — arbitrary per-instance thresholds, never repeated</li><li><b>Boundary</b> — every row within 2 bp of a threshold</li><li><b>Hidden policy</b> — a non-derivable code→queue table, 3/6/12 episodes</li></ul></div>
+      <div class="card" style="--i:4"><h3>Public benchmarks</h3><ul><li>LongBench-v2 · 20 long-context questions</li><li>SWE-bench Verified · 12 repositories</li><li>LongMemEval · 10 memory questions</li><li>OOLONG · 11 lengths, 1k → 4M tokens</li></ul></div>
+      <div class="card" style="--i:5"><h3>Models</h3><ul><li><code>deepseek-v4-flash</code> — every run</li><li><code>deepseek-v4-pro</code> — replication on transfer and LongMemEval</li></ul></div>
+    </div>
+    <p class="footnote">30 instances per family, each run under all eight treatments → 720 main-matrix cells. Probes and benchmarks use the arms that isolate the factor they test.</p>
+  </div>
+</section>
+
+<!-- 10 · Timeline -->
+<section class="slide" data-section="Experiments" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Experiments · timeline</div>
+    <h2>From design to a complete draft in under three weeks</h2>
+    <div class="tiles kpis stagger">
+      <div class="card tile" style="--i:0"><div class="t-label">Scored cells</div><div class="t-value"><span class="count" data-to="1222" data-dec="0">1,222</span></div><div class="t-note">13 runs + SWE-bench</div></div>
+      <div class="card tile" style="--i:1"><div class="t-label">Main matrix</div><div class="t-value"><span class="count" data-to="720" data-dec="0">720</span></div><div class="t-note">3 families × 30 instances × 8</div></div>
+      <div class="card tile" style="--i:2"><div class="t-label">Provider spend</div><div class="t-value"><span class="count" data-to="465" data-dec="0" data-pre="¥">¥465</span></div><div class="t-note">runner-tracked, incl. retries</div></div>
+      <div class="card tile" style="--i:3"><div class="t-label">Public benchmarks</div><div class="t-value"><span class="count" data-to="4" data-dec="0">4</span></div><div class="t-note">plus 3 targeted probes</div></div>
+    </div>
+    <svg class="timeline anim" id="timeline" viewBox="0 0 1136 250" width="1136" height="250" role="img" aria-label="Timeline from October 18 to November 5, 2026" style="margin-top:14px"></svg>
+  </div>
+</section>
+
+<!-- 11 · Result 1 -->
+<section class="slide" data-section="Results" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Result 1 · accuracy</div>
+    <h2>Eight harnesses, nearly identical accuracy</h2>
+    <div class="res cols-2">
+      <figure class="chart card anim" id="fig-success"></figure>
+      <div class="notes">
+        <div class="card note-card" data-step="1"><div class="n-big">83–88 of 90</div><div class="n-txt">cells solved per arm, across all eight treatments (mean score 0.983–0.997).</div></div>
+        <div class="card note-card" data-step="2"><div class="n-big">115 vs 116 of 120</div><div class="n-txt">Transfer family, M-on vs M-off — the comparison built to stress memory (Fisher exact <i>p</i> = 1.0).</div></div>
+        <div class="card note-card accent-left" data-step="3"><div class="n-txt"><b>Near ceiling.</b> I is 29/30 in every arm, E 26–30, T 28–30 — so accuracy effects of R and S are not identifiable on this suite.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 12 · Result 2 -->
+<section class="slide" data-section="Results" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Result 2 · cost</div>
+    <h2>What the harness changes is cost</h2>
+    <div class="res cols-2b">
+      <figure class="chart card anim" id="fig-cost"></figure>
+      <div class="notes">
+        <figure class="chart card anim" id="fig-roff"></figure>
+        <div class="card note-card" data-step="1"><div class="n-big">≈ 2× transfer spend</div><div class="n-txt">without durable state: ¥17.19 vs ¥9.11 with R on, ¥22.93 vs ¥10.26 with R off. Every episode re-derives the convention.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 13 · Result 3 -->
+<section class="slide" data-section="Results" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Result 3 · resolution</div>
+    <h2>How flat is flat? Bounding the null</h2>
+    <div class="res cols-2">
+      <figure class="chart card anim" id="fig-forest"></figure>
+      <div class="notes">
+        <div class="card note-card" data-step="1"><div class="n-big">&gt; 2.2 pts ruled out</div><div class="n-txt">An M advantage above 2.2 points (or a disadvantage above 0.7) is excluded on transfer.</div></div>
+        <div class="card note-card accent-left" data-step="2"><div class="n-txt"><b>Equivalence narrowly missed.</b> After the audit re-scored one budget-exhausted cell, the interval's upper end crosses the pre-stated ±2-point margin.</div></div>
+        <div class="card note-card" data-step="3"><div class="n-big">55 / 60</div><div class="n-txt">identical scores in a repeat of the full-vs-off contrast; external benchmarks at n ≈ 20 resolve only ≈ 30-point effects.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 14 · Result 4 -->
+<section class="slide" data-section="Results" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Result 4 · the pilot</div>
+    <h2>A large pilot effect did not survive ten templates</h2>
+    <div class="res cols-2">
+      <figure class="chart card anim" id="fig-pilot"></figure>
+      <div class="notes">
+        <div class="card note-card" data-step="1"><div class="n-txt"><b>Mechanism check · 40 cells.</b> Arbitrary thresholds, never repeated after episode 1; fresh HOME and TMPDIR for M-off. Accuracy 40/40 — but M-off needs <b>22–27 requests</b> per series vs <b>14–20</b> with memory.</div></div>
+        <div class="card note-card" data-step="2"><div class="n-txt"><b>Boundary check · 20 cells.</b> Every row within 2 bp of a threshold. At ceiling with an 80-request quota; under the original 40, <b>M-off 7/10</b> (M-on 10/10).</div></div>
+        <p class="takeaway" data-step="3">If the rule can be recovered from the inputs, memory buys <b>cheaper work</b>, not better answers.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 15 · Result 5 -->
+<section class="slide" data-section="Results" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Result 5 · public benchmarks</div>
+    <h2>Public benchmarks agree — at coarse resolution</h2>
+    <div class="res cols-2b">
+      <div class="card" style="padding:18px 20px">
+        <table class="ext">
+          <thead><tr><th>Benchmark</th><th>Contrast</th><th>Enabled</th><th>Ablated</th></tr></thead>
+          <tbody>
+            <tr><td><b>LongBench-v2</b><span class="sub">20 questions · 57k–170k chars</span></td><td>full vs all off</td><td class="num">0.70</td><td class="num">0.65</td></tr>
+            <tr><td><b>SWE-bench Verified</b><span class="sub">same two unresolved repos</span></td><td>full vs all off</td><td class="num">10 / 12</td><td class="num">10 / 12</td></tr>
+            <tr><td><b>LongMemEval</b><span class="sub">read · read · QA episodes</span></td><td>M-on vs M-off</td><td class="num">11 / 20</td><td class="num">12 / 20</td></tr>
+            <tr><td><b>OOLONG</b><span class="sub">1k → 4M tokens, solved by scripting</span></td><td>R-on vs R-off</td><td class="num">11 / 11</td><td class="num">11 / 11</td></tr>
+          </tbody>
+        </table>
+        <p class="small" style="margin-top:12px">At n ≈ 20 the minimum detectable effect is ≈ 30 points: these rule out only large differences.</p>
+      </div>
+      <div class="notes">
+        <figure class="chart card anim" id="fig-budget" data-step="1"></figure>
+        <div class="card note-card accent-left" data-step="2"><div class="n-txt">Quotas were raised mid-run and only exhausted cells re-run. Under the <b>original</b> quotas the ablated arms trail: LongBench <b>0.55 vs 0.70</b>, LongMemEval <b>9/20 vs 11/20</b>.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 16 · Result 6 -->
+<section class="slide" data-section="Results" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Result 6 · the exception</div>
+    <h2>When durable state does pay</h2>
+    <div class="res cols-2">
+      <figure class="chart card anim" id="fig-pays"></figure>
+      <div class="notes">
+        <div class="card note-card" data-step="1"><div class="n-txt"><b>Hidden-policy probe.</b> Twelve opaque codes map to queues through a table stated once, never written to a readable file, and not inferable from the codes.</div><div class="n-big" style="margin-top:8px">0.936 vs 0.455</div><div class="n-txt">M-on vs M-off · 95% CI of the gap [0.37, 0.61]</div></div>
+        <div class="card note-card" data-step="2"><div class="n-txt"><b>Stronger model.</b> <code>deepseek-v4-pro</code> does not reconstruct withheld conventions: full 0.975 vs all-off 0.710 (CI [0.08, 0.47]), and all-off costs <b>4.5×</b> (¥11.24 vs ¥2.50).</div></div>
+        <div class="card note-card accent-left" data-step="3"><div class="n-txt">Small samples (6 vs 4 cells; 10 per arm), and the strong-model run contrasts full vs all-off — it does not isolate M.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 17 · Synthesis -->
+<section class="slide" data-section="Synthesis" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Synthesis</div>
+    <h2>The harness contract, restated</h2>
+    <div class="res" style="grid-template-columns: 1.55fr 1fr; gap:24px">
+      <div class="map stagger">
+        <div class="yl">Must the state survive across episodes? &nbsp; no → yes</div>
+        <div class="quad cost" style="--i:0"><span class="q-axis">re-derivable · cross-episode</span><div class="q-head">Capabilities buy cheaper repeated work</div><div class="q-ev">Transfer family and mechanism check: same accuracy, <b>~2× spend</b> without memory.</div></div>
+        <div class="quad acc" style="--i:1"><span class="q-axis">not derivable · cross-episode</span><div class="q-head">Durable state buys accuracy</div><div class="q-ev">Hidden-policy probe: <b>0.936 vs 0.455</b>. A stronger model re-derives less, so tasks drift here (0.975 vs 0.710).</div></div>
+        <div class="quad cost" style="--i:2"><span class="q-axis">re-derivable · within an episode</span><div class="q-head">Cost differences only</div><div class="q-ev">I and E families: <b>R off adds 34–41% requests</b> at unchanged accuracy. OOLONG to 4M tokens is solved either way.</div></div>
+        <div class="quad na" style="--i:3"><span class="q-axis">not derivable · within an episode</span><div class="q-head">The prompt carries it</div><div class="q-ev">Nothing needs to persist, so no capability is required to deliver it.</div></div>
+        <div></div>
+        <div class="xl">Can the state be re-derived from the task's inputs? &nbsp; yes → no</div>
+      </div>
+      <div class="notes">
+        <div class="card note-card" data-step="1"><div class="n-txt"><b>Budget-aware selection</b> over all 512 per-family policies (in-sample):</div><div class="n-big" style="margin-top:6px">¥16.87 · 0.991</div><div class="n-txt">The shipped default is already on the cost frontier. The best mix reaches 0.998 for ¥25.98 — <b>+54% spend for ≤ 0.7 points</b>.</div></div>
+        <p class="takeaway" data-step="2">A selector here would be predicting <b>cost</b>, not accuracy.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 18 · Audit -->
+<section class="slide" data-section="Audit" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Validity audit · this week</div>
+    <h2>What the audit found — and what changed</h2>
+    <div class="audit">
+      <div class="audit-head"><span>Status</span><span>Finding</span><span>Change</span></div>
+      <div class="card audit-row" data-step="1"><span class="badge fixed"><span class="ic">✓</span>Fixed</span><div class="what">Budget exhaustion was logged as an infrastructure error and retried until it succeeded.</div><div class="impact">One main-matrix cell re-scored; transfer equivalence at ±2 points is now narrowly missed. The runner no longer retries it.</div></div>
+      <div class="card audit-row" data-step="2"><span class="badge disclosed"><span class="ic">!</span>Disclosed</span><div class="what">Request quotas were raised mid-run on LongBench-v2 (8→30), LongMemEval (90→160), and the boundary check (40→80).</div><div class="impact">Reported, with each run's result under its original quota: the ablated arms trail there.</div></div>
+      <div class="card audit-row" data-step="3"><span class="badge disclosed"><span class="ic">!</span>Disclosed</span><div class="what">The runner changed mid-main-run (M-off HOME/TMPDIR isolation); sibling episode directories stayed reachable in the main matrix and mechanism check.</div><div class="impact">Stated as a limitation: a cross-episode leak cannot be ruled out for those runs.</div></div>
+      <div class="card audit-row" data-step="4"><span class="badge fixed"><span class="ic">✓</span>Fixed</span><div class="what">Summaries kept only the last invocation; error counts were cumulative, not per cell.</div><div class="impact">Per-cell accounting, regression tests (red-first), all summaries and reports regenerated.</div></div>
+      <div class="card audit-row" data-step="5"><span class="badge fixed"><span class="ic">✓</span>Fixed</span><div class="what">Paper text: benchmark count, contrast labels, template split, strong-model cost.</div><div class="impact">Four benchmarks; contrasts labeled per row; 6 / 4 templates; ¥11.24 vs ¥2.50.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- 19 · Next steps -->
+<section class="slide" data-section="Next steps" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Next steps</div>
+    <h2>Close the caveats, scale the exception, then submit</h2>
+    <div class="lanes">
+      <div class="card lane" data-step="1">
+        <div class="l-head"><span class="l-when">Now</span><span class="l-goal">Close the caveats</span></div>
+        <div class="task">Re-run transfer M-off (120 cells) and the mechanism check under full isolation.<span class="why">Removes the cross-episode leak caveat.</span><span class="cost">≈ ¥90, est.</span></div>
+        <div class="task">Re-run LongBench-v2, LongMemEval, and the boundary check under one fixed quota.<span class="why">Removes the mid-run budget selection effect.</span><span class="cost">≈ ¥110, est.</span></div>
+      </div>
+      <div class="card lane" data-step="2">
+        <div class="l-head"><span class="l-when">Next</span><span class="l-goal">Scale the exception</span></div>
+        <div class="task">Grow the hidden-policy probe from 6 / 4 cells to ≥ 30 per arm.<span class="why">Turn a striking probe into a firm estimate.</span></div>
+        <div class="task">Strong model on all three families; add a second provider.<span class="why">Separate task effects from model effects.</span></div>
+      </div>
+      <div class="card lane" data-step="3">
+        <div class="l-head"><span class="l-when">Then</span><span class="l-goal">Sharpen and submit</span></div>
+        <div class="task">Harder tasks where R and S can move accuracy.<span class="why">Escape the ceiling that hides them today.</span></div>
+        <div class="task">External samples n = 20 → ≈ 100.<span class="why">Detectable effect ≈ 30 → ≈ 13 points.</span></div>
+        <div class="task">Held-out selector, then submission.</div>
+      </div>
+    </div>
+    <div class="panel strip-panel" data-step="4" style="margin-top:20px">
+      <span class="small">Open questions for discussion:</span>
+      <span class="chip">Is ±2 points the right equivalence margin for transfer?</span>
+      <span class="chip">Should the hidden-policy probe become a fourth family?</span>
+      <span class="chip">Which second provider best separates task from model?</span>
+    </div>
+  </div>
+</section>
+
+<!-- 20 · Closing -->
+<section class="slide" data-section="Takeaways" aria-roledescription="slide">
+  <div class="pad">
+    <div class="kicker">Takeaways</div>
+    <h2>Three things to remember</h2>
+    <div class="close-list">
+      <div class="close-item" data-step="1"><span class="ci-n">1</span><p>On tasks whose state can be re-derived, the harness changes <b>cost, not accuracy</b>. <span>The full harness is the cheapest arm (¥16.87 vs ¥32.27), and transfer accuracy is bounded within about two points.</span></p></div>
+      <div class="close-item" data-step="2"><span class="ci-n">2</span><p>Durable state turns into accuracy when the state <b>cannot be derived and must persist</b> <span>(0.936 vs 0.455) — and when the model cannot reconstruct it (0.975 vs 0.710).</span></p></div>
+      <div class="close-item" data-step="3"><span class="ci-n">3</span><p>Measurement discipline is part of the result. <span>Failure accounting, budgets, and isolation all moved the bounds — so they get fixed before the study scales.</span></p></div>
+    </div>
+    <div class="thanks" data-step="4"><span class="t1">Thank you — questions welcome.</span><span class="small">Draft: <code>paper/paper.md</code> · evidence: <code>experiments/harness-ablation/</code></span></div>
+  </div>
+</section>
+
+<!-- Chrome -->
+<div class="chrome" aria-label="Slide controls">
+  <span class="brand">The Harness Ledger</span><span class="sep"></span><span id="section-name">Title</span>
+  <span class="spacer"></span>
+  <button id="btn-help" aria-label="Keyboard shortcuts" title="Shortcuts (?)">?</button>
+  <button id="btn-theme" aria-label="Toggle dark mode" title="Theme (D)">Theme</button>
+  <button id="btn-prev" aria-label="Previous">←</button>
+  <span class="count" id="count" aria-live="polite">1 / 20</span>
+  <button id="btn-next" aria-label="Next">→</button>
+</div>
+<div class="progress" id="progress" style="width:0"></div>
+<div class="card" id="help" hidden>
+  <h3>Shortcuts</h3>
+  <div><kbd>→</kbd> <kbd>Space</kbd> next step · <kbd>←</kbd> back</div>
+  <div><kbd>Home</kbd> / <kbd>End</kbd> first / last slide</div>
+  <div><kbd>T</kbd> table view of this slide's charts</div>
+  <div><kbd>D</kbd> light / dark · <kbd>F</kbd> full screen</div>
+  <div style="margin-top:6px;color:var(--muted)">Hover or focus a mark for its value. Add <code>?static</code> to the URL for a no-motion view; print for a PDF.</div>
+</div>
+</main>
+</div>
+<div id="tip" role="tooltip" hidden></div>
+<noscript><p style="padding:24px">This deck needs JavaScript for navigation and charts.</p></noscript>
+
+<script>
+"use strict";
+/* ======================================================================
+   Data — every figure below comes from the study's evidence files
+   (experiments/harness-ablation/runner/results, after the audit).
+   ====================================================================== */
+const ARMS = [
+  { id: "r1-s1-m1", note: "full",    succ: 85, mean: 0.991, req: 10.5, cost: 16.87 },
+  { id: "r1-s1-m0", note: "",        succ: 83, mean: 0.983, req: 13.2, cost: 26.25 },
+  { id: "r1-s0-m1", note: "",        succ: 87, mean: 0.995, req: 11.6, cost: 22.97 },
+  { id: "r1-s0-m0", note: "",        succ: 88, mean: 0.997, req: 12.9, cost: 26.25 },
+  { id: "r0-s1-m1", note: "",        succ: 86, mean: 0.993, req: 13.3, cost: 23.02 },
+  { id: "r0-s1-m0", note: "",        succ: 86, mean: 0.989, req: 15.7, cost: 32.12 },
+  { id: "r0-s0-m1", note: "",        succ: 87, mean: 0.995, req: 13.7, cost: 25.73 },
+  { id: "r0-s0-m0", note: "all off", succ: 86, mean: 0.992, req: 16.2, cost: 32.27 },
+];
+const R_OFF = [
+  { fam: "I · information", pct: 40.7 },
+  { fam: "E · engineering", pct: 34.3 },
+  { fam: "T · transfer", pct: 12.5 },
+];
+const FOREST = [
+  { label: "After audit", sub: "§4.2 accounting", est: 0.6, lo: -0.7, hi: 2.2, emph: true },
+  { label: "Before audit", sub: "exhausted cell retried", est: 0.2, lo: -1.0, hi: 1.5, emph: false },
+];
+const PILOT = [
+  { label: "Pilot", sub: "1 template · 20 cells per arm", a: 0.9825, b: 0.7875, aText: "0.983", bText: "0.788", aTip: "0.983 · 19/20 solved", bTip: "0.788 · 8/20 solved" },
+  { label: "Main matrix", sub: "10 templates · 120 cells per arm", a: 0.9929, b: 0.9867, aText: "0.993", bText: "0.987", aTip: "0.993 · 115/120 solved", bTip: "0.987 · 116/120 solved" },
+];
+const PAYS = [
+  { label: "Transfer · flash", sub: "full vs all off · 30 cells each", a: 0.988, b: 0.990, aText: "0.988", bText: "0.990" },
+  { label: "Transfer · pro", sub: "full vs all off · 10 cells each", a: 0.975, b: 0.710, aText: "0.975", bText: "0.710" },
+  { label: "Hidden-policy probe", sub: "M-on vs M-off · 6 vs 4 cells", a: 0.936, b: 0.455, aText: "0.936", bText: "0.455" },
+];
+const BUDGET = [
+  { group: "LongBench-v2 · original quota 8 requests" },
+  { label: "full", n: 0, of: 20, enabled: true },
+  { label: "r1-s0-m1", n: 4, of: 20 },
+  { label: "r0-s0-m1", n: 5, of: 20 },
+  { label: "r0-s0-m0", n: 5, of: 20 },
+  { group: "LongMemEval · original quota 90" },
+  { label: "M-on", n: 0, of: 20, enabled: true },
+  { label: "M-off", n: 6, of: 20 },
+  { group: "Boundary check · original quota 40" },
+  { label: "M-on", n: 0, of: 10, enabled: true },
+  { label: "M-off", n: 3, of: 10 },
+];
+const TIMELINE = [
+  { date: "Oct 18", what: ["Study design and", "treatment-layer plan"] },
+  { date: "Oct 26", what: ["Bounded-proxy", "smoke test"] },
+  { date: "Oct 31", what: ["R/S/M layer · pilots", "protocol frozen"] },
+  { date: "Nov 2", what: ["Main matrix (720)", "mechanism check"] },
+  { date: "Nov 3–4", what: ["Public benchmarks", "boundary · repeat"] },
+  { date: "Nov 5", what: ["OOLONG · hidden policy", "strong model"] },
+  { date: "This week", what: ["Validity audit", "applied"] },
+];
+
+/* ======================================================================
+   Small DOM helpers
+   ====================================================================== */
+const NS = "http://www.w3.org/2000/svg";
+function s(tag, attrs, parent) {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function h(tag, attrs, parent, text) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (text != null) n.textContent = text;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function t(parent, x, y, str, attrs) {
+  const n = s("text", Object.assign({ x, y }, attrs || {}), parent);
+  n.textContent = str;
+  return n;
+}
+const yen = v => "¥" + v.toFixed(2);
+function barPath(x0, y, w, hgt) {
+  if (w <= 0.5) return "";
+  const r = Math.min(4, w, hgt / 2);
+  return `M${x0},${y}H${x0 + w - r}A${r},${r} 0 0 1 ${x0 + w},${y + r}V${y + hgt - r}A${r},${r} 0 0 1 ${x0 + w - r},${y + hgt}H${x0}Z`;
+}
+
+/* ---------- Tooltip: values lead, labels follow; text via textContent ---------- */
+const tip = document.getElementById("tip");
+function showTip(x, y, value, label, keyClass) {
+  tip.replaceChildren();
+  const strong = h("strong", {}, tip);
+  if (keyClass) h("span", { class: "tk", style: `background:var(--${keyClass})` }, strong);
+  strong.appendChild(document.createTextNode(value));
+  h("span", {}, tip, label);
+  tip.hidden = false;
+  const pad = 14, r = tip.getBoundingClientRect();
+  let left = x + pad, top = y + pad;
+  if (left + r.width > innerWidth - 8) left = x - r.width - pad;
+  if (top + r.height > innerHeight - 8) top = y - r.height - pad;
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
+function hideTip() { tip.hidden = true; }
+function bindTip(node, value, label, keyClass) {
+  node.setAttribute("tabindex", "0");
+  node.setAttribute("role", "img");
+  node.setAttribute("aria-label", `${label}: ${value}`);
+  node.addEventListener("pointermove", e => showTip(e.clientX, e.clientY, value, label, keyClass));
+  node.addEventListener("pointerleave", hideTip);
+  node.addEventListener("focus", () => { const r = node.getBoundingClientRect(); showTip(r.left + r.width / 2, r.top, value, label, keyClass); });
+  node.addEventListener("blur", hideTip);
+}
+
+/* ---------- Chart frame: caption, legend, plot, and its table-view twin ---------- */
+function frame(fig, o) {
+  const cap = h("figcaption", {}, fig);
+  const titles = h("div", {}, cap);
+  h("div", { class: "c-title" }, titles, o.title);
+  if (o.sub) h("div", { class: "c-sub" }, titles, o.sub);
+  const btn = h("button", { class: "tbl-toggle", type: "button", "aria-pressed": "false" }, cap, "Table");
+  btn.addEventListener("click", () => toggleTable(fig));
+  if (o.legend) {
+    const lg = h("div", { class: "legend" }, fig);
+    for (const item of o.legend) {
+      const sp = h("span", {}, lg);
+      h("i", { class: item.shape === "dot" ? "key-dot" : "key-rect", style: `background:var(--${item.color})` }, sp);
+      sp.appendChild(document.createTextNode(item.label));
+    }
+  }
+  const plot = h("div", { class: "plot" }, fig);
+  const wrap = h("div", { class: "tablewrap" }, fig);
+  const tbl = h("table", { class: "dtable" }, wrap);
+  const tr = h("tr", {}, h("thead", {}, tbl));
+  for (const c of o.table.cols) h("th", { scope: "col" }, tr, c);
+  const tb = h("tbody", {}, tbl);
+  for (const row of o.table.rows) { const r = h("tr", {}, tb); for (const c of row) h("td", {}, r, c); }
+  return plot;
+}
+function toggleTable(fig, force) {
+  const on = force ?? !fig.classList.contains("show-table");
+  fig.classList.toggle("show-table", on);
+  const btn = fig.querySelector(".tbl-toggle");
+  btn.textContent = on ? "Chart" : "Table";
+  btn.setAttribute("aria-pressed", String(on));
+}
+
+/* ---------- Horizontal bars (emphasis or two-series), grows from the baseline ---------- */
+function hbar(fig, o) {
+  const plot = frame(fig, o);
+  const W = o.width, labelW = o.labelW, valueW = o.valueW ?? 64, rowH = o.rowH ?? 32, barH = o.barH ?? 18;
+  const groupH = 26, top = 6, axisH = o.axisTitle ? 42 : 24;
+  let y = top;
+  const layout = o.rows.map(r => { const at = y; y += r.group ? groupH : rowH; return at; });
+  const plotBottom = y, H = plotBottom + axisH;
+  const x0 = labelW, x1 = W - valueW;
+  const x = v => x0 + (v - o.domain[0]) / (o.domain[1] - o.domain[0]) * (x1 - x0);
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "group", "aria-label": o.summary }, plot);
+  for (const tk of o.ticks) {
+    s("line", { class: "grid", x1: x(tk), x2: x(tk), y1: top, y2: plotBottom }, svg);
+    t(svg, x(tk), plotBottom + 17, o.tickFormat(tk), { class: "tick", "text-anchor": "middle" });
+  }
+  if (o.axisTitle) t(svg, (x0 + x1) / 2, plotBottom + 36, o.axisTitle, { class: "axis-title", "text-anchor": "middle" });
+  s("line", { class: "axis", x1: x(o.domain[0]), x2: x(o.domain[0]), y1: top, y2: plotBottom }, svg);
+  let i = 0;
+  o.rows.forEach((r, k) => {
+    const ry = layout[k];
+    if (r.group) { t(svg, 0, ry + 18, r.group, { class: "grouphead" }); return; }
+    const g = s("g", { class: "row" }, svg);
+    const by = ry + (rowH - barH) / 2;
+    t(g, x0 - 12, by + barH / 2 + 5, r.label, { class: "rowlabel" + (r.strong ? " strong" : ""), "text-anchor": "end" });
+    if (r.sub) t(g, x0 - 12, by + barH / 2 + 19, r.sub, { class: "rowsub", "text-anchor": "end" });
+    const grow = s("g", { class: "grow", style: `--d:${i * 70}ms` }, g);
+    const w = x(r.value) - x(o.domain[0]);
+    s("path", { class: "mark " + r.cls, d: barPath(x(o.domain[0]), by, w, barH) }, grow);
+    if (r.showValue) t(g, x(r.value) + 8, by + barH / 2 + 4.5, r.text, { class: "val fadein" + (r.lightValue ? " light" : ""), style: `--d:${i * 70 + 450}ms` });
+    const hit = s("rect", { class: "hit", x: 0, y: ry, width: W, height: rowH }, g);
+    bindTip(hit, r.text, r.tipLabel || r.label, r.key);
+    i += 1;
+  });
+}
+
+/* ---------- Dumbbell: enabled vs ablated per row; the ablated dot travels out ---------- */
+function dumbbell(fig, o) {
+  const plot = frame(fig, o);
+  const W = o.width, labelW = o.labelW, valW = o.valW ?? 150, rowH = o.rowH ?? 74, top = 26, axisH = 42;
+  const H = top + rowH * o.rows.length + axisH;
+  const x0 = labelW, x1 = W - valW;
+  const x = v => x0 + (v - o.domain[0]) / (o.domain[1] - o.domain[0]) * (x1 - x0);
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "group", "aria-label": o.summary }, plot);
+  const bottom = top + rowH * o.rows.length;
+  for (const tk of o.ticks) {
+    s("line", { class: "grid", x1: x(tk), x2: x(tk), y1: top - 8, y2: bottom }, svg);
+    t(svg, x(tk), bottom + 17, tk.toFixed(1), { class: "tick", "text-anchor": "middle" });
+  }
+  t(svg, (x0 + x1) / 2, bottom + 36, o.axisTitle, { class: "axis-title", "text-anchor": "middle" });
+  t(svg, W - valW + 16, 12, o.valHead, { class: "rowsub" });
+  o.rows.forEach((r, i) => {
+    const cy = top + i * rowH + rowH / 2;
+    const g = s("g", { class: "row" }, svg);
+    t(g, 0, cy - 3, r.label, { class: "rowlabel strong" });
+    t(g, 0, cy + 15, r.sub, { class: "rowsub" });
+    const xa = x(r.a), xb = x(r.b), len = Math.abs(xa - xb);
+    // Dots closer than their diameter are nudged apart vertically so neither hides the other.
+    const close = len < 14, ya = close ? cy - 5 : cy, yb = close ? cy + 5 : cy;
+    if (!close) {
+      s("line", { class: "link draw", x1: xa, x2: xb, y1: cy, y2: cy, style: `stroke-dasharray:${len};stroke-dashoffset:${len};--d:${i * 220 + 250}ms` }, g);
+    }
+    s("circle", { class: "mark c-s1 ring pop", cx: xa, cy: ya, r: 7, style: `--d:${i * 220}ms` }, g);
+    const moving = s("g", { class: "slide-x", style: `transform:translateX(${xa - xb}px);--d:${i * 220 + 250}ms` }, g);
+    s("circle", { class: "mark c-s2 ring", cx: xb, cy: yb, r: 7 }, moving);
+    const vt = t(g, W - valW + 16, cy + 5, "", { class: "val fadein", style: `--d:${i * 220 + 900}ms` });
+    const a = s("tspan", {}, vt); a.textContent = r.aText;
+    const sep = s("tspan", { class: "rowsub", dx: "6" }, vt); sep.textContent = "vs";
+    const b = s("tspan", { dx: "6" }, vt); b.textContent = r.bText;
+    const ha = s("circle", { class: "hit", cx: xa, cy: ya, r: 13 }, g);
+    bindTip(ha, r.aTip || r.aText, `${r.label} · ${o.series[0]}`, "s1");
+    const hb = s("circle", { class: "hit", cx: xb, cy: yb, r: 13 }, g);
+    bindTip(hb, r.bTip || r.bText, `${r.label} · ${o.series[1]}`, "s2");
+  });
+}
+
+/* ---------- Forest plot with an equivalence band ---------- */
+function forest(fig, o) {
+  const plot = frame(fig, o);
+  const W = o.width, labelW = 150, top = 30, rowH = 70, H = top + rowH * o.rows.length + 48;
+  const x0 = labelW + 10, x1 = W - 24;
+  const x = v => x0 + (v - o.domain[0]) / (o.domain[1] - o.domain[0]) * (x1 - x0);
+  const bottom = top + rowH * o.rows.length;
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "group", "aria-label": o.summary }, plot);
+  s("rect", { x: x(-o.margin), y: top - 14, width: x(o.margin) - x(-o.margin), height: bottom - top + 14, fill: "var(--bg-2)", rx: 6 }, svg);
+  t(svg, x(0), top - 20, `pre-stated equivalence margin ±${o.margin} points`, { class: "note", "text-anchor": "middle" });
+  for (const tk of o.ticks) {
+    s("line", { class: "grid", x1: x(tk), x2: x(tk), y1: top - 14, y2: bottom }, svg);
+    t(svg, x(tk), bottom + 17, (tk > 0 ? "+" : "") + tk, { class: "tick", "text-anchor": "middle" });
+  }
+  s("line", { class: "axis", x1: x(0), x2: x(0), y1: top - 14, y2: bottom }, svg);
+  t(svg, (x0 + x1) / 2, bottom + 38, o.axisTitle, { class: "axis-title", "text-anchor": "middle" });
+  o.rows.forEach((r, i) => {
+    const cy = top + i * rowH + rowH / 2 - 6;
+    const g = s("g", { class: "row" }, svg);
+    t(g, 0, cy - 2, r.label, { class: "rowlabel" + (r.emph ? " strong" : "") });
+    t(g, 0, cy + 16, r.sub, { class: "rowsub" });
+    const k = r.emph ? "k-s1" : "k-de", c = r.emph ? "c-s1" : "c-de";
+    const left = s("g", { class: "grow from-right", style: `--d:${i * 260 + 200}ms` }, g);
+    s("line", { class: k, x1: x(r.lo), x2: x(r.est), y1: cy, y2: cy, "stroke-width": 2.5 }, left);
+    s("line", { class: k, x1: x(r.lo), x2: x(r.lo), y1: cy - 8, y2: cy + 8, "stroke-width": 2 }, left);
+    const right = s("g", { class: "grow", style: `--d:${i * 260 + 200}ms` }, g);
+    s("line", { class: k, x1: x(r.est), x2: x(r.hi), y1: cy, y2: cy, "stroke-width": 2.5 }, right);
+    s("line", { class: k, x1: x(r.hi), x2: x(r.hi), y1: cy - 8, y2: cy + 8, "stroke-width": 2 }, right);
+    s("circle", { class: `mark ${c} ring pop`, cx: x(r.est), cy, r: 7, style: `--d:${i * 260}ms` }, g);
+    const txt = `${r.est > 0 ? "+" : ""}${r.est.toFixed(1)} pts, 95% CI [${r.lo.toFixed(1)}, +${r.hi.toFixed(1)}]`;
+    if (r.emph) t(g, x(r.hi) + 8, cy - 12, `+${r.hi.toFixed(1)} > +${o.margin}`, { class: "val fadein", style: "--d:1200ms" });
+    const hit = s("rect", { class: "hit", x: 0, y: cy - rowH / 2 + 6, width: W, height: rowH - 12 }, g);
+    bindTip(hit, txt, `${r.label} · M-on − M-off, transfer family`, r.emph ? "s1" : "deemph");
+  });
+}
+
+/* ======================================================================
+   Build the charts
+   ====================================================================== */
+function buildCharts() {
+  hbar(document.getElementById("fig-success"), {
+    title: "Cells solved per treatment, main matrix",
+    sub: "90 cells per arm (I, E, T × 30) · deepseek-v4-flash",
+    width: 596, labelW: 132, valueW: 104, rowH: 37, barH: 18,
+    domain: [0, 1], ticks: [0, .25, .5, .75, 1], tickFormat: v => `${Math.round(v * 100)}%`,
+    summary: "Success rate per treatment: between 83 and 88 of 90 cells in every arm.",
+    rows: ARMS.map(a => ({
+      label: a.id, sub: a.note || undefined, value: a.succ / 90, text: `${a.succ}/90 · ${(a.succ / 90 * 100).toFixed(1)}%`,
+      cls: a.id === "r1-s1-m1" ? "c-s1" : "c-de", key: a.id === "r1-s1-m1" ? "s1" : "deemph",
+      strong: a.id === "r1-s1-m1", showValue: a.id === "r1-s1-m1" || a.succ === 83 || a.succ === 88, lightValue: a.id !== "r1-s1-m1",
+      tipLabel: `${a.id} · mean score ${a.mean.toFixed(3)}`,
+    })),
+    table: { cols: ["Treatment", "Solved", "Rate", "Mean score"], rows: ARMS.map(a => [a.id, `${a.succ}/90`, `${(a.succ / 90 * 100).toFixed(1)}%`, a.mean.toFixed(3)]) },
+  });
+
+  hbar(document.getElementById("fig-cost"), {
+    title: "Provider cost per treatment, main matrix",
+    sub: "¥ per 90 counted cells · same tasks in every arm",
+    width: 540, labelW: 132, valueW: 72, rowH: 37, barH: 18,
+    domain: [0, 35], ticks: [0, 10, 20, 30], tickFormat: v => `¥${v}`,
+    summary: "Cost per treatment ranges from ¥16.87 for the full harness to ¥32.27 with everything off.",
+    rows: ARMS.map(a => ({
+      label: a.id, sub: a.note || undefined, value: a.cost, text: yen(a.cost),
+      cls: a.id === "r1-s1-m1" ? "c-s1" : "c-de", key: a.id === "r1-s1-m1" ? "s1" : "deemph",
+      strong: a.id === "r1-s1-m1", showValue: a.id === "r1-s1-m1" || a.id === "r0-s0-m0", lightValue: a.id !== "r1-s1-m1",
+      tipLabel: `${a.id} · ${a.req.toFixed(1)} requests per cell`,
+    })),
+    table: { cols: ["Treatment", "Cost (¥/90 cells)", "Requests per cell"], rows: ARMS.map(a => [a.id, a.cost.toFixed(2), a.req.toFixed(1)]) },
+  });
+
+  hbar(document.getElementById("fig-roff"), {
+    title: "Turning R off raises provider requests",
+    sub: "Mean requests per cell, R off vs R on, by family",
+    width: 440, labelW: 128, valueW: 52, rowH: 34, barH: 16,
+    domain: [0, 50], ticks: [0, 25, 50], tickFormat: v => `+${v}%`,
+    summary: "Request increase with R off: information +41%, engineering +34%, transfer +13%.",
+    rows: R_OFF.map(r => ({ label: r.fam, value: r.pct, text: `+${Math.round(r.pct)}%`, cls: "c-s2", key: "s2", showValue: true, tipLabel: `${r.fam} · R off vs R on` })),
+    table: { cols: ["Family", "Extra requests with R off"], rows: R_OFF.map(r => [r.fam, `+${r.pct.toFixed(1)}%`]) },
+  });
+
+  forest(document.getElementById("fig-forest"), {
+    title: "Transfer family: M-on minus M-off mean score",
+    sub: "Bootstrap 95% intervals, 120 cells per arm",
+    width: 596, domain: [-3, 3], ticks: [-3, -2, -1, 0, 1, 2, 3], margin: 2,
+    axisTitle: "Mean-score difference (points)",
+    summary: "After the audit the difference is +0.6 points with a 95% interval from -0.7 to +2.2, just past the ±2 equivalence margin; before the audit it was +0.2, from -1.0 to +1.5.",
+    legend: [{ label: "After audit", color: "s1", shape: "dot" }, { label: "Before audit", color: "deemph", shape: "dot" }],
+    rows: FOREST,
+    table: { cols: ["Accounting", "Difference", "95% CI", "Within ±2?"], rows: FOREST.map(r => [r.label, `${r.est > 0 ? "+" : ""}${r.est.toFixed(1)}`, `[${r.lo.toFixed(1)}, +${r.hi.toFixed(1)}]`, r.hi < 2 && r.lo > -2 ? "yes" : "no"]) },
+  });
+
+  dumbbell(document.getElementById("fig-pilot"), {
+    title: "Transfer family: memory on vs off",
+    sub: "Mean score; the pilot used one template, the main run ten",
+    width: 596, labelW: 178, valW: 124, domain: [0, 1], ticks: [0, .2, .4, .6, .8, 1],
+    axisTitle: "Mean score", valHead: "M-on vs M-off",
+    series: ["M-on", "M-off"],
+    legend: [{ label: "M-on", color: "s1", shape: "dot" }, { label: "M-off", color: "s2", shape: "dot" }],
+    summary: "Pilot: M-on 0.983 vs M-off 0.788. Main matrix: 0.993 vs 0.987.",
+    rows: PILOT,
+    table: { cols: ["Run", "M-on", "M-off"], rows: PILOT.map(r => [r.label, r.aTip, r.bTip]) },
+  });
+
+  dumbbell(document.getElementById("fig-pays"), {
+    title: "Enabled vs ablated harness",
+    sub: "Mean score · the gap opens only for non-derivable state or a stronger model",
+    width: 596, labelW: 178, valW: 124, domain: [0, 1], ticks: [0, .2, .4, .6, .8, 1],
+    axisTitle: "Mean score", valHead: "enabled vs ablated",
+    series: ["Enabled", "Ablated"],
+    legend: [{ label: "Enabled (full / M-on)", color: "s1", shape: "dot" }, { label: "Ablated (all off / M-off)", color: "s2", shape: "dot" }],
+    summary: "Transfer with the cheap model: 0.988 vs 0.990. Transfer with the strong model: 0.975 vs 0.710. Hidden-policy probe: 0.936 vs 0.455.",
+    rows: PAYS,
+    table: { cols: ["Setting", "Enabled", "Ablated"], rows: PAYS.map(r => [`${r.label} (${r.sub})`, r.aText, r.bText]) },
+  });
+
+  hbar(document.getElementById("fig-budget"), {
+    title: "Cells that ran out of the original request quota",
+    sub: "Share of cells per arm before the quota was raised",
+    width: 470, labelW: 96, valueW: 66, rowH: 23, barH: 12,
+    domain: [0, 0.4], ticks: [0, .1, .2, .3, .4], tickFormat: v => `${Math.round(v * 100)}%`,
+    legend: [{ label: "Enabled arm", color: "s1" }, { label: "Ablated arm", color: "s2" }],
+    summary: "Under the original quotas no enabled arm ran out of budget; ablated arms did in 20 to 30 percent of cells.",
+    rows: BUDGET.map(b => b.group ? { group: b.group } : ({
+      label: b.label, value: b.n / b.of, text: `${b.n} of ${b.of}`, cls: b.enabled ? "c-s1" : "c-s2", key: b.enabled ? "s1" : "s2",
+      showValue: true, tipLabel: `${b.label} · cells out of budget`,
+    })),
+    table: { cols: ["Arm", "Out of budget"], rows: BUDGET.filter(b => !b.group).map(b => [b.label, `${b.n} of ${b.of}`]) },
+  });
+}
+
+/* ---------- Cube (design), pipeline (method), timeline ---------- */
+function buildCube() {
+  const svg = document.getElementById("cube");
+  const O = { x: 130, y: 330 }, R = 230, S = { x: 112, y: -84 }, M = -196;
+  const P = v => ({ x: O.x + v.r * R + v.s * S.x, y: O.y + v.s * S.y + v.m * M });
+  const id = v => `r${v.r}-s${v.s}-m${v.m}`;
+  const verts = [];
+  for (const r of [0, 1]) for (const s_ of [0, 1]) for (const m of [0, 1]) verts.push({ r, s: s_, m });
+  const hidden = v => v.r === 0 && v.s === 1 && v.m === 0;   // the back-bottom-left corner
+  let k = 0;
+  for (const a of verts) for (const b of verts) {
+    const d = (a.r !== b.r) + (a.s !== b.s) + (a.m !== b.m);
+    if (d !== 1 || id(a) > id(b)) continue;
+    const p = P(a), q = P(b), len = Math.hypot(q.x - p.x, q.y - p.y);
+    if (hidden(a) || hidden(b)) {
+      s("line", { class: "edge back fadein", x1: p.x, y1: p.y, x2: q.x, y2: q.y, style: `--d:${300 + k * 50}ms` }, svg);
+    } else {
+      s("line", { class: "edge draw", x1: p.x, y1: p.y, x2: q.x, y2: q.y, style: `stroke-dasharray:${len};stroke-dashoffset:${len};--d:${k * 50}ms` }, svg);
+    }
+    k += 1;
+  }
+  // Factor labels sit on the three edges that leave the all-off corner.
+  const axis = (x, y, name, desc, anchor) => {
+    t(svg, x, y, name, { class: "axis-name fadein", "text-anchor": anchor, style: "--d:900ms" });
+    t(svg, x, y + 17, desc, { class: "axis-desc fadein", "text-anchor": anchor, style: "--d:900ms" });
+  };
+  axis(O.x + R / 2, O.y + 28, "R", "persistent execution", "middle");
+  axis(O.x - 14, O.y + M / 2 - 4, "M", "durable state", "end");
+  axis(O.x + R + S.x / 2 + 16, O.y + S.y / 2 + 18, "S", "delegation", "start");
+  const place = {
+    "r0-s0-m0": [-14, 24, "end"], "r1-s0-m0": [14, 24, "start"],
+    "r0-s0-m1": [-14, 24, "end"], "r1-s0-m1": [14, 24, "start"],
+    "r0-s1-m1": [-14, -12, "end"], "r1-s1-m1": [14, -12, "start"],
+    "r0-s1-m0": [14, -12, "start"], "r1-s1-m0": [14, 24, "start"],
+  };
+  verts.forEach((v, i) => {
+    const p = P(v), name = id(v), full = name === "r1-s1-m1", off = name === "r0-s0-m0";
+    s("circle", { class: "v pop" + (full ? " full" : off ? " off" : ""), cx: p.x, cy: p.y, r: full || off ? 10 : 7, style: `--d:${500 + i * 70}ms` }, svg);
+    const [dx, dy, anchor] = place[name];
+    t(svg, p.x + dx, p.y + dy, name, { class: "fadein" + (full || off ? " lab-strong" : ""), "text-anchor": anchor, style: `--d:${700 + i * 70}ms` });
+    if (full) t(svg, p.x + dx, p.y + dy - 18, "shipped product", { class: "axis-desc fadein", "text-anchor": anchor, style: "--d:1300ms" });
+    if (off) t(svg, p.x + dx, p.y + dy + 17, "everything off", { class: "axis-desc fadein", "text-anchor": anchor, style: "--d:1300ms" });
+  });
+}
+
+function buildPipeline() {
+  const svg = document.getElementById("pipeline");
+  const bw = 236, bh = 96;
+  const boxes = [
+    { x: 0, y: 8, t: "Task fixture", a: "materialized per instance", b: "families · probes · benchmarks" },
+    { x: 300, y: 8, t: "Agent under treatment", a: "prime-agent, one R/S/M ID", b: "isolated HOME and agent dir", hl: true },
+    { x: 600, y: 8, t: "Budget proxy", a: "per-cell request quota", b: "cost gate · ≤ 2 re-sends" },
+    { x: 900, y: 8, t: "Provider API", a: "deepseek-v4-flash", b: "deepseek-v4-pro (replication)" },
+    { x: 300, y: 136, t: "Verifier", a: "family-owned, hidden tests", b: "score in [0, 1]" },
+    { x: 600, y: 136, t: "JSONL record", a: "usage · latency · per-cell errors", b: "resumable, append-only" },
+    { x: 900, y: 136, t: "Analysis", a: "Fisher exact · bootstrap CI", b: "equivalence (TOST) · selector" },
+  ];
+  const wires = [
+    { x1: 236, y1: 56, x2: 296, y2: 56, delay: 0 },
+    { x1: 536, y1: 46, x2: 596, y2: 46, delay: .5 },
+    { x1: 600, y1: 70, x2: 540, y2: 70, delay: 1.6 },
+    { x1: 836, y1: 46, x2: 896, y2: 46, delay: .9 },
+    { x1: 900, y1: 70, x2: 840, y2: 70, delay: 1.3 },
+    { x1: 418, y1: 104, x2: 418, y2: 132, delay: 1.9 },
+    { x1: 536, y1: 184, x2: 596, y2: 184, delay: 2.2 },
+    { x1: 836, y1: 184, x2: 896, y2: 184, delay: 2.5 },
+  ];
+  for (const w of wires) {
+    s("line", { class: "wire", x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2 }, svg);
+    const ang = Math.atan2(w.y2 - w.y1, w.x2 - w.x1), hx = w.x2, hy = w.y2, L = 7;
+    const pts = [[hx, hy], [hx - L * Math.cos(ang) + 4 * Math.sin(ang), hy - L * Math.sin(ang) - 4 * Math.cos(ang)], [hx - L * Math.cos(ang) - 4 * Math.sin(ang), hy - L * Math.sin(ang) + 4 * Math.cos(ang)]];
+    s("polygon", { class: "head", points: pts.map(p => p.join(",")).join(" ") }, svg);
+    s("circle", { class: "pulse", cx: w.x1, cy: w.y1, r: 4, style: `--dx:${w.x2 - w.x1}px;--dy:${w.y2 - w.y1}px;--delay:${w.delay}s` }, svg);
+  }
+  for (const b of boxes) {
+    s("rect", { class: "box" + (b.hl ? " hl" : ""), x: b.x, y: b.y, width: bw, height: bh, rx: 14 }, svg);
+    t(svg, b.x + 18, b.y + 32, b.t, { class: "bt" });
+    t(svg, b.x + 18, b.y + 56, b.a, { class: "bs" });
+    t(svg, b.x + 18, b.y + 76, b.b, { class: "bs" });
+  }
+  t(svg, 560, 112, "requests", { class: "bs", "text-anchor": "middle", "font-size": "11" });
+  t(svg, 868, 112, "tokens · cost", { class: "bs", "text-anchor": "middle", "font-size": "11" });
+  t(svg, 428, 123, "answer", { class: "bs", "font-size": "11" });
+}
+
+function buildTimeline() {
+  const svg = document.getElementById("timeline");
+  const x0 = 70, x1 = 1066, y = 118, n = TIMELINE.length;
+  const sp = s("g", { class: "grow", style: "--d:0ms" }, svg);
+  s("line", { class: "spine", x1: x0 - 40, x2: x1 + 40, y1: y, y2: y }, sp);
+  TIMELINE.forEach((m, i) => {
+    const x = x0 + i * (x1 - x0) / (n - 1), up = i % 2 === 0, d = 300 + i * 170;
+    s("line", { class: "stem fadein", x1: x, x2: x, y1: up ? y - 14 : y + 14, y2: up ? y - 40 : y + 40, style: `--d:${d}ms` }, svg);
+    s("circle", { class: "ms pop" + (i === n - 1 ? " last" : ""), cx: x, cy: y, r: 8, style: `--d:${d}ms` }, svg);
+    const g = s("g", { class: "fadein", style: `--d:${d + 120}ms` }, svg);
+    const ty = up ? y - 92 : y + 62;
+    t(g, x, ty, m.date, { class: "tl-date", "text-anchor": "middle" });
+    m.what.forEach((line, k) => t(g, x, ty + 20 + k * 18, line, { class: "tl-what", "text-anchor": "middle" }));
+  });
+}
+
+/* ======================================================================
+   Deck controller: slides, fragments, motion, keyboard, theme
+   ====================================================================== */
+const slides = [...document.querySelectorAll(".slide")];
+const stage = document.getElementById("stage");
+const params = new URLSearchParams(location.search);
+const STATIC = params.has("static");
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+if (STATIC) document.documentElement.classList.add("static");
+let cur = 0, step = 0;
+
+function fit() {
+  const sc = Math.min(innerWidth / 1280, innerHeight / 720);
+  stage.style.transform = `scale(${sc})`;
+}
+const maxStep = sl => Math.max(0, ...[...sl.querySelectorAll("[data-step]")].map(n => +n.dataset.step));
+const hiddenFragment = (node, sl) => { const f = node.closest("[data-step]"); return f && sl.contains(f) && !f.classList.contains("shown"); };
+
+function play(sl) {
+  sl.querySelectorAll(".anim").forEach(a => { if (!hiddenFragment(a, sl)) a.classList.add("play"); });
+  sl.querySelectorAll(".count").forEach(c => { if (!hiddenFragment(c, sl)) countUp(c); });
+}
+function reset(sl) {
+  sl.querySelectorAll(".anim.play").forEach(a => a.classList.remove("play"));
+}
+function countUp(el) {
+  const to = +el.dataset.to, dec = +(el.dataset.dec || 0), pre = el.dataset.pre || "";
+  const fmt = v => pre + v.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  if (STATIC || reduceMotion) { el.textContent = fmt(to); return; }
+  const t0 = performance.now(), dur = 1100;
+  const tick = now => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = fmt(to * e);
+    if (k < 1 && slides[cur].contains(el)) requestAnimationFrame(tick); else el.textContent = fmt(to);
+  };
+  requestAnimationFrame(tick);
+}
+
+function render() {
+  slides.forEach((sl, i) => {
+    sl.classList.toggle("active", i === cur);
+    sl.classList.toggle("past", i < cur);
+    sl.inert = i !== cur;
+    sl.setAttribute("aria-label", `${i + 1} of ${slides.length}`);
+  });
+  const sl = slides[cur];
+  sl.querySelectorAll("[data-step]").forEach(n => n.classList.toggle("shown", STATIC || +n.dataset.step <= step));
+  document.getElementById("count").textContent = `${cur + 1} / ${slides.length}`;
+  document.getElementById("section-name").textContent = sl.dataset.section || "";
+  document.getElementById("progress").style.width = `${(cur / (slides.length - 1)) * 100}%`;
+  const hash = `#/${cur + 1}`;
+  if (location.hash !== hash) { try { history.replaceState(null, "", hash); } catch { location.hash = hash; } }
+}
+function go(i, s0) {
+  i = Math.max(0, Math.min(slides.length - 1, i));
+  const prev = slides[cur];
+  hideTip();
+  if (i !== cur) reset(prev);
+  cur = i;
+  step = s0 ?? 0;
+  render();
+  requestAnimationFrame(() => requestAnimationFrame(() => play(slides[cur])));
+  switchboard(cur === 0);
+}
+function next() {
+  if (!STATIC && step < maxStep(slides[cur])) { step += 1; render(); requestAnimationFrame(() => play(slides[cur])); }
+  else if (cur < slides.length - 1) go(cur + 1, 0);
+}
+function prev() {
+  if (!STATIC && step > 0) { step -= 1; render(); }
+  else if (cur > 0) go(cur - 1, maxStep(slides[cur - 1]));
+}
+
+/* Title switchboard: cycles through the eight arms using the main-matrix values */
+const CYCLE = ["r1-s1-m1", "r0-s1-m1", "r1-s0-m1", "r1-s1-m0", "r0-s0-m1", "r0-s1-m0", "r1-s0-m0", "r0-s0-m0"];
+let sbTimer = null, sbIndex = 0;
+function setArm(idv) {
+  const arm = ARMS.find(a => a.id === idv);
+  const bits = { r: idv[1] === "1", s: idv[4] === "1", m: idv[7] === "1" };
+  document.querySelectorAll("#switchboard .sw").forEach(sw => sw.classList.toggle("on", bits[sw.dataset.f]));
+  document.getElementById("sb-id").textContent = idv;
+  document.getElementById("sb-note").textContent = idv === "r1-s1-m1" ? "shipped default" : idv === "r0-s0-m0" ? "everything off" : `${[!bits.r && "R", !bits.s && "S", !bits.m && "M"].filter(Boolean).join(" + ")} off`;
+  document.getElementById("m-acc").style.width = `${arm.succ / 90 * 100}%`;
+  document.getElementById("m-acc-v").textContent = `${arm.succ} / 90`;
+  document.getElementById("m-cost").style.width = `${arm.cost / 35 * 100}%`;
+  document.getElementById("m-cost-v").textContent = yen(arm.cost);
+}
+function switchboard(on) {
+  clearInterval(sbTimer);
+  sbTimer = null;
+  if (!on || STATIC || reduceMotion) { sbIndex = 0; setArm(CYCLE[0]); return; }
+  sbTimer = setInterval(() => { sbIndex = (sbIndex + 1) % CYCLE.length; setArm(CYCLE[sbIndex]); }, 1700);
+}
+
+/* Theme: follows the OS until the viewer picks one */
+function setTheme(mode) { document.documentElement.dataset.theme = mode; }
+const themeParam = params.get("theme");
+setTheme(themeParam === "dark" || themeParam === "light" ? themeParam : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+function toggleTheme() { setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"); }
+
+/* Input */
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const onButton = e.target instanceof HTMLButtonElement;
+  switch (e.key) {
+    case "ArrowRight": case "ArrowDown": case "PageDown": next(); e.preventDefault(); break;
+    case " ": case "Enter": if (onButton) return; next(); e.preventDefault(); break;
+    case "ArrowLeft": case "ArrowUp": case "PageUp": case "Backspace": prev(); e.preventDefault(); break;
+    case "Home": go(0); e.preventDefault(); break;
+    case "End": go(slides.length - 1, maxStep(slides[slides.length - 1])); e.preventDefault(); break;
+    case "d": case "D": toggleTheme(); break;
+    case "t": case "T": {
+      const figs = [...slides[cur].querySelectorAll("figure.chart")];
+      const on = !figs.every(f => f.classList.contains("show-table"));
+      figs.forEach(f => toggleTable(f, on));
+      break;
+    }
+    case "f": case "F":
+      if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.();
+      break;
+    case "?": { const hp = document.getElementById("help"); hp.hidden = !hp.hidden; break; }
+    case "Escape": document.getElementById("help").hidden = true; hideTip(); break;
+  }
+});
+document.getElementById("btn-next").addEventListener("click", next);
+document.getElementById("btn-prev").addEventListener("click", prev);
+document.getElementById("btn-theme").addEventListener("click", toggleTheme);
+document.getElementById("btn-help").addEventListener("click", () => { const hp = document.getElementById("help"); hp.hidden = !hp.hidden; });
+let touchX = null;
+addEventListener("touchstart", e => { touchX = e.touches[0].clientX; }, { passive: true });
+addEventListener("touchend", e => {
+  if (touchX == null) return;
+  const dx = e.changedTouches[0].clientX - touchX;
+  if (Math.abs(dx) > 50) (dx < 0 ? next : prev)();
+  touchX = null;
+});
+addEventListener("resize", fit);
+addEventListener("hashchange", () => {
+  const n = parseInt((location.hash.match(/\d+/) || [1])[0], 10) - 1;
+  if (n !== cur) go(n);
+});
+addEventListener("beforeprint", () => {
+  slides.forEach(sl => { sl.querySelectorAll("[data-step]").forEach(n => n.classList.add("shown")); sl.querySelectorAll(".anim").forEach(a => a.classList.add("play")); });
+  document.querySelectorAll(".count").forEach(c => { c.textContent = (c.dataset.pre || "") + (+c.dataset.to).toLocaleString("en-US"); });
+});
+
+/* Boot */
+buildCharts();
+buildCube();
+buildPipeline();
+buildTimeline();
+fit();
+const start = parseInt((location.hash.match(/\d+/) || [1])[0], 10) - 1;
+cur = Math.max(0, Math.min(slides.length - 1, start));
+go(cur, STATIC ? maxStep(slides[cur]) : 0);
+if (STATIC) slides.forEach(sl => { sl.querySelectorAll(".anim").forEach(a => a.classList.add("play")); });
+</script>
+</body>
+</html>
