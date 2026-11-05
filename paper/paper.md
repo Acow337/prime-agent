@@ -4,8 +4,8 @@
 > **DRAFT — complete results, pending submission.** The numbers come from the
 > 720-cell main matrix, a 60-cell repeat, three external benchmarks
 > (LongBench-v2, SWE-bench Verified, LongMemEval), and a boundary-sensitivity
-> check. Strong-model replication is pending. This draft is an artifact of an
-> ongoing study, not a submission.
+> check, plus a strong-model replication on the transfer family and
+> LongMemEval. This draft is an artifact of an ongoing study, not a submission.
 
 **Anonymous authors — under review.**
 
@@ -446,8 +446,9 @@ general accuracy benefit.
 * **Synthetic tasks.** All three families are self-built and deterministic.
   They are mechanism tests, not an ecosystem sample; external validity needs
   public benchmarks.
-* **One model.** All numbers come from `deepseek-v4-flash`. Strong-model
-  replication and a second model are pending.
+* **Two models, four checkpoints.** The main matrix and the external benchmarks
+  use `deepseek-v4-flash`; `deepseek-v4-pro` replicates only the transfer family
+  and LongMemEval. A second provider and an independent checkpoint are pending.
 * **One implementation.** The testbed is a single production harness; we do not
   claim implementation independence.
 * **Infrastructure noise.** The main run needed 448 transport retries and the
@@ -464,10 +465,10 @@ general accuracy benefit.
   per arm and timeouts counted as failures; the strong-model replication covers
   only ten transfer instances. Their sizes, not their directions, are the weak
   point.
-* **Pending work.** Strong-model replication is pending; run-to-run variance is
-  bounded by the 60-cell repeat (55/60 identical, five partial-credit changes),
-  but that repeat covers only the full-versus-off contrast. The selector here is
-  in-sample and the external benchmarks are small subsets.
+* **Open work.** Run-to-run variance is bounded by the 60-cell repeat (55/60
+  identical, five partial-credit changes), but that repeat covers only the
+  full-versus-off contrast. The selector here is in-sample, the external
+  benchmarks are small subsets, and a second model/provider has not been run.
 
 ---
 
