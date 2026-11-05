@@ -378,8 +378,22 @@ all-off arm also costs four times more (¥10.04 versus ¥2.50 for ten tasks). Th
 failure pattern is not confined to the negative templates: without memory the
 strong model also misses positive-transfer rules (0.05, 0.30, and 0.70 on three
 of them), which suggests it does not reconstruct the withheld conventions as
-readily as the cheap model does. Whether a capability pays therefore depends on
-the task *and* the model, not only on the task.
+readily as the cheap model does.
+
+The same model does not gain accuracy on LongMemEval, where the memory protocol
+leaves more room for guessing:
+
+| benchmark | model | M-on | M-off |
+| --- | --- | ---: | ---: |
+| T transfer | `deepseek-v4-flash` | 0.993 | 0.991 |
+| T transfer | `deepseek-v4-pro` | 0.975 | 0.710 |
+| LongMemEval | `deepseek-v4-flash` | 0.55 | 0.60 |
+| LongMemEval | `deepseek-v4-pro` | 0.333 | 0.444 |
+
+The strong model's LongMemEval cells cost ¥3.06 with memory versus ¥15.15
+without it (18/20 completed; two transport losses), so even where accuracy does
+not move, persistence cuts the bill by five. Whether a capability pays therefore
+depends on the task *and* the model, not only on the task.
 
 ## 6. Budget-Aware Selection
 

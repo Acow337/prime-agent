@@ -1,0 +1,45 @@
+{
+  "config": {
+    "families": {
+      "lme": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    "hard_budget_cny": 300.0,
+    "models": {
+      "cheap": "deepseek-v4-pro"
+    }
+  },
+  "counts": {
+    "completed": 18,
+    "failed": 2,
+    "total": 20
+  },
+  "mode": "live",
+  "treatments": {
+    "r1-s1-m0": {
+      "mean_score": 0.4444,
+      "runs": 9,
+      "success_rate": 0.4444
+    },
+    "r1-s1-m1": {
+      "mean_score": 0.3333,
+      "runs": 9,
+      "success_rate": 0.3333
+    }
+  },
+  "usage": {
+    "actual_cost_cny": 19.74098,
+    "completion_tokens": 307318,
+    "prompt_tokens": 15221545
+  }
+}
