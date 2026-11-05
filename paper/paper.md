@@ -46,7 +46,11 @@ harness each resolve 10 of 12 repositories (same unresolved pair); and on
 LongMemEval the M-off arm is not worse (12/20 versus 11/20). At n=20 the external
 minimum detectable effect is about 30 points, so they rule out only large
 effects. The result reframes the harness contract for this task distribution:
-capabilities buy cheaper repeated work, not better single answers.
+capabilities buy cheaper repeated work, not better single answers. A
+hidden-policy probe pins down the exception: when the mapping is stated once,
+cannot be inferred from the inputs, and must survive across episodes, M-on
+scores 0.936 against M-off's 0.414 (95% CI [0.352, 0.720]). The accuracy
+benefit is real, but conditional on non-derivable state.
 
 ---
 
@@ -332,6 +336,32 @@ confirmatory of, equivalence. We read the pattern as a property of the tasks as
 much as of the harness: none of them make re-derived state expensive enough for
 persistence to pay off in correctness.
 
+### 5.7 When memory does pay: a hidden-policy probe
+
+Every family above lets an agent recover the rule from its inputs, which is why
+the external benchmarks cannot separate M. To test the opposite condition we
+built a probe in which twelve opaque codes map to routing queues through an
+arbitrary table that is stated once, is never written to a file a later episode
+can read, and cannot be inferred from the codes. Episode 1 states the mapping
+and asks for durable memory; the remaining episodes score ticket batches.
+Instances cover 3, 6, and 12 episodes.
+
+| episodes | M-on | M-off |
+| --- | --- | --- |
+| 3 | 1.00, 1.00 | 0.50, 0.00 (timeout) |
+| 6 | 1.00, 0.80 | 0.67 (timeout), 0.50 |
+| 12 | 0.91, 0.91 | 0.55, 0.27 |
+
+M-on averages 0.936 and M-off 0.414 (bootstrap 95% CI for the difference
+[0.352, 0.720]); M-off also spends more (¥1.17-3.82 per cell versus ¥0.18-1.04)
+because it searches without finding the table. Timeouts count as failures
+because the budget is part of the task.
+
+This is the condition under which durable state converts into correctness: the
+state is not derivable from the inputs *and* must survive across episodes. The
+external results are not contradicted; they sit on the other side of that
+boundary.
+
 ## 6. Budget-Aware Selection
 
 The selector takes a budget and chooses one treatment per family. With the main
@@ -397,6 +427,9 @@ general accuracy benefit.
   effect near 30 points at n=20, and SWE-bench's twelve paired instances span
   roughly ±27 points. "No detected effect" is therefore a bounded statement, not
   a proof of equivalence on those benchmarks.
+* **Probe caveats.** The hidden-policy result is a custom probe with six cells
+  per arm and timeouts counted as failures; its size, not its direction, is the
+  weak point.
 * **Pending work.** Strong-model replication is pending; run-to-run variance is
   bounded by the 60-cell repeat (55/60 identical, five partial-credit changes),
   but that repeat covers only the full-versus-off contrast. The selector here is
@@ -419,9 +452,11 @@ which is exactly the kind of fragility that single-episode evaluations cannot
 see. Three external benchmarks (LongBench-v2, SWE-bench Verified, and
 LongMemEval) point the same way: no detected accuracy difference between the
 full harness and the all-off configuration, including on a benchmark built to
-test durable memory, though their samples are too small to confirm equivalence. The harness's measured value is cheaper repeated work; whether
-any task distribution converts that into correctness, and whether the cost
-effects survive a second model, are the open questions.
+test durable memory, though their samples are too small to confirm equivalence. On tasks whose state can be re-derived, the harness's measured value is cheaper
+repeated work; when the same state cannot be derived and must survive episodes,
+the capability converts into a large accuracy difference (0.936 versus 0.414 in
+the hidden-policy probe). Whether the cost effects survive a second model is the
+open question.
 
 ---
 

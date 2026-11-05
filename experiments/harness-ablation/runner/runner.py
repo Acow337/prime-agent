@@ -40,6 +40,7 @@ FAMILIES = {
     "tb": "families.t_boundary_family",
     "hp": "families.hp_family",
     "ol": "families.ol_family",
+    "hl": "families.hl_family",
 }
 TREATMENTS = (
     "r1-s1-m1",
@@ -317,29 +318,35 @@ def run_matrix(
                 agent_dirs: list[Path] = []
                 status = "completed"
                 for index, episode in enumerate(episodes):
-                    agent_dir = task_root / (
-                        "agent" if shared_agent else f"agent-ep{index}"
-                    )
+                    # M-off multi-episode runs get one throwaway root for the
+                    # working copy, HOME, agent dir, and session dir, so neither
+                    # a relative path nor an environment variable reveals a
+                    # sibling episode or the original task tree.
+                    iso_root: Path | None = None
+                    multi_episode_off = (not shared_agent) and len(episodes) > 1
+                    if multi_episode_off:
+                        iso_root = Path(tempfile.mkdtemp(prefix="pa-iso-"))
+                        workdir = iso_root / "work"
+                        shutil.copytree(episode.workdir, workdir)
+                        episode_root = iso_root / "home"
+                        agent_dir = iso_root / "agent"
+                        session_dir = iso_root / "sessions"
+                    elif shared_agent:
+                        episode_root = task_root
+                        workdir = episode.workdir
+                        agent_dir = task_root / "agent"
+                        session_dir = task_root / f"sessions-ep{index}"
+                    else:
+                        episode_root = task_root / f"ep{index}"
+                        workdir = episode.workdir
+                        agent_dir = task_root / f"agent-ep{index}"
+                        session_dir = task_root / f"sessions-ep{index}"
                     agent_dir.mkdir(parents=True, exist_ok=True)
                     agent_dirs.append(agent_dir)
-                    # M-off must have no durable channel at all, so even HOME,
-                    # TMPDIR and the session dir are fresh per episode; M-on
-                    # shares the episode root with the series.
-                    episode_root = task_root if shared_agent else task_root / f"ep{index}"
-                    # Only multi-episode M-off runs need a private copy of the
-                    # inputs: a single-episode task has no sibling to leak, and
-                    # its verifier may inspect the original working directory.
-                    if shared_agent or len(episodes) == 1:
-                        workdir = episode.workdir
-                    else:
-                        workdir = task_root / "work" / f"ep{index}"
-                        if workdir.exists():
-                            shutil.rmtree(workdir)
-                        shutil.copytree(episode.workdir, workdir)
                     env = run_smoke.isolated_env(episode_root, api_key)
                     env["PRIME_AGENT_CODING_AGENT_DIR"] = str(agent_dir)
                     env["PRIME_AGENT_HARNESS_TREATMENT"] = run["treatment"]
-                    env["PRIME_AGENT_SESSION_DIR"] = str(task_root / f"sessions-ep{index}")
+                    env["PRIME_AGENT_SESSION_DIR"] = str(session_dir)
                     write_models_config(
                         agent_dir,
                         config,
@@ -372,9 +379,14 @@ def run_matrix(
                             }
                         )
                         status = "timeout"
+                        if iso_root is not None:
+                            shutil.rmtree(iso_root, ignore_errors=True)
                         break
                     text = run_smoke._assistant_text(completed.stdout)
                     verification = _verify_episode(module, case, index, text)
+                    if iso_root is not None:
+                        shutil.rmtree(iso_root, ignore_errors=True)
+                        iso_root = None
                     episode_row: dict[str, Any] = {
                         "name": episode.name,
                         "status": "completed"
