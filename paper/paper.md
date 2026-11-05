@@ -304,6 +304,7 @@ outside the self-built suite.
 | LongBench-v2 | 20 long-context multiple-choice questions, contexts 57k-170k chars, four arms | 0.700 | 0.650 |
 | SWE-bench Verified | 12 repositories, agent patch scored by the official harness | 10/12 resolved | 10/12 resolved |
 | LongMemEval | 10 memory questions, read/read/QA episodes | 11/20 (M-on) | 12/20 (M-off) |
+| OOLONG | 11 context-length bands, 1k-4M tokens, R-on vs R-off | 11/11 correct | 11/11 correct |
 
 SWE-bench's resolved sets are identical: both arms fix astropy, matplotlib,
 seaborn, flask, requests, xarray, pylint, scikit-learn, sphinx, and sympy, and
@@ -312,6 +313,14 @@ episodes ask the agent to record durable facts, the QA episode withholds the
 transcripts, and the normalized-containment score is 0.55 for M-on versus 0.60
 for M-off (40/40 cells completed). LongBench differences (0.65-0.80 across four arms) are within noise
 at n=20.
+
+OOLONG covers the length axis directly: one task per band from 1k to 4M tokens,
+with R on and off. Every completed cell is correct in both arms, including the
+4M-token context, which a coding agent solves by scripting over the file rather
+than reading it. Cost varies without a stable direction (R-off is cheaper at
+131k, 262k, 524k, and 2M; R-on is cheaper at 8k, 16k, and 32k; at 1M both pay
+several yuan). Length alone therefore does not make persistent state necessary;
+what matters is whether the task forces state to survive *across* turns.
 
 The consistent picture is that on these distributions we detect no accuracy
 effect; the largest cost differences still come from the synthetic matrix (R-off

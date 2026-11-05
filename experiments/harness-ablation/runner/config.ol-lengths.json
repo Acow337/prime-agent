@@ -1,0 +1,36 @@
+{
+  "provider": "deepseek",
+  "models": {
+    "cheap": "deepseek-v4-flash"
+  },
+  "reasoning": "off",
+  "input_usd_per_million": 0.15,
+  "output_usd_per_million": 0.6,
+  "context_tokens": 1000000,
+  "response_tokens": 1024,
+  "usd_to_cny": 8.0,
+  "hard_budget_cny": 400.0,
+  "max_total_requests": 800,
+  "max_requests_per_run": 100,
+  "max_transport_retries": 2,
+  "task_timeout_seconds": 1800,
+  "families": {
+    "ol": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ]
+  },
+  "treatments": [
+    "r1-s1-m1",
+    "r0-s1-m1"
+  ]
+}

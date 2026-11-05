@@ -38,6 +38,8 @@ FAMILIES = {
     "lb": "families.lb_family",
     "lme": "families.lme_family",
     "tb": "families.t_boundary_family",
+    "hp": "families.hp_family",
+    "ol": "families.ol_family",
 }
 TREATMENTS = (
     "r1-s1-m1",
