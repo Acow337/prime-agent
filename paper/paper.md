@@ -2,8 +2,8 @@
 ## What Persistent Execution, Recursive Delegation, and Durable State Cost — and When They Pay Off
 
 > **DRAFT — complete results, pending submission.** The numbers come from the
-> 720-cell main matrix, a 60-cell repeat, three external benchmarks
-> (LongBench-v2, SWE-bench Verified, LongMemEval), and a boundary-sensitivity
+> 720-cell main matrix, a 60-cell repeat, four external benchmarks
+> (LongBench-v2, SWE-bench Verified, LongMemEval, OOLONG), and a boundary-sensitivity
 > check, plus a strong-model replication on the transfer family and
 > LongMemEval. This draft is an artifact of an ongoing study, not a submission.
 
@@ -29,29 +29,35 @@ families: multi-table information management (I), small multi-module bug fixing
 
 We evaluate all eight configurations on 30 instances per family (720 cells, one
 cheap API model). On this suite we detect **no accuracy effect** from any capability:
-every treatment solves 84-88 of 90 cells, and the transfer comparison is 115/120
-for M-on versus 117/120 for M-off (Fisher exact *p* = 0.72; bootstrap 95% CI for
-the mean-score difference [-0.010, 0.015], so effects above 1.5 points are
-ruled out). What the harness changes is **cost**:
+every treatment solves 83-88 of 90 cells, and the transfer comparison is 115/120
+for M-on versus 116/120 for M-off (Fisher exact *p* = 1.0; bootstrap 95% CI for
+the mean-score difference [-0.007, 0.022], so an M advantage above 2.2 points is
+ruled out, though the pre-stated 2-point equivalence margin is narrowly missed).
+What the harness changes is **cost**:
 the fully enabled configuration is the cheapest arm (¥16.87 for its 90 cells),
-turning R off raises provider requests by 14-41% depending on the family, and
+turning R off raises provider requests by 13-41% depending on the family, and
 turning M off roughly doubles the transfer family's spend because every episode
 must re-derive the rule. A 120-cell pilot on a single transfer template had
 suggested a large M accuracy effect (19/20 vs 8/20); that effect did not survive
 ten templates, and we report a mechanism check that isolates whether it returns
-when the rule cannot be guessed. Three external checks are consistent with the
+when the rule cannot be guessed. Four external checks are consistent with the
 same picture, though coarser: on LongBench-v2 the arms range 0.65-0.80 with no
 significant ordering; on SWE-bench Verified the full harness and the all-off
-harness each resolve 10 of 12 repositories (same unresolved pair); and on
-LongMemEval the M-off arm is not worse (12/20 versus 11/20). At n=20 the external
+harness each resolve 10 of 12 repositories (same unresolved pair); on
+LongMemEval the M-off arm is not worse (12/20 versus 11/20); and on OOLONG both
+R arms answer all eleven context-length bands from 1k to 4M tokens. At n=20 the external
 minimum detectable effect is about 30 points, so they rule out only large
-effects. The result reframes the harness contract for this task distribution:
+effects. The LongBench-v2 and LongMemEval figures were measured after their
+request quotas were raised mid-run; under the original quotas the ablated arms
+score 0.55 against the full harness's 0.70 on LongBench-v2 and 9/20 against
+M-on's 11/20 on LongMemEval. The result reframes the harness contract for this task distribution:
 capabilities buy cheaper repeated work, not better single answers. A
 hidden-policy probe pins down the exception: when the mapping is stated once,
 cannot be inferred from the inputs, and must survive across episodes, M-on
-scores 0.936 against M-off's 0.414 (95% CI [0.352, 0.720]). The accuracy
+scores 0.936 against M-off's 0.455 (95% CI [0.373, 0.610]). The accuracy
 benefit is real, but conditional on non-derivable state and on the model: with
-`deepseek-v4-pro` the transfer gap reopens (0.975 versus 0.710).
+`deepseek-v4-pro` a transfer gap between the full and the all-off harness
+reappears (0.975 versus 0.710).
 
 ---
 
@@ -86,9 +92,9 @@ We make three contributions:
    protocol hashes.
 3. **A factorial reading of 720 cells.** Across three families the R/S/M
    factors show no detected accuracy effect on this suite; the durable-state comparison is
-   115/120 versus 117/120. Capability costs are large and opposite in sign to the
+   115/120 versus 116/120. Capability costs are large and opposite in sign to the
    pilot's apparent benefit: the fully enabled harness is the cheapest accurate
-   arm, R-off raises requests by 14-41%, and M-off roughly doubles transfer
+   arm, R-off raises requests by 13-41%, and M-off roughly doubles transfer
    spend. A single-template pilot's large M effect does not replicate, which
    motivates a non-guessable-rule mechanism check.
 
@@ -183,7 +189,7 @@ same per-cell request quota.
 | --- | --- | --- |
 | **I** — information management | three joined tables (orders, customers, refunds), a date window, a gold-tier join, weekday aggregation, a refund-customer total, an exclusive-or contradiction count, and an earliest-date field; six checked fields; refunds are authoritative over order status | R |
 | **E** — engineering | an orders package (`parser`, `pricing`, `report`) with six independent defects (comment lines, half-up rounding, zero-net customers, duplicate ids, negative amounts, report ordering); hidden tests are verifier-owned and the score is the hidden-test pass ratio | S |
-| **T** — transfer | a three-episode series: episode 1 states a classification rule and asks for a durable harness note (unscored); episode 2 withholds the rule and scores transfer; episode 3 is scored. Ten templates span triage, SLA, risk, capacity, fraud, quality, routing, retention, escalation, and compliance; five keep the rule (positive transfer) and five change one threshold (negative transfer) | M |
+| **T** — transfer | a three-episode series: episode 1 states a classification rule and asks for a durable harness note (unscored); episode 2 withholds the rule and scores transfer; episode 3 is scored. Ten templates span triage, SLA, risk, capacity, fraud, quality, routing, retention, escalation, and compliance; six keep the rule (positive transfer) and four change one threshold (negative transfer) | M |
 
 ### 4.2 Design and metrics
 
@@ -195,22 +201,39 @@ task success (verifier-defined), fractional score, provider requests, prompt and
 completion tokens, wall-clock latency, and actual cost. Failures are classified
 as *agent* failures (wrong answer, budget exhausted) versus *infrastructure*
 failures (transport errors, timeouts), and infrastructure cells are retried
-rather than counted.
+rather than counted: a cell's outcome is its first attempt that completed or
+exhausted its request quota. Until the runner classified budget exhaustion
+separately, it recorded it as an infrastructure error and retried it; in the
+main matrix this affected one cell (`r1-s1-m0`, transfer), and the tables count
+its exhausted first attempt.
 
 ### 4.3 Budget and failure policy
 
-Each cell has a request quota; the run has a settled-cost gate that stops when
+Each cell has a request quota (40 requests, and 360 s per episode, in the main
+matrix); the run has a settled-cost gate that stops when
 *actual cost + the next request's worst-case bound* would cross the hard cap.
 A connection failure that produced no answer is re-sent at most twice, each
 re-send charged to the conservative bound; HTTP answers are never retried. An
-interrupted run resumes from its JSONL records without repeating completed
-cells.
+interrupted run resumes from its JSONL records without repeating counted
+cells. Three later runs raised their quota after cells had exhausted it —
+LongBench-v2 from 8 to 30 requests, LongMemEval from 90 to 160 (and its episode
+timeout from 600 to 1200 s), and the boundary check from 40 to 80 — and re-ran
+only the cells that had exhausted the original quota. Their reported numbers use
+the raised quota; §5.4 and §5.6 also give each run under its original quota,
+where those cells count as failures.
 
 ### 4.4 Frozen protocol
 
 Before the main run, the configuration, runner, family modules, and one digest
 per materialized instance are hashed into `frozen-main.json`; a rerun is
-comparable only when those hashes match.
+comparable only when those hashes match. The runner changed once during the
+main run: after 603 of the 720 counted cells were recorded, M-off episodes in a
+series stopped sharing HOME and TMPDIR, so the remaining cells ran under a
+runner whose hash differs from the frozen one. M-off cells recorded after the
+change are at ceiling too (transfer M-off scores 1.000 over 18 cells, against
+0.984 over 102 before it), so the shared HOME and TMPDIR are not what kept M-off
+at ceiling; sibling episode directories, however, stayed reachable through
+relative paths in every main-matrix cell (§8).
 
 ---
 
@@ -219,16 +242,17 @@ comparable only when those hashes match.
 ### 5.1 The main matrix
 
 The main run crosses 30 instances per family with all eight treatments and
-completes after retrying transport failures: 720 cells, 448 infrastructure
-retries, and ¥213.93 of provider spend total (the tables below count completed
-cells only, ¥205.07). The suite is not saturated for the model — E and T still
+completes after retrying transport failures: 720 counted cells, 448 further
+attempts that are not counted (445 transport errors, two timeouts, and the
+discarded retry of the one budget-exhausted cell), and ¥213.93 of provider spend
+total (the tables below count only the counted cells, ¥205.47). The suite is not saturated for the model — E and T still
 fail a few cells — but individual cells differ in weight: the I family uses about
 four requests per cell, T about twenty.
 
 | treatment | success | mean score | requests/cell | cost (¥) |
 | --- | ---: | ---: | ---: | ---: |
 | `r1-s1-m1` (full) | 85/90 | 0.991 | 10.5 | 16.87 |
-| `r1-s1-m0` | 84/90 | 0.988 | 13.0 | 25.85 |
+| `r1-s1-m0` | 83/90 | 0.983 | 13.2 | 26.25 |
 | `r1-s0-m1` | 87/90 | 0.995 | 11.6 | 22.97 |
 | `r1-s0-m0` | 88/90 | 0.997 | 12.9 | 26.25 |
 | `r0-s1-m1` | 86/90 | 0.993 | 13.3 | 23.02 |
@@ -238,22 +262,23 @@ four requests per cell, T about twenty.
 
 ### 5.2 No detected accuracy effect, with stated resolution
 
-Across all eight treatments the success spread is 84-88 of 90 cells and the mean
-score spread is 0.988-0.997. The I family is at ceiling in every arm (29/30); E
+Across all eight treatments the success spread is 83-88 of 90 cells and the mean
+score spread is 0.983-0.997. The I family is at ceiling in every arm (29/30); E
 ranges 26-30; T is saturated as well. For the transfer family, where the pilot
 had shown a large gap:
 
 | Arm | Success | Mean score |
 | --- | ---: | ---: |
 | M-on | 115/120 | 0.9929 |
-| M-off | 117/120 | 0.9908 |
+| M-off | 116/120 | 0.9867 |
 
-Fisher exact *p* = 0.72; bootstrap 95% CI for the mean-score difference
-[-0.010, 0.015]. A two one-sided test against a 2-point equivalence margin
-rejects a difference of that size, and the minimum detectable effect is 1.3
-points: this comparison rules out effects larger than about 1.5 points, which is
-a real bound rather than just a non-significant test. Smaller effects are not
-excluded, and the pilot's effect is not replicated. A 60-cell repeat of the
+Fisher exact *p* = 1.0; bootstrap 95% CI for the mean-score difference
+[-0.007, 0.022]. The interval's upper end sits just above the pre-stated
+2-point equivalence margin, so a two one-sided test at that margin narrowly
+fails (the minimum detectable effect is 1.6 points). The comparison still rules
+out an M advantage above 2.2 points and an M disadvantage above 0.7 points,
+which is a real bound rather than just a non-significant test. Smaller effects
+are not excluded, and the pilot's effect is not replicated. A 60-cell repeat of the
 full-versus-off contrast (ten instances per family) reproduced 55 of 60 scores
 exactly; the five changes were partial-credit shifts, not success flips, and the
 means are 0.9897 ± 0.039 (full) versus 0.9917 ± 0.046 (off).
@@ -262,8 +287,8 @@ means are 0.9897 ± 0.039 (full) versus 0.9917 ± 0.046 (off).
 
 The fully enabled harness is the cheapest accurate arm at ¥16.87 per 90 cells
 and 10.5 requests per cell. Disabling R raises requests by 41% (I), 34% (E), and
-14% (T); the most expensive arm (`r0-s0-m0`) costs roughly twice the full one.
-The transfer family shows the same pattern for M: with R on, M-off costs ¥16.79
+13% (T); the most expensive arm (`r0-s0-m0`) costs roughly twice the full one.
+The transfer family shows the same pattern for M: with R on, M-off costs ¥17.19
 versus ¥9.11 for M-on; with R off, ¥22.93 versus ¥10.26. The mechanism is
 mundane and measurable: without durable state every episode re-derives the
 convention, so the model spends more turns to reach the same answer.
@@ -278,18 +303,22 @@ is plausibly guessable even without memory.
 A 40-cell mechanism check replaced the round thresholds with arbitrary
 per-instance values (e.g. 716 bp / 744 ms), repeated them in no episode after the
 first, and gave M-off episodes a fresh HOME, TMPDIR, and session directory so a
-note could not be smuggled through files. Accuracy is again at ceiling in all
+note could not be smuggled through them (sibling episode directories stayed
+reachable through relative paths; §8). Accuracy is again at ceiling in all
 eight arms (40/40), but the cost split holds: M-on arms use 14-20 requests and
 ¥0.95-2.31 per five tasks, M-off arms 22-27 requests and ¥2.04-4.05. The
 remaining confound is the row distribution: most rows sit far from the
 thresholds, so an approximate rule still labels them correctly. A 20-cell
 boundary variant put every row within two basis points of a threshold; M-off
-still scored at ceiling (20/20 cells at 1.0). The reason is that the row
+still scored at ceiling (20/20 cells at 1.0) once its request quota was raised
+from 40 to 80 (§4.3). Under the original quota three of the ten M-off cells ran
+out of budget (M-off 7/10, mean 0.80; M-on 10/10). The reason is that the row
 values themselves bracket the thresholds: an agent that can label the data
 can recover the boundary from the inputs, so the exact convention is
-identifiable without memory. Making memory necessary would require the rule
-to depend on information absent from the inputs, not merely on fine-grained
-thresholds.
+identifiable without memory — but recovering it can take more requests than a
+40-request budget allows. Making memory necessary for accuracy would require
+the rule to depend on information absent from the inputs, not merely on
+fine-grained thresholds.
 
 ### 5.5 Interactions
 
@@ -301,15 +330,15 @@ this suite; the matrix's value is the cost decomposition, where R and M compound
 
 ### 5.6 External benchmarks
 
-Three public benchmarks test whether the no-detected-effect result survives
+Four public benchmarks test whether the no-detected-effect result survives
 outside the self-built suite.
 
-| Benchmark | Setup | Full harness | All off |
-| --- | --- | ---: | ---: |
-| LongBench-v2 | 20 long-context multiple-choice questions, contexts 57k-170k chars, four arms | 0.700 | 0.650 |
-| SWE-bench Verified | 12 repositories, agent patch scored by the official harness | 10/12 resolved | 10/12 resolved |
-| LongMemEval | 10 memory questions, read/read/QA episodes | 11/20 (M-on) | 12/20 (M-off) |
-| OOLONG | 11 context-length bands, 1k-4M tokens, R-on vs R-off | 11/11 correct | 11/11 correct |
+| Benchmark | Setup | Contrast | Enabled | Ablated |
+| --- | --- | --- | ---: | ---: |
+| LongBench-v2 | 20 long-context multiple-choice questions, contexts 57k-170k chars, four arms | full vs all off | 0.700 | 0.650 |
+| SWE-bench Verified | 12 repositories, agent patch scored by the official harness | full vs all off | 10/12 resolved | 10/12 resolved |
+| LongMemEval | 10 memory questions, read/read/QA episodes, R on and off | M-on vs M-off | 11/20 | 12/20 |
+| OOLONG | 11 context-length bands, 1k-4M tokens | R-on vs R-off | 11/11 correct | 11/11 correct |
 
 SWE-bench's resolved sets are identical: both arms fix astropy, matplotlib,
 seaborn, flask, requests, xarray, pylint, scikit-learn, sphinx, and sympy, and
@@ -317,7 +346,13 @@ both miss django and pytest. LongMemEval is the proxy for M: the two reading
 episodes ask the agent to record durable facts, the QA episode withholds the
 transcripts, and the normalized-containment score is 0.55 for M-on versus 0.60
 for M-off (40/40 cells completed). LongBench differences (0.65-0.80 across four arms) are within noise
-at n=20.
+at n=20. Both runs raised their request quota mid-run (§4.3), and under the
+original quotas the ablated arms fall behind: on LongBench-v2 each arm without S
+scores 0.55 against the full harness's 0.70 (four or five cells per arm ran out
+of the 8-request quota; none in the full harness), and on LongMemEval M-off
+scores 9/20 against M-on's 11/20 (six M-off cells ran out of the 90-request
+quota; none with M on). These gaps are also within the n=20 resolution, but they
+point the same way: the ablated arms are the ones that run out of budget.
 
 OOLONG covers the length axis directly: one task per band from 1k to 4M tokens,
 with R on and off. Every completed cell is correct in both arms, including the
@@ -329,7 +364,7 @@ what matters is whether the task forces state to survive *across* turns.
 
 The consistent picture is that on these distributions we detect no accuracy
 effect; the largest cost differences still come from the synthetic matrix (R-off
-+14-41% requests, M-off about double the transfer spend). The external samples
++13-41% requests, M-off about double the transfer spend). The external samples
 are small, though, and the resolution is correspondingly coarse: at n=20 the
 minimum detectable effect is about 30 points on LongBench and LongMemEval, so
 those two rule out only large differences and are consistent with, not
@@ -349,14 +384,18 @@ Instances cover 3, 6, and 12 episodes.
 
 | episodes | M-on | M-off |
 | --- | --- | --- |
-| 3 | 1.00, 1.00 | 0.50, 0.00 (timeout) |
-| 6 | 1.00, 0.80 | 0.67 (timeout), 0.50 |
-| 12 | 0.91, 0.91 | 0.55, 0.27 |
+| 3 | 1.00, 1.00 | 0.50, — (timeout) |
+| 6 | 1.00, 0.80 | — (timeout), 0.50 |
+| 12 | 0.91, 0.91 | 0.55 (quota), 0.27 (quota) |
 
-M-on averages 0.936 and M-off 0.414 (bootstrap 95% CI for the difference
-[0.352, 0.720]); M-off also spends more (¥1.17-3.82 per cell versus ¥0.18-1.04)
-because it searches without finding the table. Timeouts count as failures
-because the budget is part of the task.
+M-on averages 0.936 over six cells and M-off 0.455 over four (bootstrap 95% CI
+for the difference [0.373, 0.610]); M-off also spends more (¥1.17-3.82 per cell
+versus ¥0.18-1.04) because it searches without finding the table. Both
+12-episode M-off cells ran out of their per-cell request quota partway through
+the series (during the seventh and the fourth scored episode); §4.2 classes
+budget exhaustion as an agent failure, so they count. The two timed-out M-off
+cells are infrastructure failures under §4.2 and the probe did not retry them,
+so they are excluded; counting them as failures instead gives M-off 0.414.
 
 This is the condition under which durable state converts into correctness: the
 state is not derivable from the inputs *and* must survive across episodes. The
@@ -366,33 +405,39 @@ boundary.
 ### 5.8 Model dependence
 
 The null on the cheap model does not transfer to a stronger one. Running the
-transfer family with `deepseek-v4-pro` (ten instances, the same templates):
+transfer family with `deepseek-v4-pro` (ten instances, the same templates) in
+the full and the all-off arm:
 
 | model | full harness | all off |
 | --- | ---: | ---: |
-| `deepseek-v4-flash` | 0.993 (120 cells) | 0.991 (120 cells) |
+| `deepseek-v4-flash` | 0.988 (30 cells) | 0.990 (30 cells) |
 | `deepseek-v4-pro` | 0.975 (10) | 0.710 (10) |
 
 For the strong model the gap is 0.265 (bootstrap 95% CI [0.080, 0.470]), and the
-all-off arm also costs four times more (¥10.04 versus ¥2.50 for ten tasks). The
-failure pattern is not confined to the negative templates: without memory the
-strong model also misses positive-transfer rules (0.05, 0.30, and 0.70 on three
-of them), which suggests it does not reconstruct the withheld conventions as
-readily as the cheap model does.
+all-off arm also costs about 4.5 times as much (¥11.24 versus ¥2.50 for ten
+tasks). The failure pattern is not confined to the negative templates: in the
+all-off arm the strong model also misses positive-transfer rules (0.05, 0.30,
+and 0.70 on three of them), which suggests it does not reconstruct the withheld
+conventions as readily as the cheap model does. Because the run contrasts the
+full harness with the all-off arm, it does not isolate M: only durable state can
+carry the stated rule across episodes, which makes it the likely source of the
+gap, but R and S may still change how well the agent re-derives the rule within
+an episode.
 
 The same model does not gain accuracy on LongMemEval, where the memory protocol
 leaves more room for guessing:
 
-| benchmark | model | M-on | M-off |
-| --- | --- | ---: | ---: |
-| T transfer | `deepseek-v4-flash` | 0.993 | 0.991 |
-| T transfer | `deepseek-v4-pro` | 0.975 | 0.710 |
-| LongMemEval | `deepseek-v4-flash` | 0.55 | 0.60 |
-| LongMemEval | `deepseek-v4-pro` | 0.333 | 0.444 |
+| benchmark | model | contrast | enabled | ablated |
+| --- | --- | --- | ---: | ---: |
+| T transfer | `deepseek-v4-flash` | full vs all off | 0.988 | 0.990 |
+| T transfer | `deepseek-v4-pro` | full vs all off | 0.975 | 0.710 |
+| LongMemEval | `deepseek-v4-flash` | M-on vs M-off | 0.55 | 0.60 |
+| LongMemEval | `deepseek-v4-pro` | M-on vs M-off | 0.333 | 0.444 |
 
 The strong model's LongMemEval cells cost ¥3.06 with memory versus ¥15.15
-without it (18/20 completed; two transport losses), so even where accuracy does
-not move, persistence cuts the bill by five. Whether a capability pays therefore
+without it (18/20 completed: one M-off cell lost to a transport error and one
+M-on cell that timed out are excluded), so even where accuracy does not move,
+persistence cuts the bill by five. Whether a capability pays therefore
 depends on the task *and* the model, not only on the task.
 
 ## 6. Budget-Aware Selection
@@ -420,9 +465,9 @@ conclusion as the component analysis.
 
 ## 7. Negative Transfer and Safety
 
-Five of the ten transfer templates change one threshold in episode 3, and the
+Four of the ten transfer templates change one threshold in episode 3, and the
 prompt states the change explicitly. The main matrix does not show a stale-rule
-penalty: negative-template cells score like positive ones (T mean 0.983-1.0
+penalty: negative-template cells score like positive ones (T mean 0.973-1.0
 across arms), which suggests the agents read the stated change rather than
 blindly reapplying a stored rule. A harness that can persist *wrong* state
 remains a real risk; our verifier reports per-item expected/actual labels so
@@ -451,20 +496,35 @@ general accuracy benefit.
   and LongMemEval. A second provider and an independent checkpoint are pending.
 * **One implementation.** The testbed is a single production harness; we do not
   claim implementation independence.
-* **Infrastructure noise.** The main run needed 448 transport retries and the
-  effective spend (¥213.93) is above the completed-cell spend (¥205.07).
+* **Infrastructure noise.** The main run needed 447 infrastructure retries and
+  the effective spend (¥213.93) is above the counted-cell spend (¥205.47).
   Failure classification and per-cell retries mitigate but do not eliminate
   this, and the wall-clock cost was dominated by stalls rather than model
   compute.
-* **Resolution of the null.** The transfer comparison rules out effects larger
-  than about 1.5 points, but the external benchmarks have a minimum detectable
-  effect near 30 points at n=20, and SWE-bench's twelve paired instances span
-  roughly ±27 points. "No detected effect" is therefore a bounded statement, not
-  a proof of equivalence on those benchmarks.
-* **Probe caveats.** The hidden-policy result is a custom probe with six cells
-  per arm and timeouts counted as failures; the strong-model replication covers
-  only ten transfer instances. Their sizes, not their directions, are the weak
-  point.
+* **Mid-run quota changes.** LongBench-v2, LongMemEval, and the boundary check
+  raised their request quotas mid-run and re-ran only the cells that had
+  exhausted the original quota (§4.3). A cell that finished within the original
+  quota keeps its first draw while an exhausted one gets a second, so the
+  raised-quota numbers may favor the arms that exhausted it, all of them
+  ablated arms; under the original quotas those arms score lower in all three
+  runs.
+* **Episode isolation.** In the main matrix and the mechanism check, M-off
+  episodes could reach sibling episode directories through relative paths, and
+  603 of the 720 main cells were recorded while a series also shared HOME and
+  TMPDIR (§4.4). The records do not show whether an agent read across episodes,
+  so a leak cannot be ruled out for those runs; the boundary check, LongMemEval,
+  the hidden-policy probe, and the strong-model runs used full isolation.
+* **Resolution of the null.** The transfer comparison rules out an M advantage
+  larger than 2.2 points but narrowly misses the pre-stated 2-point equivalence
+  margin, the external benchmarks have a minimum detectable effect near 30 points
+  at n=20, and SWE-bench's twelve paired instances span roughly ±27 points. "No
+  detected effect" is therefore a bounded statement, not a proof of equivalence.
+* **Probe caveats.** The hidden-policy result is a custom probe with six M-on
+  and four M-off cells (the two timed-out M-off cells were not retried) and
+  exhausted request quotas counted as failures; the strong-model replication
+  covers only ten transfer instances and contrasts the full harness with the
+  all-off arm, so it does not isolate M. Their sizes, not their directions, are
+  the weak point.
 * **Open work.** Run-to-run variance is bounded by the 60-cell repeat (55/60
   identical, five partial-credit changes), but that repeat covers only the
   full-versus-off contrast. The selector here is in-sample, the external
@@ -480,17 +540,20 @@ a result that aggregate benchmarks hide: on a 720-cell suite we detect no
 accuracy effect from the capabilities while their costs differ by a factor of
 two. The fully
 enabled harness is the cheapest accurate arm; turning R off raises requests by
-14-41%, and turning M off roughly doubles transfer spend because every episode
+13-41%, and turning M off roughly doubles transfer spend because every episode
 must re-derive the convention. A single-template pilot had suggested a large
 accuracy benefit for durable state; it did not replicate across ten templates,
 which is exactly the kind of fragility that single-episode evaluations cannot
-see. Three external benchmarks (LongBench-v2, SWE-bench Verified, and
-LongMemEval) point the same way: no detected accuracy difference between the
-full harness and the all-off configuration, including on a benchmark built to
-test durable memory, though their samples are too small to confirm equivalence. On tasks whose state can be re-derived, the harness's measured value is cheaper
+see. Four external benchmarks (LongBench-v2, SWE-bench Verified, LongMemEval,
+and OOLONG) point the same way: no detected accuracy difference between the
+full harness and its ablated arms, including on a benchmark built to test
+durable memory and on contexts up to 4M tokens, though their samples are too
+small to confirm equivalence, and under their original request quotas the
+ablated arms trail on LongBench-v2 and LongMemEval. On tasks whose state can be re-derived, the harness's measured value is cheaper
 repeated work; when the same state cannot be derived and must survive episodes,
-the capability converts into a large accuracy difference (0.936 versus 0.414 in
-the hidden-policy probe, and 0.975 versus 0.710 for a strong model on transfer).
+the capability converts into a large accuracy difference (0.936 versus 0.455 in
+the hidden-policy probe, and 0.975 versus 0.710 for a strong model on transfer,
+full harness versus all off).
 The boundary is therefore drawn by both the task and the model, not by the
 harness alone.
 
@@ -521,13 +584,12 @@ files.
 
 ## Appendix D — Main matrix and pilot tables
 
-Main matrix (720 cells, completed cells only; transfer effect computed on the
-T family):
+Main matrix (720 counted cells; transfer effect computed on the T family):
 
 | treatment | success | mean score | requests/cell | cost (¥) |
 | --- | ---: | ---: | ---: | ---: |
 | `r1-s1-m1` | 85/90 | 0.991 | 10.5 | 16.87 |
-| `r1-s1-m0` | 84/90 | 0.988 | 13.0 | 25.85 |
+| `r1-s1-m0` | 83/90 | 0.983 | 13.2 | 26.25 |
 | `r1-s0-m1` | 87/90 | 0.995 | 11.6 | 22.97 |
 | `r1-s0-m0` | 88/90 | 0.997 | 12.9 | 26.25 |
 | `r0-s1-m1` | 86/90 | 0.993 | 13.3 | 23.02 |
@@ -539,7 +601,7 @@ T family):
 
 The pilot (120 cells) used the single triage template; the main run uses ten.
 Generated by
-`python3 experiments/harness-ablation/runner/analyze.py --results .../pilot-120`.
+`python3 experiments/harness-ablation/runner/analyze.py --config .../config.pilot.json --results .../pilot-120`.
 
 | family | treatment | n | success | mean score | requests | prompt tok | cost CNY |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -581,13 +643,14 @@ the interval half-width. A two one-sided test is applied against the margin.
 
 | comparison | n (a/b) | mean a | mean b | diff | 95% CI | MDE | margin | equivalent |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |
-| T: M-on vs M-off | 120/120 | 0.993 | 0.991 | +0.002 | [-0.009, +0.015] | 0.013 | 0.02 | yes |
+| T: M-on vs M-off | 120/120 | 0.993 | 0.987 | +0.006 | [-0.007, +0.022] | 0.016 | 0.02 | no |
 | LongBench: full vs all-off | 20/20 | 0.700 | 0.650 | +0.050 | [-0.250, +0.350] | 0.300 | 0.10 | no |
 | LongMemEval: M-on vs M-off | 20/20 | 0.550 | 0.600 | -0.050 | [-0.350, +0.250] | 0.300 | 0.10 | no |
 | SWE-bench: full vs all-off | 12/12 | 10/12 | 10/12 | 0 | (exact) | 0.27 | — | not tested |
 
-The transfer comparison is the only one with enough cells to support an
-equivalence claim; the external benchmarks are directional checks.
+The transfer comparison is the only one with enough cells to approach an
+equivalence claim, and it narrowly misses the 2-point margin; the external
+benchmarks are directional checks.
 
 ---
 
