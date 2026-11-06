@@ -516,9 +516,9 @@ _ENDPOINTS = {
 
 
 class FreezeTests(unittest.TestCase):
-    def _freeze(self, **prices):
+    def _freeze(self, listing=_ENDPOINTS, **prices):
         """Freeze an OpenRouter pilot config pinned to deepinfra/fp8 with `prices`,
-        against the listing above; return the URL fetched and the frozen file."""
+        against `listing`; return the URL fetched and the frozen file."""
         config = json.loads((HERE / "config.pilot.json").read_text(encoding="utf-8"))
         config.update(
             provider="openrouter",
@@ -530,7 +530,7 @@ class FreezeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             freeze.urllib.request,
             "urlopen",
-            return_value=io.BytesIO(json.dumps(_ENDPOINTS).encode()),
+            return_value=io.BytesIO(json.dumps(listing).encode()),
         ) as urlopen, redirect_stdout(io.StringIO()):
             config_path = Path(directory) / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -569,8 +569,28 @@ class FreezeTests(unittest.TestCase):
         )
 
     def test_config_prices_below_the_pinned_endpoints_listing_are_refused(self):
-        with self.assertRaisesRegex(SystemExit, "below the listed"):
+        with self.assertRaisesRegex(SystemExit, "below the highest listed prompt price"):
             self._freeze(input_usd_per_million=0.05, output_usd_per_million=0.18)
+
+    def test_a_time_of_day_override_sets_the_price_floor(self):
+        # DeepSeek's own endpoint charges double in weekday peak hours.
+        listing = json.loads(json.dumps(_ENDPOINTS))
+        pricing = listing["data"]["endpoints"][0]["pricing"]
+        pricing["overrides"] = [
+            {
+                "utc_start": 100,
+                "utc_end": 400,
+                "utc_days": ["monday"],
+                "prompt": "0.00000018",
+                "completion": "0.00000036",
+            }
+        ]
+        with self.assertRaisesRegex(SystemExit, "below the highest listed prompt price"):
+            self._freeze(listing, input_usd_per_million=0.09, output_usd_per_million=0.18)
+        _url, frozen = self._freeze(
+            listing, input_usd_per_million=0.18, output_usd_per_million=0.36
+        )
+        self.assertEqual(frozen["prices"]["cheap"]["pricing"], pricing)
 
 
 if __name__ == "__main__":

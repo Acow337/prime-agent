@@ -100,15 +100,18 @@ def main(argv: list[str] | None = None) -> int:
             if len(matches) != 1:
                 raise SystemExit(f"{model_id}: OpenRouter lists no single endpoint tagged {tag!r}")
             endpoint = matches[0]
+            # A time-of-day override (DeepSeek's weekday peak, for one) can
+            # charge more than the base rate; the worst case is the highest.
+            rates = [endpoint["pricing"], *endpoint["pricing"].get("overrides", [])]
             for field, listed in (
                 ("input_usd_per_million", "prompt"),
                 ("output_usd_per_million", "completion"),
             ):
-                listed_per_million = Decimal(endpoint["pricing"][listed]) * 1_000_000
-                if Decimal(str(config[field])) < listed_per_million:
+                highest = max(Decimal(rate[listed]) for rate in rates if listed in rate) * 1_000_000
+                if Decimal(str(config[field])) < highest:
                     raise SystemExit(
-                        f"{model_id}: {field} {config[field]} is below the listed {listed} "
-                        f"price of {tag} ({listed_per_million.normalize()} USD per million)"
+                        f"{model_id}: {field} {config[field]} is below the highest listed "
+                        f"{listed} price of {tag} ({highest.normalize()} USD per million)"
                     )
             prices[key] = {
                 "model": model_id,

@@ -53,7 +53,10 @@ reasoning mode:
   `max_tokens` among their supported parameters; check this with a one-cell
   run before adding `"require_parameters": true` to the pin.
 - `input_usd_per_million` and `output_usd_per_million` must be at least the
-  pinned endpoint's listed rates. `freeze.py` snapshots that endpoint's listing
+  pinned endpoint's highest listed rates, time-of-day overrides included
+  (DeepSeek's own endpoint doubles them in weekday peak hours). Billed cost
+  therefore varies with the hour; compare costs across arms from token counts
+  at fixed rates. `freeze.py` snapshots that endpoint's listing
   (name with model version, quantization, context and output limits, pricing,
   supported parameters) into the frozen file as `prices` and refuses a config
   priced below it, since the budget gate prices the next request's worst case at
