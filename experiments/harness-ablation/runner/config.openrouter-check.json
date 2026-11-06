@@ -1,0 +1,28 @@
+{
+  "provider": "openrouter",
+  "models": {
+    "cheap": "deepseek/deepseek-v4.1-flash-1017"
+  },
+  "request_fields": {
+    "provider": {
+      "order": ["deepseek"],
+      "allow_fallbacks": false
+    },
+    "reasoning": {
+      "effort": "none"
+    }
+  },
+  "input_usd_per_million": 0.3,
+  "output_usd_per_million": 1.2,
+  "context_tokens": 1000000,
+  "response_tokens": 1024,
+  "usd_to_cny": 8.0,
+  "hard_budget_cny": 5.0,
+  "max_total_requests": 40,
+  "max_requests_per_run": 40,
+  "max_transport_retries": 2,
+  "task_timeout_seconds": 360,
+  "families": {
+    "i": [1]
+  }
+}

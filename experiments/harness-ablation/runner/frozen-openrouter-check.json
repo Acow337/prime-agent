@@ -1,0 +1,157 @@
+{
+  "commit": "e82ba32ebf6d386280593e93f25ba7a96f980a71",
+  "config_sha256": "3c3904c23d808c1a82fc215972653c5eb708805b7d3e1b4fa9b1becab5971439",
+  "families": {
+    "i": "f6911f7ab326e2b91f9ba3e7028332309ef3aace2fa90fc291dc8de4022d2a1e"
+  },
+  "frozen_at": "2026-11-06T15:35:06+00:00",
+  "instances": {
+    "i-01": "a332321d48f64c850f97c8b63728a65dc4118a72b8b8025a529918858c73702c"
+  },
+  "limits": {
+    "hard_budget_cny": 5.0,
+    "max_requests_per_run": 40,
+    "max_total_requests": 40,
+    "task_timeout_seconds": 360
+  },
+  "models": {
+    "cheap": "deepseek/deepseek-v4.1-flash-1017"
+  },
+  "prices": {
+    "cheap": {
+      "context_length": 1048576,
+      "endpoint": "DeepSeek | deepseek/deepseek-v4.1-flash-20261017",
+      "max_completion_tokens": 393216,
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "pricing": {
+        "completion": "0.0000006",
+        "discount": 0,
+        "input_cache_read": "0.000000003",
+        "overrides": [
+          {
+            "completion": "0.0000006",
+            "input_cache_read": "0.000000003",
+            "prompt": "0.00000015",
+            "utc_days": [
+              "saturday",
+              "sunday"
+            ]
+          },
+          {
+            "completion": "0.0000006",
+            "input_cache_read": "0.000000003",
+            "prompt": "0.00000015",
+            "utc_days": [
+              "monday",
+              "tuesday",
+              "wednesday",
+              "thursday",
+              "friday"
+            ],
+            "utc_end": 100,
+            "utc_start": 0
+          },
+          {
+            "completion": "0.0000012",
+            "input_cache_read": "0.000000006",
+            "prompt": "0.0000003",
+            "utc_days": [
+              "monday",
+              "tuesday",
+              "wednesday",
+              "thursday",
+              "friday"
+            ],
+            "utc_end": 400,
+            "utc_start": 100
+          },
+          {
+            "completion": "0.0000006",
+            "input_cache_read": "0.000000003",
+            "prompt": "0.00000015",
+            "utc_days": [
+              "monday",
+              "tuesday",
+              "wednesday",
+              "thursday",
+              "friday"
+            ],
+            "utc_end": 600,
+            "utc_start": 400
+          },
+          {
+            "completion": "0.0000012",
+            "input_cache_read": "0.000000006",
+            "prompt": "0.0000003",
+            "utc_days": [
+              "monday",
+              "tuesday",
+              "wednesday",
+              "thursday",
+              "friday"
+            ],
+            "utc_end": 1000,
+            "utc_start": 600
+          },
+          {
+            "completion": "0.0000006",
+            "input_cache_read": "0.000000003",
+            "prompt": "0.00000015",
+            "utc_days": [
+              "monday",
+              "tuesday",
+              "wednesday",
+              "thursday",
+              "friday"
+            ],
+            "utc_end": 0,
+            "utc_start": 1000
+          }
+        ],
+        "prompt": "0.00000015"
+      },
+      "provider_name": "DeepSeek",
+      "quantization": "unknown",
+      "supported_parameters": [
+        "reasoning",
+        "include_reasoning",
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "stop",
+        "frequency_penalty",
+        "presence_penalty",
+        "logprobs",
+        "top_logprobs",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning_effort"
+      ],
+      "tag": "deepseek"
+    }
+  },
+  "provider": "openrouter",
+  "request_fields": {
+    "provider": {
+      "allow_fallbacks": false,
+      "order": [
+        "deepseek"
+      ]
+    },
+    "reasoning": {
+      "effort": "none"
+    }
+  },
+  "runner_sha256": "dd920c354da53a4774848e437e1384d5c4406f95e89ad9260add96d68fa6a8ad",
+  "treatments": [
+    "r1-s1-m1",
+    "r1-s1-m0",
+    "r1-s0-m1",
+    "r1-s0-m0",
+    "r0-s1-m1",
+    "r0-s1-m0",
+    "r0-s0-m1",
+    "r0-s0-m0"
+  ]
+}

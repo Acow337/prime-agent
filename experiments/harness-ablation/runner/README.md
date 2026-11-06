@@ -49,6 +49,10 @@ reasoning mode:
   `GET https://openrouter.ai/api/v1/models`. Omitting `reasoning` would leave
   each model's own default in force (for example, the listing gives
   `deepseek/deepseek-v4-flash` a default effort of `high`).
+- OpenRouter applies the account's privacy settings before the pin. An endpoint
+  they exclude (DeepSeek's own, for an account that refuses providers that may
+  train on paid prompts) leaves nothing to route to, and with fallbacks off the
+  request fails with a 404 naming the filter, before any generation or charge.
 - The agent sends `max_completion_tokens`, while most endpoints list only
   `max_tokens` among their supported parameters; check this with a one-cell
   run before adding `"require_parameters": true` to the pin.
@@ -132,3 +136,23 @@ The full-product treatment was both the most accurate (15/15) and the cheapest
 `frozen-pilot.json` pins the protocol for the main run: config hash, runner and
 family-module hashes, one digest per materialized instance. Note the pilot ran
 with the earlier 240 s task timeout; the frozen config uses 360 s.
+
+## OpenRouter check (2026-11-07)
+
+`config.openrouter-check.json` pins `deepseek/deepseek-v4.1-flash-1017` to
+DeepSeek's own endpoint with reasoning off; `frozen-openrouter-check.json` holds
+its price snapshot. The account first had to allow paid endpoints that train on
+request data and drop ZDR enforcement for "All other models"; until then
+OpenRouter refused every request with a 404 naming the filter, at no cost.
+
+- A probe through the proxy (two requests capped at 16 output tokens) stopped at
+  exactly 16 with `max_completion_tokens`, the field the agent sends, reported
+  zero reasoning tokens, and was served by DeepSeek.
+- One live cell (`cheap__r1-s1-m1__i-01`, in `results/openrouter-check`)
+  completed in 5 requests (v1: 4) with 47k prompt and 795 completion tokens
+  (v1: 43k and 929) and scored 5 of 6 fields (v1: 6 of 6). DeepSeek served all
+  5 responses.
+- OpenRouter billed $0.0020 (¥0.016), about a quarter of the same tokens at list
+  price (¥0.060), consistent with roughly 38k of the 47k prompt tokens hitting
+  DeepSeek's prompt cache. Billed cost is therefore not comparable with v1's
+  token-priced cost.
