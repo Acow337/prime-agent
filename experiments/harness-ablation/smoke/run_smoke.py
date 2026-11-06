@@ -24,14 +24,32 @@ MODEL = "deepseek-v4-flash"
 SMOKE_DIR = Path(__file__).resolve().parent
 RESULT_STEM = "2026-10-23"
 _SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{20,}")
+# Each provider's live credential stays in this macOS Keychain service; only the
+# bounded proxy ever holds it (see budget_proxy.start_proxy).
+KEYCHAIN_SERVICES = {
+    "deepseek": "prime-agent-deepseek-smoke",
+    "openrouter": "prime-agent-openrouter",
+}
+# The agent authenticates to the proxy with this stand-in, under the variable
+# its provider reads the key from; the proxy swaps in the live credential.
+PROXY_CREDENTIAL_PLACEHOLDER = "proxy-managed"
+KEY_VARIABLES = {
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
 
 
 class SecretDetected(RuntimeError):
     """Raised before credential-shaped text can enter an experiment artifact."""
 
 
-def read_keychain_key() -> str:
-    """Read the live credential from Keychain without exposing captured output."""
+def read_keychain_key(provider: str) -> budget_proxy.ProviderCredential:
+    """Read ``provider``'s live credential from Keychain without exposing captured output.
+
+    The key comes back bound to ``provider``, so the proxy can send it only to
+    that provider's endpoint.
+    """
+    service = KEYCHAIN_SERVICES[provider]
     account = os.environ.get("USER")
     if not account:
         raise RuntimeError("Keychain credential unavailable")
@@ -42,14 +60,14 @@ def read_keychain_key() -> str:
             "-a",
             account,
             "-s",
-            "prime-agent-deepseek-smoke",
+            service,
             "-w",
         ],
         [
             "security",
             "find-generic-password",
             "-s",
-            "prime-agent-deepseek-smoke",
+            service,
             "-w",
         ],
     ]
@@ -63,7 +81,7 @@ def read_keychain_key() -> str:
         )
         credential = completed.stdout.strip()
         if completed.returncode == 0 and _SECRET_PATTERN.fullmatch(credential):
-            return credential
+            return budget_proxy.ProviderCredential(provider, credential)
     raise RuntimeError("Keychain credential unavailable")
 
 
@@ -82,8 +100,12 @@ def build_command(binary: Path, prompt: str) -> list[str]:
     ]
 
 
-def isolated_env(root: Path, api_key: str | None = None) -> dict[str, str]:
-    """Create an allow-listed process environment rooted below ``root``."""
+def isolated_env(root: Path, *, provider: str | None = None) -> dict[str, str]:
+    """Create an allow-listed process environment rooted below ``root``.
+
+    With ``provider`` set, its key variable holds the proxy placeholder: the
+    live credential never enters the agent's environment.
+    """
     root = root.resolve()
     home = root / "home"
     agent = root / "agent"
@@ -130,8 +152,8 @@ def isolated_env(root: Path, api_key: str | None = None) -> dict[str, str]:
             "no_proxy": "127.0.0.1,localhost",
         }
     )
-    if api_key is not None:
-        env["DEEPSEEK_API_KEY"] = api_key
+    if provider is not None:
+        env[KEY_VARIABLES[provider]] = PROXY_CREDENTIAL_PLACEHOLDER
     return env
 
 
@@ -217,7 +239,6 @@ def run_cases(
     manifest: Mapping[str, Any],
     *,
     mode: str,
-    api_key: str | None = None,
     base_url: str | None = None,
     ledger: budget_proxy.UsageLedger | None = None,
     timeout_seconds: float | None = None,
@@ -225,8 +246,8 @@ def run_cases(
     """Run cases sequentially and stop after any unsafe process outcome."""
     if mode not in {"faux", "live"}:
         raise ValueError(f"unsupported execution mode: {mode}")
-    if mode == "live" and (api_key is None or base_url is None):
-        raise ValueError("live mode requires an API key and proxy base URL")
+    if mode == "live" and base_url is None:
+        raise ValueError("live mode requires the proxy base URL")
     timeout = (
         float(timeout_seconds)
         if timeout_seconds is not None
@@ -262,12 +283,13 @@ def run_cases(
             return row
 
         task_root = runtime_root / case.task_id
-        env = isolated_env(task_root, api_key if mode == "live" else None)
         if mode == "live":
+            env = isolated_env(task_root, provider=PROVIDER)
             _write_live_config(
                 Path(env["PRIME_AGENT_CODING_AGENT_DIR"]), manifest, str(base_url)
             )
         else:
+            env = isolated_env(task_root)
             if case.kind == "json":
                 faux_script = {"responses": [{"text": case.reference_output}]}
             elif case.kind == "tests":
@@ -337,8 +359,6 @@ def run_cases(
         combined = completed.stdout + completed.stderr
         try:
             assert_secret_free(combined)
-            if api_key and api_key in combined:
-                raise SecretDetected("exact credential value refused")
         except SecretDetected:
             results.append(task_row("secret_rejected"))
             break
@@ -416,8 +436,7 @@ def run_experiment(*, mode: str, binary: Path, workspace: Path) -> dict[str, Any
             mode="faux",
         )
     elif mode == "live":
-        api_key = read_keychain_key()
-        proxy = budget_proxy.start_proxy(policy)
+        proxy = budget_proxy.start_proxy(policy, credential=read_keychain_key(PROVIDER))
         ledger = proxy.ledger
         try:
             results = run_cases(
@@ -426,13 +445,11 @@ def run_experiment(*, mode: str, binary: Path, workspace: Path) -> dict[str, Any
                 workspace / "runs",
                 manifest,
                 mode="live",
-                api_key=api_key,
                 base_url=proxy.base_url,
                 ledger=ledger,
             )
         finally:
             proxy.close()
-            api_key = ""
     else:
         raise ValueError(f"unsupported experiment mode: {mode}")
     revision = subprocess.run(

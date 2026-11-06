@@ -6,7 +6,8 @@ an interrupted run resumes without repeating counted cells (completed, or out of
 request budget); infrastructure failures are retried.
 
 Live runs go through the bounded loopback proxy from the smoke harness: one
-global cost gate, a per-run request quota, and transport-level retries. Nothing
+global cost gate, a per-run request quota, and transport-level retries. The
+proxy alone holds the live credential; agents only see a placeholder. Nothing
 outside the results directory and a temporary workspace is written.
 """
 
@@ -296,12 +297,13 @@ def run_matrix(
     records_path = results_dir / "records.jsonl"
     done = load_done(records_path, config["max_requests_per_run"])
     runs = planned_runs(config)
-    api_key = None
     proxy = None
     ledger = None
     if mode == "live":
-        api_key = run_smoke.read_keychain_key()
-        proxy = budget_proxy.start_proxy(budget_policy(config))
+        proxy = budget_proxy.start_proxy(
+            budget_policy(config),
+            credential=run_smoke.read_keychain_key(config["provider"]),
+        )
         ledger = proxy.ledger
     records: list[dict[str, Any]] = []
     try:
@@ -385,7 +387,7 @@ def run_matrix(
                         session_dir = task_root / f"sessions-ep{index}"
                     agent_dir.mkdir(parents=True, exist_ok=True)
                     agent_dirs.append(agent_dir)
-                    env = run_smoke.isolated_env(episode_root, api_key)
+                    env = run_smoke.isolated_env(episode_root, provider=config["provider"])
                     env["PRIME_AGENT_CODING_AGENT_DIR"] = str(agent_dir)
                     env["PRIME_AGENT_HARNESS_TREATMENT"] = run["treatment"]
                     env["PRIME_AGENT_SESSION_DIR"] = str(session_dir)

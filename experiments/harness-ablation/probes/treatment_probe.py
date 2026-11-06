@@ -7,7 +7,8 @@ it with a shared agent directory (M-on) versus a fresh one (M-off).
 S probe: exercised by the engine integration test (real kernel, counting host);
 the probe here only reports the prompt-level surface difference.
 
-Run with PRIME_AGENT_TREATMENT_PROBE=1 to actually spend API budget.
+Run with PRIME_AGENT_TREATMENT_PROBE=1 to actually spend API budget. Requests go
+through the bounded proxy, which alone holds the live credential.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "runner"))
 sys.path.insert(0, str(HERE.parent / "smoke"))
 
+import budget_proxy  # noqa: E402
 import runner as matrix  # noqa: E402
 import run_smoke  # noqa: E402
 
@@ -34,18 +36,21 @@ CONFIG = {
     "context_tokens": 1_000_000,
     "response_tokens": 1024,
     "usd_to_cny": 8.0,
+    "hard_budget_cny": 5.0,
+    "max_total_requests": 100,
+    "max_transport_retries": 2,
 }
 
 
 def run_once(
-    binary: Path, root: Path, prompt: str, treatment: str, api_key: str, timeout: int = 300
+    binary: Path, root: Path, prompt: str, treatment: str, base_url: str, timeout: int = 300
 ) -> str:
-    env = run_smoke.isolated_env(root, api_key)
+    env = run_smoke.isolated_env(root, provider=CONFIG["provider"])
     env["PRIME_AGENT_HARNESS_TREATMENT"] = treatment
     env["PYTHONSAFEPATH"] = "1"
     agent_dir = Path(env["PRIME_AGENT_CODING_AGENT_DIR"])
     agent_dir.mkdir(parents=True, exist_ok=True)
-    matrix.write_models_config(agent_dir, CONFIG, CONFIG["models"]["cheap"], "https://api.deepseek.com")
+    matrix.write_models_config(agent_dir, CONFIG, CONFIG["models"]["cheap"], base_url)
     completed = subprocess.run(
         [
             str(binary),
@@ -86,19 +91,33 @@ def main() -> int:
         print("set PRIME_AGENT_TREATMENT_PROBE=1 to run the live probes")
         return 0
     binary = Path(sys.argv[1]).resolve()
-    api_key = run_smoke.read_keychain_key()
-    with tempfile.TemporaryDirectory(prefix="treatment-probe-") as directory:
-        root = Path(directory)
-        for treatment in ("r1-s1-m1", "r0-s1-m1"):
-            text = run_once(binary, root / f"r-{treatment}", R_PROMPT, treatment, api_key)
-            print(f"R {treatment}: {text.strip()[:300]!r}")
-        for treatment in ("r1-s1-m1", "r1-s1-m0"):
-            shared = treatment.endswith("m1")
-            base = root / f"m-{treatment}"
-            run_once(binary, base / ("shared" if shared else "ep1"), M_PROMPT_1, treatment, api_key)
-            base2 = base / ("shared" if shared else "ep2")
-            text = run_once(binary, base2, M_PROMPT_2, treatment, api_key)
-            print(f"M {treatment}: {text.strip()[:200]!r}")
+    proxy = budget_proxy.start_proxy(
+        matrix.budget_policy(CONFIG),
+        credential=run_smoke.read_keychain_key(CONFIG["provider"]),
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="treatment-probe-") as directory:
+            root = Path(directory)
+            for treatment in ("r1-s1-m1", "r0-s1-m1"):
+                text = run_once(
+                    binary, root / f"r-{treatment}", R_PROMPT, treatment, proxy.base_url
+                )
+                print(f"R {treatment}: {text.strip()[:300]!r}")
+            for treatment in ("r1-s1-m1", "r1-s1-m0"):
+                shared = treatment.endswith("m1")
+                base = root / f"m-{treatment}"
+                run_once(
+                    binary,
+                    base / ("shared" if shared else "ep1"),
+                    M_PROMPT_1,
+                    treatment,
+                    proxy.base_url,
+                )
+                base2 = base / ("shared" if shared else "ep2")
+                text = run_once(binary, base2, M_PROMPT_2, treatment, proxy.base_url)
+                print(f"M {treatment}: {text.strip()[:200]!r}")
+    finally:
+        proxy.close()
     return 0
 
 

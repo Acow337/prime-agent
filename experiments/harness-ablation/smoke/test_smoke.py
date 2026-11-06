@@ -214,6 +214,9 @@ class BudgetPolicyTests(unittest.TestCase):
 class _FakeUpstreamHandler(http.server.BaseHTTPRequestHandler):
     calls = 0
     status_code = 200
+    # Per forwarded request: the credential it arrived with, and the key the
+    # agent reported holding (a reporting agent puts it in the body).
+    seen: list[dict[str, str | None]] = []
     default_response_body = (
         b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
         b'data: {"choices":[],"usage":{"prompt_tokens":42,'
@@ -225,7 +228,13 @@ class _FakeUpstreamHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         type(self).calls += 1
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        payload = json.loads(self.rfile.read(length))
+        type(self).seen.append(
+            {
+                "authorization": self.headers.get("Authorization"),
+                "agent_key": payload.get("agent_key"),
+            }
+        )
         self.send_response(type(self).status_code)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -235,9 +244,56 @@ class _FakeUpstreamHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class ProviderCredentialTests(unittest.TestCase):
+    """A live key only ever travels to the endpoint of the provider that issued it."""
+
+    def setUp(self):
+        manifest = json.loads((SMOKE_DIR / "manifest.json").read_text())
+        self.policy = budget_proxy.BudgetPolicy.from_manifest(manifest)
+
+    def test_each_credential_goes_only_to_its_own_providers_endpoint(self):
+        upstreams = {}
+        for provider in ("deepseek", "openrouter"):
+            proxy = budget_proxy.start_proxy(
+                self.policy,
+                credential=budget_proxy.ProviderCredential(provider, "credential"),
+            )
+            self.addCleanup(proxy.close)
+            upstreams[provider] = proxy.upstream
+        self.assertEqual(
+            upstreams,
+            {
+                "deepseek": "https://api.deepseek.com/chat/completions",
+                "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+            },
+        )
+
+    def test_a_provider_without_a_known_endpoint_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "no upstream for provider 'example'"):
+            budget_proxy.start_proxy(
+                self.policy,
+                credential=budget_proxy.ProviderCredential("example", "credential"),
+            )
+
+    def test_an_upstream_override_must_be_a_loopback_test_server(self):
+        with self.assertRaisesRegex(ValueError, "loopback test server"):
+            budget_proxy.start_proxy(
+                self.policy,
+                credential=budget_proxy.ProviderCredential("openrouter", "credential"),
+                upstream="https://api.deepseek.com/chat/completions",
+            )
+
+    def test_the_secret_stays_out_of_the_repr(self):
+        self.assertEqual(
+            repr(budget_proxy.ProviderCredential("openrouter", "secret-value")),
+            "ProviderCredential(provider='openrouter')",
+        )
+
+
 class ProxyTests(unittest.TestCase):
     def setUp(self):
         _FakeUpstreamHandler.calls = 0
+        _FakeUpstreamHandler.seen = []
         _FakeUpstreamHandler.status_code = 200
         _FakeUpstreamHandler.response_body = _FakeUpstreamHandler.default_response_body
         self.upstream = http.server.ThreadingHTTPServer(
@@ -252,7 +308,11 @@ class ProxyTests(unittest.TestCase):
         upstream_url = (
             f"http://127.0.0.1:{self.upstream.server_port}/chat/completions"
         )
-        self.proxy = budget_proxy.start_proxy(policy, upstream=upstream_url)
+        self.proxy = budget_proxy.start_proxy(
+            policy,
+            credential=budget_proxy.ProviderCredential("deepseek", "proxy-credential"),
+            upstream=upstream_url,
+        )
 
     def tearDown(self):
         self.proxy.close()
@@ -271,6 +331,14 @@ class ProxyTests(unittest.TestCase):
             method="POST",
         )
         return urllib.request.urlopen(request, timeout=2)
+
+    def test_upstream_sees_only_the_proxy_credential(self):
+        with self._post(1024) as response:
+            response.read()
+        self.assertEqual(
+            _FakeUpstreamHandler.seen,
+            [{"authorization": "Bearer proxy-credential", "agent_key": None}],
+        )
 
     def test_stream_is_forwarded_byte_for_byte_and_usage_is_recorded(self):
         with self._post(1024) as response:
@@ -341,8 +409,10 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("json", command)
         self.assertNotIn("secret", " ".join(command))
         with tempfile.TemporaryDirectory() as directory:
-            env = run_smoke.isolated_env(Path(directory), "secret")
-            self.assertEqual(env["DEEPSEEK_API_KEY"], "secret")
+            env = run_smoke.isolated_env(Path(directory), provider="openrouter")
+            self.assertEqual(
+                env["OPENROUTER_API_KEY"], run_smoke.PROXY_CREDENTIAL_PLACEHOLDER
+            )
             self.assertEqual(env["PI_OFFLINE"], "1")
             self.assertTrue(Path(env["PRIME_AGENT_CODING_AGENT_DIR"]).is_absolute())
 
@@ -350,7 +420,10 @@ class RunnerTests(unittest.TestCase):
         credential = "s" + "k-" + ("x" * 24)
         completed = subprocess.CompletedProcess([], 0, stdout=credential + "\n", stderr="")
         with mock.patch.object(run_smoke.subprocess, "run", return_value=completed) as run:
-            self.assertEqual(run_smoke.read_keychain_key(), credential)
+            self.assertEqual(
+                run_smoke.read_keychain_key("deepseek"),
+                budget_proxy.ProviderCredential("deepseek", credential),
+            )
         command = run.call_args.args[0]
         self.assertNotIn(credential, " ".join(command))
         self.assertTrue(run.call_args.kwargs["capture_output"])
@@ -361,7 +434,7 @@ class RunnerTests(unittest.TestCase):
         )
         with mock.patch.object(run_smoke.subprocess, "run", return_value=completed):
             with self.assertRaisesRegex(RuntimeError, "Keychain credential unavailable") as error:
-                run_smoke.read_keychain_key()
+                run_smoke.read_keychain_key("deepseek")
         self.assertNotIn("sensitive", str(error.exception))
 
     def test_keychain_read_falls_back_to_service_only_without_exposing_account(self):
@@ -371,7 +444,10 @@ class RunnerTests(unittest.TestCase):
         with mock.patch.object(
             run_smoke.subprocess, "run", side_effect=[missing, found]
         ) as run:
-            self.assertEqual(run_smoke.read_keychain_key(), credential)
+            self.assertEqual(
+                run_smoke.read_keychain_key("deepseek"),
+                budget_proxy.ProviderCredential("deepseek", credential),
+            )
         self.assertEqual(run.call_count, 2)
         fallback_command = run.call_args_list[1].args[0]
         self.assertNotIn("-a", fallback_command)
@@ -392,7 +468,6 @@ class RunnerTests(unittest.TestCase):
                 root / "runs",
                 manifest,
                 mode="live",
-                api_key="credential",
                 base_url="http://127.0.0.1:1",
                 timeout_seconds=0.05,
             )
@@ -413,7 +488,6 @@ class RunnerTests(unittest.TestCase):
                 root / "runs",
                 manifest,
                 mode="live",
-                api_key="credential",
                 base_url="http://127.0.0.1:1",
             )
             serialized = run_smoke.safe_json_dumps(results)
@@ -438,7 +512,6 @@ class RunnerTests(unittest.TestCase):
                 root / "runs",
                 manifest,
                 mode="live",
-                api_key="credential",
                 base_url="http://127.0.0.1:1",
             )
             self.assertEqual(results[0]["status"], "secret_rejected")
@@ -481,6 +554,7 @@ class RunnerTests(unittest.TestCase):
         policy = budget_proxy.BudgetPolicy.from_manifest(manifest)
         proxy = budget_proxy.start_proxy(
             policy,
+            credential=budget_proxy.ProviderCredential("deepseek", "credential"),
             upstream=f"http://127.0.0.1:{upstream.server_port}/chat/completions",
         )
         try:
@@ -509,7 +583,6 @@ class RunnerTests(unittest.TestCase):
                     root / "runs",
                     manifest,
                     mode="live",
-                    api_key="credential",
                     base_url=proxy.base_url,
                     ledger=proxy.ledger,
                 )
@@ -545,6 +618,7 @@ class RunnerTests(unittest.TestCase):
                 policy = budget_proxy.BudgetPolicy.from_manifest(manifest)
                 proxy = budget_proxy.start_proxy(
                     policy,
+                    credential=budget_proxy.ProviderCredential("deepseek", "credential"),
                     upstream=(
                         f"http://127.0.0.1:{upstream.server_port}/chat/completions"
                     ),
@@ -571,7 +645,6 @@ class RunnerTests(unittest.TestCase):
                             root / "runs",
                             manifest,
                             mode="live",
-                            api_key="credential",
                             base_url=proxy.base_url,
                             ledger=proxy.ledger,
                         )
@@ -645,6 +718,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_live_run_uses_the_bounded_proxy_and_returns_sanitized_usage(self):
         _FakeUpstreamHandler.calls = 0
+        _FakeUpstreamHandler.seen = []
         _FakeUpstreamHandler.response_body = _FakeUpstreamHandler.default_response_body
         upstream = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), _FakeUpstreamHandler
@@ -687,9 +761,11 @@ class RunnerTests(unittest.TestCase):
                     "agent = pathlib.Path(os.environ['PRIME_AGENT_CODING_AGENT_DIR'])\n"
                     "base = json.loads((agent / 'models.json').read_text())"
                     "['providers']['deepseek']['baseUrl']\n"
+                    "key = os.environ['DEEPSEEK_API_KEY']\n"
                     "request = urllib.request.Request(base + '/chat/completions', "
-                    "data=json.dumps({'max_tokens': 1024, 'stream': True}).encode(), "
-                    "headers={'Authorization': 'Bearer ' + os.environ['DEEPSEEK_API_KEY'], "
+                    "data=json.dumps({'max_tokens': 1024, 'stream': True, "
+                    "'agent_key': key}).encode(), "
+                    "headers={'Authorization': 'Bearer ' + key, "
                     "'Content-Type': 'application/json'}, method='POST')\n"
                     "with urllib.request.urlopen(request) as response:\n"
                     "    response.read()\n"
@@ -699,12 +775,14 @@ class RunnerTests(unittest.TestCase):
                 with mock.patch.object(
                     run_smoke,
                     "read_keychain_key",
-                    return_value="credential",
+                    side_effect=lambda provider: budget_proxy.ProviderCredential(
+                        provider, "credential"
+                    ),
                 ), mock.patch.object(
                     run_smoke.budget_proxy,
                     "start_proxy",
-                    side_effect=lambda policy: real_start_proxy(
-                        policy, upstream=upstream_url
+                    side_effect=lambda policy, credential: real_start_proxy(
+                        policy, credential=credential, upstream=upstream_url
                     ),
                 ):
                     summary = run_smoke.run_experiment(
@@ -721,6 +799,16 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(all(row["success"] for row in summary["tasks"]), summary)
         self.assertEqual(summary["usage"]["request_count"], 3)
         self.assertEqual(summary["usage"]["error_categories"], {})
+        self.assertEqual(
+            _FakeUpstreamHandler.seen,
+            [
+                {
+                    "authorization": "Bearer credential",
+                    "agent_key": run_smoke.PROXY_CREDENTIAL_PLACEHOLDER,
+                }
+            ]
+            * 3,
+        )
 
     def test_dry_run_cli_prints_safe_json_without_requiring_the_binary(self):
         output = io.StringIO()

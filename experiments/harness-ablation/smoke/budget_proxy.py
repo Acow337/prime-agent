@@ -1,4 +1,4 @@
-"""Budget accounting for the bounded DeepSeek smoke proxy."""
+"""Budget accounting and credential custody for the bounded provider proxy."""
 
 from __future__ import annotations
 
@@ -8,11 +8,31 @@ import json
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 DEFAULT_MAX_TRANSPORT_RETRIES = 2
+# Each provider's chat-completions endpoint. A credential is only ever sent to
+# the endpoint of the provider that issued it, so no key can reach another
+# provider.
+UPSTREAMS = {
+    "deepseek": "https://api.deepseek.com/chat/completions",
+    "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+}
+
+
+@dataclass(frozen=True)
+class ProviderCredential:
+    """A live API key bound to the provider that issued it.
+
+    The proxy derives its upstream from ``provider``, so the key and the
+    endpoint it is sent to cannot be chosen independently.
+    """
+
+    provider: str
+    secret: str = field(repr=False)
 
 
 class BudgetExceeded(RuntimeError):
@@ -260,6 +280,7 @@ class _ProxyServer(http.server.ThreadingHTTPServer):
     policy: BudgetPolicy
     ledger: UsageLedger
     upstream: str
+    authorization: str
 
 
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -301,10 +322,10 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         headers = {
             "Content-Type": "application/json",
             "Accept": self.headers.get("Accept", "text/event-stream"),
+            # The client's own Authorization carries a placeholder and is
+            # dropped: only the proxy holds the live credential.
+            "Authorization": self.proxy_server.authorization,
         }
-        authorization = self.headers.get("Authorization")
-        if authorization:
-            headers["Authorization"] = authorization
         request = urllib.request.Request(
             self.proxy_server.upstream,
             data=body,
@@ -379,6 +400,8 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 @dataclass
 class ProxyHandle:
     base_url: str
+    # The only endpoint this proxy forwards to.
+    upstream: str
     ledger: UsageLedger
     _server: _ProxyServer
     _thread: threading.Thread
@@ -391,17 +414,35 @@ class ProxyHandle:
 
 def start_proxy(
     policy: BudgetPolicy,
+    *,
+    credential: ProviderCredential,
     upstream: str | None = None,
 ) -> ProxyHandle:
-    """Start a loopback-only proxy with a pre-forward admission gate."""
+    """Start a loopback-only proxy with a pre-forward admission gate.
+
+    The proxy is the only holder of the live credential: it authenticates every
+    upstream request with it, whatever the client sent, and forwards only to the
+    endpoint of the credential's provider. ``upstream`` replaces that endpoint
+    with a loopback test server and nothing else.
+    """
+    endpoint = UPSTREAMS.get(credential.provider)
+    if endpoint is None:
+        raise ValueError(f"no upstream for provider {credential.provider!r}")
+    if upstream is not None:
+        target = urllib.parse.urlsplit(upstream)
+        if target.scheme != "http" or target.hostname != "127.0.0.1":
+            raise ValueError("an upstream override must be a loopback test server")
+        endpoint = upstream
     server = _ProxyServer(("127.0.0.1", 0), _ProxyHandler)
     server.policy = policy
     server.ledger = UsageLedger(policy)
-    server.upstream = upstream or "https://api.deepseek.com/chat/completions"
+    server.upstream = endpoint
+    server.authorization = f"Bearer {credential.secret}"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return ProxyHandle(
         base_url=f"http://127.0.0.1:{server.server_port}",
+        upstream=endpoint,
         ledger=server.ledger,
         _server=server,
         _thread=thread,

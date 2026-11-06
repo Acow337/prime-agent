@@ -18,10 +18,13 @@ PRIME_AGENT_KERNEL_PYTHON=... python3 runner.py --config config.pilot.json \
   --results results/pilot --mode live --limit 1
 ```
 
-Live mode reads the DeepSeek credential from macOS Keychain
-(`prime-agent-deepseek-smoke`), forwards through the bounded loopback proxy from
-`../smoke`, sets `PRIME_AGENT_HARNESS_TREATMENT` for each cell, and writes only
-`records.jsonl` + `summary.json` under `--results`.
+Live mode reads the credential for the config's `provider` from macOS Keychain
+(services per provider: `KEYCHAIN_SERVICES` in `../smoke/run_smoke.py`; DeepSeek
+is `prime-agent-deepseek-smoke`) and hands it only to the bounded loopback proxy
+from `../smoke`, which authenticates every upstream request and forwards only to
+that provider's own endpoint (`UPSTREAMS` in `../smoke/budget_proxy.py`); the
+agent sees only the placeholder `proxy-managed`. It sets `PRIME_AGENT_HARNESS_TREATMENT` for each
+cell and writes only `records.jsonl` + `summary.json` under `--results`.
 
 ## Matrix
 

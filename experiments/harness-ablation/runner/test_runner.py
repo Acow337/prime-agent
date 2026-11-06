@@ -216,10 +216,22 @@ class FailureAccountingTests(unittest.TestCase):
 
 
 class _ProviderHandler(http.server.BaseHTTPRequestHandler):
-    """Answers every chat request with one streamed chunk and its usage."""
+    """Answers every chat request with one streamed chunk and its usage.
+
+    Records, per request, the credential it arrived with and the key the agent
+    reported holding (a reporting agent puts it in the body).
+    """
+
+    seen: list[dict[str, str | None]] = []
 
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        type(self).seen.append(
+            {
+                "authorization": self.headers.get("Authorization"),
+                "agent_key": payload.get("agent_key"),
+            }
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -256,39 +268,81 @@ print(json.dumps({"type": "message_end", "message": {"role": "assistant",
 """
 
 
+# Authenticates with the key the runner gave it, under its provider's key
+# variable, and reports that key in the body.
+_KEY_REPORTING_AGENT = """#!/usr/bin/env python3
+import json, os, pathlib, urllib.request
+agent = pathlib.Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"])
+provider = json.loads((agent / "settings.json").read_text())["defaultProvider"]
+base = json.loads((agent / "models.json").read_text())["providers"][provider]["baseUrl"]
+key = os.environ[{"deepseek": "DEEPSEEK_API_KEY", "openrouter": "OPENROUTER_API_KEY"}[provider]]
+request = urllib.request.Request(
+    base + "/chat/completions",
+    data=json.dumps({"max_tokens": 64, "stream": True, "agent_key": key}).encode(),
+    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request) as response:
+    response.read()
+print(json.dumps({"type": "message_end", "message": {"role": "assistant",
+    "content": [{"type": "text", "text": "{}"}]}}))
+"""
+
+
 class LiveAccountingTests(unittest.TestCase):
-    def test_a_cell_out_of_request_budget_is_counted_and_not_retried(self):
-        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
-        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
-        upstream_thread.start()
-        upstream_url = f"http://127.0.0.1:{upstream.server_port}/chat/completions"
+    def setUp(self):
+        _ProviderHandler.seen = []
+        self.upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
+        self.upstream_thread = threading.Thread(target=self.upstream.serve_forever, daemon=True)
+        self.upstream_thread.start()
+
+    def tearDown(self):
+        self.upstream.shutdown()
+        self.upstream.server_close()
+        self.upstream_thread.join()
+
+    def _run_live(self, agent_source, *, invocations, provider="deepseek"):
+        """Run one live I cell for `provider` `invocations` times against the fake
+        provider, with Keychain returning "credential" for whichever provider is
+        asked; keep the credentials the proxy was started with in
+        `self.proxy_credentials` and return the cell's records."""
+        upstream_url = f"http://127.0.0.1:{self.upstream.server_port}/chat/completions"
         real_start_proxy = runner.budget_proxy.start_proxy
         config = json.loads((HERE / "config.pilot.json").read_text(encoding="utf-8"))
         config.update(
-            families={"i": [1]}, treatments=["r1-s1-m1"], max_requests_per_run=2, mode="live"
+            families={"i": [1]},
+            treatments=["r1-s1-m1"],
+            max_requests_per_run=2,
+            mode="live",
+            provider=provider,
         )
-        try:
-            with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-                runner.run_smoke, "read_keychain_key", return_value="credential"
-            ), mock.patch.object(
-                runner.budget_proxy,
-                "start_proxy",
-                side_effect=lambda policy: real_start_proxy(policy, upstream=upstream_url),
-            ):
-                agent = Path(directory) / "synthetic-agent"
-                agent.write_text(_THREE_REQUEST_AGENT, encoding="utf-8")
-                agent.chmod(0o700)
-                results = Path(directory) / "results"
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runner.run_smoke,
+            "read_keychain_key",
+            side_effect=lambda name: runner.budget_proxy.ProviderCredential(name, "credential"),
+        ), mock.patch.object(
+            runner.budget_proxy,
+            "start_proxy",
+            side_effect=lambda policy, credential: real_start_proxy(
+                policy, credential=credential, upstream=upstream_url
+            ),
+        ) as start_proxy:
+            agent = Path(directory) / "synthetic-agent"
+            agent.write_text(agent_source, encoding="utf-8")
+            agent.chmod(0o700)
+            results = Path(directory) / "results"
+            for _ in range(invocations):
                 runner.run_matrix(config, agent, results, "live")
-                runner.run_matrix(config, agent, results, "live")
-                records = [
-                    json.loads(line)
-                    for line in (results / "records.jsonl").read_text(encoding="utf-8").splitlines()
-                ]
-        finally:
-            upstream.shutdown()
-            upstream.server_close()
-            upstream_thread.join()
+            self.proxy_credentials = [
+                call.kwargs["credential"] for call in start_proxy.call_args_list
+            ]
+            return [
+                json.loads(line)
+                for line in (results / "records.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+    def test_a_cell_out_of_request_budget_is_counted_and_not_retried(self):
+        records = self._run_live(_THREE_REQUEST_AGENT, invocations=2)
         self.assertEqual(
             [
                 {
@@ -299,6 +353,21 @@ class LiveAccountingTests(unittest.TestCase):
                 for record in records
             ],
             [{"status": "budget_exhausted", "errors": {"task_request_limit": 1}, "requests": 2}],
+        )
+
+    def test_only_the_proxy_holds_the_configured_providers_credential(self):
+        self._run_live(_KEY_REPORTING_AGENT, invocations=1, provider="openrouter")
+        self.assertEqual(
+            (self.proxy_credentials, _ProviderHandler.seen),
+            (
+                [runner.budget_proxy.ProviderCredential("openrouter", "credential")],
+                [
+                    {
+                        "authorization": "Bearer credential",
+                        "agent_key": runner.run_smoke.PROXY_CREDENTIAL_PLACEHOLDER,
+                    }
+                ],
+            ),
         )
 
 

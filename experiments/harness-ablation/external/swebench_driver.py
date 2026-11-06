@@ -95,13 +95,13 @@ def run_agent(
     prompt: str,
     treatment: str,
     config: dict[str, Any],
-    api_key: str,
     proxy_base: str,
     timeout: int,
 ) -> int:
     # Agent state lives outside the repository, so the produced patch contains
-    # only the repository's own changes.
-    env = run_smoke.isolated_env(state_root, api_key)
+    # only the repository's own changes. The agent holds only the proxy
+    # placeholder; the proxy alone holds the live credential.
+    env = run_smoke.isolated_env(state_root, provider=config["provider"])
     # The repository may contain a module with the same name as a kernel
     # dependency (e.g. requests/ in the requests repo); keep the CWD out of
     # sys.path so the kernel's package probe uses the venv, not the checkout.
@@ -158,7 +158,6 @@ def prepare(args: argparse.Namespace) -> int:
     results = Path(args.results).resolve()
     results.mkdir(parents=True, exist_ok=True)
     predictions_path = results / "predictions.jsonl"
-    api_key = run_smoke.read_keychain_key()
     policy = budget_proxy.BudgetPolicy.from_manifest(
         {
             "input_usd_per_million": config["input_usd_per_million"],
@@ -172,7 +171,9 @@ def prepare(args: argparse.Namespace) -> int:
             "hard_budget_cny": config["hard_budget_cny"],
         }
     )
-    proxy = budget_proxy.start_proxy(policy)
+    proxy = budget_proxy.start_proxy(
+        policy, credential=run_smoke.read_keychain_key(config["provider"])
+    )
     try:
         with predictions_path.open("a", encoding="utf-8") as out:
             for row in rows:
@@ -192,7 +193,6 @@ def prepare(args: argparse.Namespace) -> int:
                         row["problem_statement"] + INSTRUCTIONS,
                         treatment,
                         config,
-                        api_key,
                         proxy.base_url,
                         args.timeout,
                     )

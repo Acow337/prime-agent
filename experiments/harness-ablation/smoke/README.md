@@ -9,6 +9,13 @@ treatment varies, so the result supports only a single-model baseline check.
 
 - The forwarding proxy binds only to `127.0.0.1` and forwards only
   `POST /chat/completions`.
+- Only the proxy holds the live key: it authenticates every upstream request
+  itself and drops the agent's own `Authorization` header. The agent process
+  sees only the placeholder `proxy-managed` in its provider key variable.
+- The key comes out of Keychain bound to its provider, and the proxy forwards
+  only to that provider's endpoint (`UPSTREAMS` in `budget_proxy.py`). It
+  refuses a provider with no known endpoint, and the only override it accepts
+  is a loopback test server, so no key can reach another provider.
 - At most thirty provider requests are admitted, each with exactly one of
   `max_tokens` or `max_completion_tokens` set to at most 1024.
 - Each task also has its own request quota (t1 6, t2 6, t3 12), so an early
