@@ -94,6 +94,7 @@ def main() -> int:
     proxy = budget_proxy.start_proxy(
         matrix.budget_policy(CONFIG),
         credential=run_smoke.read_keychain_key(CONFIG["provider"]),
+        request_fields=CONFIG.get("request_fields"),
     )
     try:
         with tempfile.TemporaryDirectory(prefix="treatment-probe-") as directory:

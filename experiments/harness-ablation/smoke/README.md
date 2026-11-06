@@ -16,6 +16,13 @@ treatment varies, so the result supports only a single-model baseline check.
   only to that provider's endpoint (`UPSTREAMS` in `budget_proxy.py`). It
   refuses a provider with no known endpoint, and the only override it accepts
   is a loopback test server, so no key can reach another provider.
+- Configured `request_fields` are set on every request before admission,
+  replacing the agent's own values, so the limits apply to the request exactly
+  as sent. An OpenRouter proxy refuses to start unless they pin one provider
+  endpoint with fallbacks off and set the reasoning mode.
+- When the provider reports what it billed (`usage.cost`, as OpenRouter does),
+  the ledger counts that instead of pricing the tokens, and the budget gate uses
+  it. It also counts responses per serving model and provider (`served_by`).
 - At most thirty provider requests are admitted, each with exactly one of
   `max_tokens` or `max_completion_tokens` set to at most 1024.
 - Each task also has its own request quota (t1 6, t2 6, t3 12), so an early

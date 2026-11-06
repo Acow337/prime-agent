@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import http.server
+import io
 import json
 import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +22,24 @@ import t_family  # noqa: E402
 import t_mech_family  # noqa: E402
 import i_family  # noqa: E402
 import runner  # noqa: E402
+import freeze  # noqa: E402
+
+# What an OpenRouter run pins on every request: one provider endpoint with no
+# fallbacks, and the reasoning mode.
+_PINNED = {
+    "provider": {"order": ["deepinfra/fp8"], "allow_fallbacks": False},
+    "reasoning": {"effort": "none"},
+}
+# An OpenRouter stream: every chunk names the model and provider that served
+# it, and the final chunk carries the usage with the billed cost.
+_OPENROUTER_STREAM = (
+    b'data: {"model":"deepseek/deepseek-v4-flash-20260423","provider":"DeepInfra",'
+    b'"choices":[{"delta":{"content":"ok"}}]}\n\n'
+    b'data: {"model":"deepseek/deepseek-v4-flash-20260423","provider":"DeepInfra",'
+    b'"choices":[{"delta":{},"finish_reason":"stop"}],'
+    b'"usage":{"prompt_tokens":42,"completion_tokens":7,"cost":0.0000125}}\n\n'
+    b"data: [DONE]\n\n"
+)
 
 
 class IFamilyTests(unittest.TestCase):
@@ -147,6 +167,63 @@ class MatrixRunnerTests(unittest.TestCase):
                 self.assertEqual(treatment["success_rate"], 1.0)
             self.assertEqual(summary["usage"]["actual_cost_cny"], 0.0)
 
+    def test_the_summary_merges_billed_cost_and_provenance_across_cells(self):
+        def cell(run_id, usage):
+            return {
+                "run_id": run_id,
+                "treatment": "r1-s1-m1",
+                "status": "completed",
+                "success": True,
+                "score": 1.0,
+                "usage": usage,
+            }
+
+        served = "deepseek/deepseek-v4-flash-20260423 @ DeepInfra"
+        records = [
+            cell(
+                "a",
+                {
+                    "request_count": 2,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "actual_cost_cny": 0.0002,
+                    "reported_cost_usd": 0.000025,
+                    "served_by": {served: 2},
+                },
+            ),
+            cell(
+                "b",
+                {
+                    "request_count": 1,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "actual_cost_cny": 0.0001,
+                    "reported_cost_usd": 0.0000125,
+                    "served_by": {served: 1},
+                },
+            ),
+            # Written before the ledger reported billed cost or provenance.
+            cell(
+                "c",
+                {
+                    "request_count": 1,
+                    "prompt_tokens": 5,
+                    "completion_tokens": 1,
+                    "actual_cost_cny": 0.00001,
+                },
+            ),
+        ]
+        self.assertEqual(
+            runner.summarize(records, self._config())["usage"],
+            {
+                "prompt_tokens": 25,
+                "completion_tokens": 5,
+                "actual_cost_cny": 0.00031,
+                "reported_cost_usd": 0.0000375,
+                "served_by": {served: 3},
+            },
+        )
+
     def test_resume_skips_completed_cells(self):
         config = self._config()
         with tempfile.TemporaryDirectory() as directory:
@@ -216,16 +293,25 @@ class FailureAccountingTests(unittest.TestCase):
 
 
 class _ProviderHandler(http.server.BaseHTTPRequestHandler):
-    """Answers every chat request with one streamed chunk and its usage.
+    """Answers every chat request with `body`, a stream ending in its usage.
 
     Records, per request, the credential it arrived with and the key the agent
-    reported holding (a reporting agent puts it in the body).
+    reported holding (a reporting agent puts it in the body), and the body as
+    the proxy sent it.
     """
 
     seen: list[dict[str, str | None]] = []
+    payloads: list[dict] = []
+    default_body = (
+        b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    body = default_body
 
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        type(self).payloads.append(payload)
         type(self).seen.append(
             {
                 "authorization": self.headers.get("Authorization"),
@@ -235,11 +321,7 @@ class _ProviderHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
-        self.wfile.write(
-            b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
-            b'data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}\n\n'
-            b"data: [DONE]\n\n"
-        )
+        self.wfile.write(type(self).body)
 
     def log_message(self, *_args):
         pass
@@ -292,6 +374,8 @@ print(json.dumps({"type": "message_end", "message": {"role": "assistant",
 class LiveAccountingTests(unittest.TestCase):
     def setUp(self):
         _ProviderHandler.seen = []
+        _ProviderHandler.payloads = []
+        _ProviderHandler.body = _ProviderHandler.default_body
         self.upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
         self.upstream_thread = threading.Thread(target=self.upstream.serve_forever, daemon=True)
         self.upstream_thread.start()
@@ -301,11 +385,12 @@ class LiveAccountingTests(unittest.TestCase):
         self.upstream.server_close()
         self.upstream_thread.join()
 
-    def _run_live(self, agent_source, *, invocations, provider="deepseek"):
-        """Run one live I cell for `provider` `invocations` times against the fake
-        provider, with Keychain returning "credential" for whichever provider is
-        asked; keep the credentials the proxy was started with in
-        `self.proxy_credentials` and return the cell's records."""
+    def _run_live(self, agent_source, *, invocations, provider="deepseek", request_fields=None):
+        """Run one live I cell for `provider` (with `request_fields` in its
+        config, if given) `invocations` times against the fake provider, with
+        Keychain returning "credential" for whichever provider is asked; keep the
+        credentials the proxy was started with in `self.proxy_credentials` and
+        return the cell's records."""
         upstream_url = f"http://127.0.0.1:{self.upstream.server_port}/chat/completions"
         real_start_proxy = runner.budget_proxy.start_proxy
         config = json.loads((HERE / "config.pilot.json").read_text(encoding="utf-8"))
@@ -316,6 +401,8 @@ class LiveAccountingTests(unittest.TestCase):
             mode="live",
             provider=provider,
         )
+        if request_fields is not None:
+            config["request_fields"] = request_fields
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             runner.run_smoke,
             "read_keychain_key",
@@ -323,8 +410,8 @@ class LiveAccountingTests(unittest.TestCase):
         ), mock.patch.object(
             runner.budget_proxy,
             "start_proxy",
-            side_effect=lambda policy, credential: real_start_proxy(
-                policy, credential=credential, upstream=upstream_url
+            side_effect=lambda policy, credential, request_fields: real_start_proxy(
+                policy, credential=credential, request_fields=request_fields, upstream=upstream_url
             ),
         ) as start_proxy:
             agent = Path(directory) / "synthetic-agent"
@@ -356,7 +443,9 @@ class LiveAccountingTests(unittest.TestCase):
         )
 
     def test_only_the_proxy_holds_the_configured_providers_credential(self):
-        self._run_live(_KEY_REPORTING_AGENT, invocations=1, provider="openrouter")
+        self._run_live(
+            _KEY_REPORTING_AGENT, invocations=1, provider="openrouter", request_fields=_PINNED
+        )
         self.assertEqual(
             (self.proxy_credentials, _ProviderHandler.seen),
             (
@@ -369,6 +458,119 @@ class LiveAccountingTests(unittest.TestCase):
                 ],
             ),
         )
+
+
+    def test_an_openrouter_cell_is_pinned_and_records_its_billed_cost_and_provenance(self):
+        _ProviderHandler.body = _OPENROUTER_STREAM
+        records = self._run_live(
+            _KEY_REPORTING_AGENT, invocations=1, provider="openrouter", request_fields=_PINNED
+        )
+        self.assertEqual(
+            (
+                [{key: payload.get(key) for key in _PINNED} for payload in _ProviderHandler.payloads],
+                records[0]["usage"],
+            ),
+            (
+                [_PINNED],
+                {
+                    "request_count": 1,
+                    "prompt_tokens": 42,
+                    "completion_tokens": 7,
+                    "actual_cost_cny": 0.0001,
+                    "reported_cost_usd": 0.0000125,
+                    "served_by": {"deepseek/deepseek-v4-flash-20260423 @ DeepInfra": 1},
+                },
+            ),
+        )
+
+
+# The OpenRouter endpoint listing for one model, as GET /models/{id}/endpoints
+# returns it (trimmed to the fields the snapshot keeps).
+_ENDPOINTS = {
+    "data": {
+        "id": "deepseek/deepseek-v4-flash",
+        "endpoints": [
+            {
+                "name": "DeepInfra | deepseek/deepseek-v4-flash-20260423",
+                "provider_name": "DeepInfra",
+                "tag": "deepinfra/fp8",
+                "quantization": "fp8",
+                "context_length": 1048576,
+                "max_completion_tokens": 393216,
+                "pricing": {"prompt": "0.00000009", "completion": "0.00000018", "discount": 0},
+                "supported_parameters": ["max_tokens", "reasoning", "tools"],
+            },
+            {
+                "name": "Venice | deepseek/deepseek-v4-flash-20260423",
+                "provider_name": "Venice",
+                "tag": "venice",
+                "quantization": "unknown",
+                "context_length": 1000000,
+                "max_completion_tokens": 262144,
+                "pricing": {"prompt": "0.0000000966", "completion": "0.0000001925", "discount": 0.3},
+                "supported_parameters": ["max_tokens", "reasoning", "tools"],
+            },
+        ],
+    }
+}
+
+
+class FreezeTests(unittest.TestCase):
+    def _freeze(self, **prices):
+        """Freeze an OpenRouter pilot config pinned to deepinfra/fp8 with `prices`,
+        against the listing above; return the URL fetched and the frozen file."""
+        config = json.loads((HERE / "config.pilot.json").read_text(encoding="utf-8"))
+        config.update(
+            provider="openrouter",
+            models={"cheap": "deepseek/deepseek-v4-flash"},
+            request_fields=_PINNED,
+            families={"i": [1]},
+            **prices,
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            freeze.urllib.request,
+            "urlopen",
+            return_value=io.BytesIO(json.dumps(_ENDPOINTS).encode()),
+        ) as urlopen, redirect_stdout(io.StringIO()):
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            out = Path(directory) / "frozen.json"
+            freeze.main(["--config", str(config_path), "--out", str(out)])
+            return urlopen.call_args.args[0], json.loads(out.read_text(encoding="utf-8"))
+
+    def test_an_openrouter_freeze_snapshots_the_pinned_endpoint(self):
+        url, frozen = self._freeze(input_usd_per_million=0.09, output_usd_per_million=0.18)
+        self.assertEqual(
+            (url, {key: frozen[key] for key in ("provider", "request_fields", "prices")}),
+            (
+                "https://openrouter.ai/api/v1/models/deepseek/deepseek-v4-flash/endpoints",
+                {
+                    "provider": "openrouter",
+                    "request_fields": _PINNED,
+                    "prices": {
+                        "cheap": {
+                            "model": "deepseek/deepseek-v4-flash",
+                            "endpoint": "DeepInfra | deepseek/deepseek-v4-flash-20260423",
+                            "tag": "deepinfra/fp8",
+                            "provider_name": "DeepInfra",
+                            "quantization": "fp8",
+                            "context_length": 1048576,
+                            "max_completion_tokens": 393216,
+                            "pricing": {
+                                "prompt": "0.00000009",
+                                "completion": "0.00000018",
+                                "discount": 0,
+                            },
+                            "supported_parameters": ["max_tokens", "reasoning", "tools"],
+                        }
+                    },
+                },
+            ),
+        )
+
+    def test_config_prices_below_the_pinned_endpoints_listing_are_refused(self):
+        with self.assertRaisesRegex(SystemExit, "below the listed"):
+            self._freeze(input_usd_per_million=0.05, output_usd_per_million=0.18)
 
 
 if __name__ == "__main__":

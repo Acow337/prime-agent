@@ -2,8 +2,10 @@
 
 The frozen file is the audit anchor for a run: a rerun is comparable only when
 these hashes match. It records the runner and family module hashes, the
-configuration hash, one digest per materialized task instance, and (when a
-pilot summary exists) its aggregate results.
+configuration hash, one digest per materialized task instance, the provider and
+the fields pinned on every request, and (when a pilot summary exists) its
+aggregate results. For an OpenRouter run it also snapshots what the pinned
+endpoint charges and serves, fetched from OpenRouter's public model listing.
 """
 
 from __future__ import annotations
@@ -14,7 +16,9 @@ import json
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
             for key in config["families"]
         },
         "instances": dict(sorted(instances.items())),
+        "provider": config["provider"],
         "models": config["models"],
+        "request_fields": config.get("request_fields", {}),
         "treatments": list(runner.TREATMENTS),
         "limits": {
             "hard_budget_cny": config["hard_budget_cny"],
@@ -79,6 +85,43 @@ def main(argv: list[str] | None = None) -> int:
             "task_timeout_seconds": config["task_timeout_seconds"],
         },
     }
+    if config["provider"] == "openrouter":
+        # The budget gate prices the next request's worst case at the config's
+        # rates, so a config priced below the pinned endpoint's listing would
+        # let a run overspend its cap.
+        tag = config["request_fields"]["provider"]["order"][0]
+        prices: dict[str, Any] = {}
+        for key, model_id in config["models"].items():
+            with urllib.request.urlopen(
+                f"https://openrouter.ai/api/v1/models/{model_id}/endpoints", timeout=30
+            ) as response:
+                endpoints = json.load(response)["data"]["endpoints"]
+            matches = [endpoint for endpoint in endpoints if endpoint.get("tag") == tag]
+            if len(matches) != 1:
+                raise SystemExit(f"{model_id}: OpenRouter lists no single endpoint tagged {tag!r}")
+            endpoint = matches[0]
+            for field, listed in (
+                ("input_usd_per_million", "prompt"),
+                ("output_usd_per_million", "completion"),
+            ):
+                listed_per_million = Decimal(endpoint["pricing"][listed]) * 1_000_000
+                if Decimal(str(config[field])) < listed_per_million:
+                    raise SystemExit(
+                        f"{model_id}: {field} {config[field]} is below the listed {listed} "
+                        f"price of {tag} ({listed_per_million.normalize()} USD per million)"
+                    )
+            prices[key] = {
+                "model": model_id,
+                "endpoint": endpoint["name"],
+                "tag": tag,
+                "provider_name": endpoint["provider_name"],
+                "quantization": endpoint.get("quantization"),
+                "context_length": endpoint.get("context_length"),
+                "max_completion_tokens": endpoint.get("max_completion_tokens"),
+                "pricing": endpoint["pricing"],
+                "supported_parameters": endpoint.get("supported_parameters", []),
+            }
+        frozen["prices"] = prices
     if args.results is not None:
         summary_path = args.results / "summary.json"
         if summary_path.is_file():

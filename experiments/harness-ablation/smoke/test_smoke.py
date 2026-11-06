@@ -102,6 +102,24 @@ class BudgetPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(summary["actual_cost_usd"], 0.1506)
         self.assertAlmostEqual(summary["actual_cost_cny"], 1.2048)
 
+    def test_a_reported_cost_replaces_the_token_price_and_gates_admission(self):
+        policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
+        ledger = budget_proxy.UsageLedger(policy)
+        ledger.record_usage({"prompt_tokens": 1_000_000, "completion_tokens": 1_000, "cost": 0.05})
+        ledger.record_usage({"prompt_tokens": 1_000_000, "completion_tokens": 1_000})
+        summary = ledger.summary()
+        self.assertEqual(
+            {key: summary[key] for key in ("actual_cost_usd", "reported_cost_usd")},
+            {"actual_cost_usd": 0.2006, "reported_cost_usd": 0.05},
+        )
+        # Billed spend that reaches the hard budget stops the next request.
+        ledger.record_usage(
+            {"prompt_tokens": 1, "completion_tokens": 1, "cost": policy.hard_budget_cny / policy.usd_to_cny}
+        )
+        with self.assertRaises(budget_proxy.BudgetExceeded) as rejected:
+            ledger.admit({"max_tokens": 1024})
+        self.assertEqual(rejected.exception.category, "budget_limit")
+
     def test_task_quota_bounds_one_task_and_resets_per_task(self):
         policy = budget_proxy.BudgetPolicy.from_manifest(self.manifest)
         ledger = budget_proxy.UsageLedger(policy)
@@ -217,6 +235,8 @@ class _FakeUpstreamHandler(http.server.BaseHTTPRequestHandler):
     # Per forwarded request: the credential it arrived with, and the key the
     # agent reported holding (a reporting agent puts it in the body).
     seen: list[dict[str, str | None]] = []
+    # Per forwarded request: the body exactly as the proxy sent it.
+    payloads: list[dict] = []
     default_response_body = (
         b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
         b'data: {"choices":[],"usage":{"prompt_tokens":42,'
@@ -229,6 +249,7 @@ class _FakeUpstreamHandler(http.server.BaseHTTPRequestHandler):
         type(self).calls += 1
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length))
+        type(self).payloads.append(payload)
         type(self).seen.append(
             {
                 "authorization": self.headers.get("Authorization"),
@@ -253,10 +274,11 @@ class ProviderCredentialTests(unittest.TestCase):
 
     def test_each_credential_goes_only_to_its_own_providers_endpoint(self):
         upstreams = {}
-        for provider in ("deepseek", "openrouter"):
+        for provider, request_fields in (("deepseek", None), ("openrouter", _PINNED)):
             proxy = budget_proxy.start_proxy(
                 self.policy,
                 credential=budget_proxy.ProviderCredential(provider, "credential"),
+                request_fields=request_fields,
             )
             self.addCleanup(proxy.close)
             upstreams[provider] = proxy.upstream
@@ -290,10 +312,46 @@ class ProviderCredentialTests(unittest.TestCase):
         )
 
 
+# What an OpenRouter run pins on every request: one provider endpoint with no
+# fallbacks, and the reasoning mode.
+_PINNED = {
+    "provider": {"order": ["deepinfra/fp8"], "allow_fallbacks": False},
+    "reasoning": {"effort": "none"},
+}
+
+
+class OpenRouterGuardTests(unittest.TestCase):
+    def test_an_openrouter_proxy_must_pin_one_provider_and_set_reasoning(self):
+        policy = budget_proxy.BudgetPolicy.from_manifest(
+            json.loads((SMOKE_DIR / "manifest.json").read_text())
+        )
+        credential = budget_proxy.ProviderCredential("openrouter", "credential")
+        refused = {
+            "nothing pinned": None,
+            "no reasoning": {"provider": _PINNED["provider"]},
+            "no provider": {"reasoning": _PINNED["reasoning"]},
+            "fallbacks left on": {
+                "provider": {"order": ["deepinfra/fp8"]},
+                "reasoning": _PINNED["reasoning"],
+            },
+            "two providers": {
+                "provider": {"order": ["deepinfra/fp8", "venice"], "allow_fallbacks": False},
+                "reasoning": _PINNED["reasoning"],
+            },
+        }
+        for case, request_fields in refused.items():
+            with self.subTest(case), self.assertRaisesRegex(ValueError, "an OpenRouter run must"):
+                budget_proxy.start_proxy(
+                    policy, credential=credential, request_fields=request_fields
+                )
+        budget_proxy.start_proxy(policy, credential=credential, request_fields=_PINNED).close()
+
+
 class ProxyTests(unittest.TestCase):
     def setUp(self):
         _FakeUpstreamHandler.calls = 0
         _FakeUpstreamHandler.seen = []
+        _FakeUpstreamHandler.payloads = []
         _FakeUpstreamHandler.status_code = 200
         _FakeUpstreamHandler.response_body = _FakeUpstreamHandler.default_response_body
         self.upstream = http.server.ThreadingHTTPServer(
@@ -304,14 +362,14 @@ class ProxyTests(unittest.TestCase):
         )
         self.upstream_thread.start()
         manifest = json.loads((SMOKE_DIR / "manifest.json").read_text())
-        policy = budget_proxy.BudgetPolicy.from_manifest(manifest)
-        upstream_url = (
+        self.policy = budget_proxy.BudgetPolicy.from_manifest(manifest)
+        self.upstream_url = (
             f"http://127.0.0.1:{self.upstream.server_port}/chat/completions"
         )
         self.proxy = budget_proxy.start_proxy(
-            policy,
+            self.policy,
             credential=budget_proxy.ProviderCredential("deepseek", "proxy-credential"),
-            upstream=upstream_url,
+            upstream=self.upstream_url,
         )
 
     def tearDown(self):
@@ -320,10 +378,20 @@ class ProxyTests(unittest.TestCase):
         self.upstream.server_close()
         self.upstream_thread.join()
 
-    def _post(self, max_tokens, field="max_tokens"):
+    def _proxy_with(self, provider, request_fields):
+        proxy = budget_proxy.start_proxy(
+            self.policy,
+            credential=budget_proxy.ProviderCredential(provider, "proxy-credential"),
+            request_fields=request_fields,
+            upstream=self.upstream_url,
+        )
+        self.addCleanup(proxy.close)
+        return proxy
+
+    def _post(self, max_tokens, field="max_tokens", *, proxy=None, fields=None):
         request = urllib.request.Request(
-            f"{self.proxy.base_url}/chat/completions",
-            data=json.dumps({field: max_tokens, "stream": True}).encode(),
+            f"{(proxy or self.proxy).base_url}/chat/completions",
+            data=json.dumps({field: max_tokens, "stream": True, **(fields or {})}).encode(),
             headers={
                 "Authorization": "Bearer test-only",
                 "Content-Type": "application/json",
@@ -351,11 +419,60 @@ class ProxyTests(unittest.TestCase):
                 "completion_tokens": 7,
                 "actual_cost_usd": 0.0000105,
                 "actual_cost_cny": 0.000084,
+                "reported_cost_usd": 0.0,
                 "conservative_cost_cny": 1.2049152,
                 "rejection_count": 0,
                 "transport_retries": 0,
                 "task_request_counts": {},
                 "error_categories": {},
+                "served_by": {},
+            },
+        )
+
+    def test_request_fields_replace_the_agents_own(self):
+        proxy = self._proxy_with("openrouter", _PINNED)
+        with self._post(1024, proxy=proxy, fields={"reasoning": {"effort": "high"}}) as response:
+            response.read()
+        self.assertEqual(
+            _FakeUpstreamHandler.payloads,
+            [{"max_tokens": 1024, "stream": True, **_PINNED}],
+        )
+
+    def test_admission_checks_the_request_as_it_will_be_sent(self):
+        proxy = self._proxy_with("deepseek", {"max_tokens": 4096})
+        with self.assertRaises(urllib.error.HTTPError) as rejected:
+            self._post(1024, proxy=proxy)
+        self.assertEqual(rejected.exception.code, 400)
+        rejected.exception.close()
+        self.assertEqual(_FakeUpstreamHandler.calls, 0)
+
+    def test_the_billed_cost_and_what_served_the_stream_are_recorded(self):
+        _FakeUpstreamHandler.response_body = (
+            b'data: {"model":"deepseek/deepseek-v4-flash-20260423","provider":"DeepInfra",'
+            b'"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            b": OPENROUTER PROCESSING\n\n"
+            b'data: {"model":"deepseek/deepseek-v4-flash-20260423","provider":"DeepInfra",'
+            b'"choices":[{"delta":{},"finish_reason":"stop"}],'
+            b'"usage":{"prompt_tokens":42,"completion_tokens":7,"cost":0.0000125}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        with self._post(1024) as response:
+            response.read()
+        self.assertEqual(
+            self.proxy.ledger.summary(),
+            {
+                "request_count": 1,
+                "prompt_tokens": 42,
+                "completion_tokens": 7,
+                "actual_cost_usd": 0.0000125,
+                "actual_cost_cny": 0.0001,
+                "reported_cost_usd": 0.0000125,
+                "conservative_cost_cny": 1.2049152,
+                "rejection_count": 0,
+                "transport_retries": 0,
+                "task_request_counts": {},
+                "error_categories": {},
+                "served_by": {"deepseek/deepseek-v4-flash-20260423 @ DeepInfra": 1},
             },
         )
 

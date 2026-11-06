@@ -172,7 +172,9 @@ def prepare(args: argparse.Namespace) -> int:
         }
     )
     proxy = budget_proxy.start_proxy(
-        policy, credential=run_smoke.read_keychain_key(config["provider"])
+        policy,
+        credential=run_smoke.read_keychain_key(config["provider"]),
+        request_fields=config.get("request_fields"),
     )
     try:
         with predictions_path.open("a", encoding="utf-8") as out:

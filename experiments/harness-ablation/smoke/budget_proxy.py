@@ -95,6 +95,12 @@ class UsageLedger:
         self._request_count = 0
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        # Billed costs are summed as the provider reported them; the tokens of
+        # responses that reported none are priced at the policy's rates.
+        self._reported_cost_usd = 0.0
+        self._priced_prompt_tokens = 0
+        self._priced_completion_tokens = 0
+        self._served_by: dict[str, int] = {}
         self._rejection_count = 0
         self._error_categories: dict[str, int] = {}
         self._current_task: str | None = None
@@ -139,7 +145,8 @@ class UsageLedger:
             # worst case, not the cumulative worst case: a pessimistic bound on
             # every past request would stop long runs far below the real cap.
             projected_cost = (
-                self._actual_cost_cny_locked() + self._policy.worst_case_request_cny()
+                self._actual_cost_usd_locked() * self._policy.usd_to_cny
+                + self._policy.worst_case_request_cny()
             )
             if projected_cost > self._policy.hard_budget_cny:
                 self._reject("budget_limit", 402)
@@ -147,12 +154,11 @@ class UsageLedger:
             if self._current_task is not None:
                 self._task_request_counts[self._current_task] = task_used + 1
 
-    def _actual_cost_cny_locked(self) -> float:
-        usd = (
-            self._prompt_tokens * self._policy.input_usd_per_million
-            + self._completion_tokens * self._policy.output_usd_per_million
+    def _actual_cost_usd_locked(self) -> float:
+        return self._reported_cost_usd + (
+            self._priced_prompt_tokens * self._policy.input_usd_per_million
+            + self._priced_completion_tokens * self._policy.output_usd_per_million
         ) / 1_000_000
-        return usd * self._policy.usd_to_cny
 
     def record_transport_retry(self) -> None:
         """Count one re-sent request whose first attempt never answered."""
@@ -173,9 +179,25 @@ class UsageLedger:
                     self._error_categories.get("invalid_usage", 0) + 1
                 )
             return
+        # OpenRouter reports what it billed, in USD credits; a response without
+        # a billed cost is priced from its tokens.
+        cost = usage.get("cost")
+        billed = isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0
         with self._lock:
             self._prompt_tokens += max(prompt_tokens, 0)
             self._completion_tokens += max(completion_tokens, 0)
+            if billed:
+                self._reported_cost_usd += float(cost)
+            else:
+                self._priced_prompt_tokens += max(prompt_tokens, 0)
+                self._priced_completion_tokens += max(completion_tokens, 0)
+
+    def record_served(self, model: str | None, provider: str | None) -> None:
+        """Count one response under the model and provider its stream named."""
+        name = model or "unknown model"
+        key = f"{name} @ {provider}" if provider else name
+        with self._lock:
+            self._served_by[key] = self._served_by.get(key, 0) + 1
 
     def record_error(self, category: str) -> None:
         with self._lock:
@@ -183,10 +205,7 @@ class UsageLedger:
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
-            actual_cost_usd = (
-                self._prompt_tokens * self._policy.input_usd_per_million
-                + self._completion_tokens * self._policy.output_usd_per_million
-            ) / 1_000_000
+            actual_cost_usd = self._actual_cost_usd_locked()
             return {
                 "request_count": self._request_count,
                 "prompt_tokens": self._prompt_tokens,
@@ -195,6 +214,7 @@ class UsageLedger:
                 "actual_cost_cny": round(
                     actual_cost_usd * self._policy.usd_to_cny, 12
                 ),
+                "reported_cost_usd": round(self._reported_cost_usd, 12),
                 "conservative_cost_cny": round(
                     (self._request_count + self._transport_retries)
                     * self._policy.worst_case_request_cny(),
@@ -204,6 +224,7 @@ class UsageLedger:
                 "transport_retries": self._transport_retries,
                 "task_request_counts": dict(sorted(self._task_request_counts.items())),
                 "error_categories": dict(sorted(self._error_categories.items())),
+                "served_by": dict(sorted(self._served_by.items())),
             }
 
 
@@ -216,10 +237,14 @@ def redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-class _SseUsageCapture:
+class _SseCapture:
+    """Reads a response stream's usage, and the model and provider that served it."""
+
     def __init__(self) -> None:
         self._buffer = b""
         self.usage: Mapping[str, Any] | None = None
+        self.model: str | None = None
+        self.provider: str | None = None
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk
@@ -242,8 +267,16 @@ class _SseUsageCapture:
             event = json.loads(data)
         except (UnicodeDecodeError, json.JSONDecodeError):
             return
-        if isinstance(event, dict) and isinstance(event.get("usage"), dict):
+        if not isinstance(event, dict):
+            return
+        if isinstance(event.get("usage"), dict):
             self.usage = event["usage"]
+        # OpenRouter chunks name the model and the provider that served the
+        # request; a direct provider's chunks name only the model.
+        if isinstance(event.get("model"), str):
+            self.model = event["model"]
+        if isinstance(event.get("provider"), str):
+            self.provider = event["provider"]
 
 
 def open_upstream(
@@ -281,6 +314,7 @@ class _ProxyServer(http.server.ThreadingHTTPServer):
     ledger: UsageLedger
     upstream: str
     authorization: str
+    request_fields: dict[str, Any]
 
 
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -314,6 +348,11 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             self._send_error(400, "invalid_json")
             return
+        if self.proxy_server.request_fields:
+            # The configured fields replace the agent's own, and admission
+            # checks the request exactly as it will be sent.
+            payload.update(self.proxy_server.request_fields)
+            body = json.dumps(payload, separators=(",", ":")).encode()
         try:
             self.proxy_server.ledger.admit(payload)
         except BudgetExceeded as error:
@@ -356,7 +395,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Connection", "close")
         self.end_headers()
-        capture = _SseUsageCapture()
+        capture = _SseCapture()
         while True:
             try:
                 chunk = response.read(64 * 1024)
@@ -378,6 +417,8 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             and content_type.lower().startswith("text/event-stream")
         ):
             self.proxy_server.ledger.record_error("missing_usage")
+        if capture.model is not None or capture.provider is not None:
+            self.proxy_server.ledger.record_served(capture.model, capture.provider)
         self.close_connection = True
 
     def _send_error(self, status: int, category: str) -> None:
@@ -416,14 +457,16 @@ def start_proxy(
     policy: BudgetPolicy,
     *,
     credential: ProviderCredential,
+    request_fields: Mapping[str, Any] | None = None,
     upstream: str | None = None,
 ) -> ProxyHandle:
     """Start a loopback-only proxy with a pre-forward admission gate.
 
     The proxy is the only holder of the live credential: it authenticates every
     upstream request with it, whatever the client sent, and forwards only to the
-    endpoint of the credential's provider. ``upstream`` replaces that endpoint
-    with a loopback test server and nothing else.
+    endpoint of the credential's provider. ``request_fields`` are set on every
+    request before admission, replacing the agent's own values. ``upstream``
+    replaces the endpoint with a loopback test server and nothing else.
     """
     endpoint = UPSTREAMS.get(credential.provider)
     if endpoint is None:
@@ -433,11 +476,30 @@ def start_proxy(
         if target.scheme != "http" or target.hostname != "127.0.0.1":
             raise ValueError("an upstream override must be a loopback test server")
         endpoint = upstream
+    fields = dict(request_fields or {})
+    if credential.provider == "openrouter":
+        # No result may rest on an OpenRouter default: every request goes to
+        # one provider endpoint with no fallbacks, and the reasoning mode is
+        # explicit, since models differ in their default.
+        routing = fields.get("provider")
+        pinned = (
+            isinstance(routing, Mapping)
+            and isinstance(routing.get("order"), list)
+            and len(routing["order"]) == 1
+            and routing.get("allow_fallbacks") is False
+        )
+        if not pinned or not isinstance(fields.get("reasoning"), Mapping):
+            raise ValueError(
+                "an OpenRouter run must pin one provider with fallbacks off "
+                '(request_fields.provider = {"order": [<slug>], "allow_fallbacks": false}) '
+                "and set request_fields.reasoning"
+            )
     server = _ProxyServer(("127.0.0.1", 0), _ProxyHandler)
     server.policy = policy
     server.ledger = UsageLedger(policy)
     server.upstream = endpoint
     server.authorization = f"Bearer {credential.secret}"
+    server.request_fields = fields
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return ProxyHandle(

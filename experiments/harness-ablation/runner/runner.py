@@ -236,6 +236,10 @@ def summarize(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str
             "success_rate": round(sum(1 for row in rows if row.get("success")) / len(rows), 4),
             "mean_score": round(sum(float(row.get("score", 0)) for row in rows) / len(rows), 4),
         }
+    served_by: dict[str, int] = {}
+    for row in records:
+        for key, count in row.get("usage", {}).get("served_by", {}).items():
+            served_by[key] = served_by.get(key, 0) + count
     usage = {
         "prompt_tokens": sum(int(row.get("usage", {}).get("prompt_tokens", 0)) for row in records),
         "completion_tokens": sum(
@@ -244,6 +248,10 @@ def summarize(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str
         "actual_cost_cny": round(
             sum(float(row.get("usage", {}).get("actual_cost_cny", 0)) for row in records), 6
         ),
+        "reported_cost_usd": round(
+            sum(float(row.get("usage", {}).get("reported_cost_usd", 0)) for row in records), 12
+        ),
+        "served_by": dict(sorted(served_by.items())),
     }
     completed = sum(1 for row in counted if row.get("status") == "completed")
     return {
@@ -303,6 +311,7 @@ def run_matrix(
         proxy = budget_proxy.start_proxy(
             budget_policy(config),
             credential=run_smoke.read_keychain_key(config["provider"]),
+            request_fields=config.get("request_fields"),
         )
         ledger = proxy.ledger
     records: list[dict[str, Any]] = []
@@ -478,12 +487,9 @@ def run_matrix(
                     # only this cell's. A quota rejection alone is the agent
                     # running out of budget (an agent failure); any other proxy
                     # error makes the cell an infrastructure failure.
-                    before_errors = before_cell["error_categories"]
-                    errors = {
-                        category: count - before_errors.get(category, 0)
-                        for category, count in after_cell["error_categories"].items()
-                        if count > before_errors.get(category, 0)
-                    }
+                    errors = _count_delta(
+                        before_cell["error_categories"], after_cell["error_categories"]
+                    )
                     if errors:
                         record["cell_error_categories"] = errors
                         record["status"] = (
@@ -520,6 +526,21 @@ def _usage_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
         "actual_cost_cny": round(
             after["actual_cost_cny"] - before["actual_cost_cny"], 6
         ),
+        # What the provider billed, and which model and provider served the
+        # responses: provenance for runs through a router such as OpenRouter.
+        "reported_cost_usd": round(
+            after["reported_cost_usd"] - before["reported_cost_usd"], 12
+        ),
+        "served_by": _count_delta(before["served_by"], after["served_by"]),
+    }
+
+
+def _count_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    """The counts that grew from ``before`` to ``after``, by how much."""
+    return {
+        key: count - before.get(key, 0)
+        for key, count in after.items()
+        if count > before.get(key, 0)
     }
 
 
